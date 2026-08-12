@@ -1,0 +1,35 @@
+name: Lead scan
+
+# The scan is far too long for a Vercel function, so it runs here instead and
+# writes straight to Supabase. The deployed app just reads the results.
+on:
+  schedule:
+    # 2am and 2pm IST (cron here is UTC, IST is UTC+5:30).
+    - cron: "30 20 * * *"
+    - cron: "30 8 * * *"
+  workflow_dispatch:        # lets the "Run now" button in the admin tab fire this
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run the collection cycle
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NEWSAPI_AI_KEY: ${{ secrets.NEWSAPI_AI_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.0-flash' }}
+          RESULTS_PER_QUERY: "10"
+          REQUEST_DELAY_MS: "500"
+        run: node services/runOnce.js

@@ -1,0 +1,27 @@
+# Render blueprint. Point Render at this repo and it reads this file instead
+# of you filling in the form by hand.
+#
+# Data lives in Supabase, not on disk, so the free instance type is fine —
+# there's nothing to persist locally and nothing to lose when it restarts.
+services:
+  - type: web
+    name: curious-lead-intelligence
+    runtime: node
+    plan: free
+    region: singapore          # closest Render region to Mumbai
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false            # set in the dashboard, never committed
+      - key: NEWSAPI_AI_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECURE_COOKIES
+        value: "true"
+      - key: TZ_NAME
+        value: Asia/Kolkata
+      - key: NODE_VERSION
+        value: "20"
