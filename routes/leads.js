@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../lib/auth");
+const { suggestPitch } = require("../lib/pitch");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -88,6 +89,10 @@ async function queryLeads(params, user) {
     }
   }
 
+  // --- minimum score ---------------------------------------------------------
+  const minScore = Number(params.minScore || 0);
+  if (Number.isFinite(minScore) && minScore > 0) where.push(`l.score >= ${bind(minScore)}`);
+
   // --- search ----------------------------------------------------------------
   if (params.q) {
     const q = bind(`%${String(params.q).toLowerCase()}%`);
@@ -96,7 +101,9 @@ async function queryLeads(params, user) {
 
   const sortMap = {
     score: "l.score DESC, l.last_signal_at DESC NULLS LAST",
+    score_asc: "l.score ASC, LOWER(c.name) ASC",
     recent: "l.last_signal_at DESC NULLS LAST, l.score DESC",
+    added: "c.created_at DESC, LOWER(c.name) ASC",
     company: "LOWER(c.name) ASC",
     followup: "l.next_followup_at ASC NULLS LAST",
   };
@@ -107,6 +114,8 @@ async function queryLeads(params, user) {
             l.contact_email, l.contact_phone, l.last_contacted_at,
             l.next_followup_at, l.last_signal_at, l.score,
             c.name AS company, c.id AS company_id, c.origin, c.approval,
+            c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
+            c.created_at AS added_at,
             u.display_name AS owner_name,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
@@ -145,7 +154,12 @@ async function queryLeads(params, user) {
     if (!byLead.has(s.lead_id)) byLead.set(s.lead_id, []);
     byLead.get(s.lead_id).push(s);
   }
-  for (const lead of leads) lead.signals = byLead.get(lead.id) || [];
+  for (const lead of leads) {
+    lead.signals = byLead.get(lead.id) || [];
+    const top = lead.signals[0] || null;
+    lead.top_signal = top;
+    lead.pitch = suggestPitch(lead.company, top && top.signal_type);
+  }
 
   return leads;
 }
@@ -162,6 +176,8 @@ router.get("/:id", async (req, res, next) => {
   try {
     const lead = await db.one(
       `SELECT l.*, c.name AS company, c.keywords, c.origin, c.approval,
+              c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
+              c.created_at AS added_at,
               u.display_name AS owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
@@ -190,6 +206,10 @@ router.get("/:id", async (req, res, next) => {
 
     lead.signals = signals;
     lead.activity = activity;
+    lead.pitch = suggestPitch(
+      lead.company,
+      signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0].signal_type : null
+    );
     res.json({ lead });
   } catch (err) {
     next(err);

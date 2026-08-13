@@ -37,7 +37,9 @@ const state = {
   freshness: null,
   types: new Set(),
   statuses: new Set(),
+  minScore: 0,
   sort: "score",
+  scanning: false,
   team: [],
   openLeadId: null,
   runPoll: null,
@@ -123,7 +125,6 @@ function scoreClass(n) {
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 (async function boot() {
-  buildFilterChips();
   wireEvents();
 
   try {
@@ -149,16 +150,6 @@ async function enterApp(user) {
     .catch(() => { state.team = []; });
 
   await Promise.all([team, refresh()]);
-}
-
-function buildFilterChips() {
-  $("#types").innerHTML = SIGNAL_TYPES.map(
-    ([v, l]) => `<button class="chip" data-type="${v}">${l}</button>`
-  ).join("");
-
-  $("#statuses").innerHTML = STATUSES.map(
-    ([v, l]) => `<button class="chip" data-status="${v}">${l}</button>`
-  ).join("");
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -195,69 +186,42 @@ function wireEvents() {
     state.tab = btn.dataset.tab;
     $$(".tab").forEach((t) => t.classList.toggle("is-active", t === btn));
     $("#layout").classList.toggle("is-wide", state.tab === "admin");
-    syncFilterVisibility();
     refresh();
   });
 
+  // The filter bar and action bar are re-rendered with every list, so their
+  // handlers are delegated from #content rather than bound to the elements.
   let searchTimer;
-  $("#search").addEventListener("input", (e) => {
+  $("#content").addEventListener("input", (e) => {
+    if (e.target.id !== "f-search") return;
     clearTimeout(searchTimer);
+    const v = e.target.value.trim();
     searchTimer = setTimeout(() => {
-      state.search = e.target.value.trim();
-      renderContent();
-    }, 260);
+      state.search = v;
+      renderContent({ keepFocus: "f-search" });
+    }, 280);
   });
 
-  $("#filters").addEventListener("change", (e) => {
-    const box = e.target.closest("[data-hygiene]");
-    if (!box) return;
-    box.checked ? state.hygiene.add(box.dataset.hygiene) : state.hygiene.delete(box.dataset.hygiene);
+  $("#content").addEventListener("change", (e) => {
+    const el = e.target;
+    if (el.id === "f-min") state.minScore = Number(el.value);
+    else if (el.id === "f-type") {
+      state.types.clear();
+      if (el.value) state.types.add(el.value);
+    } else if (el.id === "f-sort") state.sort = el.value;
+    else if (el.dataset.stageFor) return;      // handled in the click/change below
+    else return;
     renderContent();
   });
 
-  $("#filters").addEventListener("click", (e) => {
-    const chip = e.target.closest(".chip");
-    if (!chip) return;
-
-    if (chip.dataset.freshness) {
-      const v = chip.dataset.freshness;
-      state.freshness = state.freshness === v ? null : v;
-      $$("#freshness .chip").forEach((c) =>
-        c.classList.toggle("is-on", c.dataset.freshness === state.freshness)
-      );
-    } else if (chip.dataset.type) {
-      toggleSet(state.types, chip.dataset.type, chip);
-    } else if (chip.dataset.status) {
-      toggleSet(state.statuses, chip.dataset.status, chip);
-    } else return;
-
-    renderContent();
-  });
-
-  $("#clear-filters").addEventListener("click", () => {
-    state.search = "";
-    state.hygiene.clear();
-    state.freshness = null;
-    state.types.clear();
-    state.statuses.clear();
-    $("#search").value = "";
-    $$("#filters input[type=checkbox]").forEach((c) => (c.checked = false));
-    $$("#filters .chip").forEach((c) => c.classList.remove("is-on"));
-    renderContent();
-  });
+  // Bound once on the container — the list inside is replaced on every render,
+  // so binding per render would stack duplicate handlers.
+  $("#content").addEventListener("click", onCardClick);
 
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
   });
-}
-
-/** The signals feed has no outreach state, so those filters are hidden there. */
-function syncFilterVisibility() {
-  const outreachy = state.tab !== "signals";
-  $$("#filters .filter-group")[0].hidden = !outreachy;   // outreach hygiene
-  $$("#filters .filter-group")[3].hidden = !outreachy;   // status
-  $("#search").placeholder = outreachy ? "Search company\u2026" : "Search company or headline\u2026";
 }
 
 function toggleSet(set, value, chip) {
@@ -285,6 +249,8 @@ async function loadStats() {
     $('[data-count="today"]').textContent = data.totals.today;
     state.schedule = data.schedule;
     state.run = data.run;
+    state.lastRun = data.run.last;
+    if (data.run.running && !state.scanning) { state.scanning = true; pollRun(); }
   } catch (err) {
     if (err.status === 401) location.reload();
   }
@@ -292,21 +258,97 @@ async function loadStats() {
 
 function currentQuery() {
   const p = new URLSearchParams();
-  p.set("tab", state.tab === "signals" ? "all" : state.tab);
+  p.set("tab", state.tab);
   if (state.search) p.set("q", state.search);
   if (state.freshness) p.set("freshness", state.freshness);
   if (state.types.size) p.set("types", [...state.types].join(","));
   if (state.statuses.size) p.set("status", [...state.statuses].join(","));
   if (state.hygiene.size) p.set("hygiene", [...state.hygiene].join(","));
+  if (state.minScore) p.set("minScore", String(state.minScore));
   p.set("sort", state.sort);
   return p.toString();
 }
 
-async function renderContent() {
+// ── Page furniture ─────────────────────────────────────────────────────────
+
+const PAGE_COPY = {
+  all: ["All Leads", "Your database, scored by how likely they are to buy right now."],
+  today: ["Today's Leads", "Companies found in the news that aren't in your database yet."],
+  mine: ["My Outreach", "Leads you've claimed. Everyone can see them; only you own them."],
+};
+
+function actionBar() {
+  const [title, desc] = PAGE_COPY[state.tab] || ["Leads", ""];
+  const run = state.lastRun;
+
+  return `
+    <div class="action-bar">
+      <div class="action-bar-left">
+        <h1 class="page-title">${esc(title)}</h1>
+        <p class="page-desc">${esc(desc)}</p>
+        <p class="scan-status">
+          <span class="scan-dot"></span>
+          ${
+            run && run.finished_at
+              ? `Last scan ${esc(timeAgo(run.finished_at))} · ${run.new_signals} new signal${
+                  run.new_signals === 1 ? "" : "s"
+                }`
+              : "No scan yet — one starts when you sign in"
+          }
+        </p>
+      </div>
+      ${
+        state.tab === "all" && state.user.role === "admin"
+          ? `<div class="action-bar-right">
+               <input type="file" id="ab-csv" accept=".csv,text/csv" class="upload-input" />
+               <button class="btn" id="ab-upload">${uploadIcon()} Add more companies (CSV)</button>
+               <button class="btn btn-primary" id="ab-scan" ${state.scanning ? "disabled" : ""}>
+                 ${scanIcon()} ${state.scanning ? "Scanning…" : "Scan for signals"}
+               </button>
+             </div>`
+          : ""
+      }
+    </div>`;
+}
+
+function filterBar() {
+  const typeOptions = SIGNAL_TYPES.map(
+    ([v, l]) => `<option value="${v}">${esc(l)}</option>`
+  ).join("");
+
+  return `
+    <div class="filter-bar">
+      <input class="search-input" id="f-search" type="search"
+             placeholder="Search company name…" value="${esc(state.search)}" />
+
+      <span class="filter-label">Min score</span>
+      <select class="filter-select" id="f-min">
+        <option value="0">Any</option>
+        <option value="40">40+</option>
+        <option value="60">60+ (Warm)</option>
+        <option value="80">80+ (Hot)</option>
+      </select>
+
+      <span class="filter-label">Signal</span>
+      <select class="filter-select" id="f-type">
+        <option value="">Any</option>
+        ${typeOptions}
+      </select>
+
+      <span class="filter-label">Sort</span>
+      <select class="filter-select" id="f-sort">
+        <option value="score">Highest score</option>
+        <option value="score_asc">Lowest score</option>
+        <option value="recent">Newest signal</option>
+        <option value="added">Recently added</option>
+        <option value="company">Company name (A–Z)</option>
+      </select>
+    </div>`;
+}
+
+async function renderContent(opts = {}) {
   const content = $("#content");
   if (state.tab === "admin") return renderAdmin();
-
-  content.innerHTML = `<div class="empty"><p>Loading…</p></div>`;
 
   let leads;
   try {
@@ -316,31 +358,244 @@ async function renderContent() {
     return;
   }
 
-  if (!leads.length) return content.replaceChildren(emptyState());
+  const body = !leads.length
+    ? emptyState().outerHTML
+    : state.tab === "mine"
+    ? `<div class="mylead-grid">${leads.map(myLeadCard).join("")}</div>`
+    : leadTable(leads);
 
-  content.innerHTML = `
-    <div class="list-head">
-      <p>${leads.length} lead${leads.length === 1 ? "" : "s"}${
-        state.tab === "today" ? " found in the news — not in your database yet" : ""
-      }${state.tab === "all" ? " in your database" : ""}</p>
-      <div class="list-head-actions">
-        <select class="sort-select" id="sort">
-          <option value="score">Sort: signal strength</option>
-          <option value="recent">Sort: newest signal</option>
-          <option value="followup">Sort: follow-up date</option>
-          <option value="company">Sort: company A–Z</option>
-        </select>
+  content.innerHTML = actionBar() + filterBar() + body;
+
+  // Restore the control values — innerHTML wipes them every render.
+  $("#f-min").value = String(state.minScore);
+  $("#f-type").value = [...state.types][0] || "";
+  $("#f-sort").value = state.sort;
+
+  if (opts.keepFocus) {
+    const el = $("#" + opts.keepFocus);
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }
+
+  content.querySelectorAll("[data-lead]").forEach(() => {});   // no-op, kept for clarity
+  wireListActions();
+}
+
+/** All Leads and Today's Leads: a scannable table, signals hidden behind Inspect. */
+function leadTable(leads) {
+  return `
+    <div class="lead-table-wrap">
+      <div class="lead-row-head">
+        <span>Company</span><span>Score</span><span>Top signal</span><span></span>
       </div>
-    </div>
-    <div class="cards">${leads.map(leadCard).join("")}</div>`;
+      ${leads
+        .map(
+          (lead) => `
+        <div class="lead-row" data-lead="${lead.id}">
+          <div class="company-cell">
+            <span class="company-name">${esc(lead.company)}</span>
+            <span class="company-meta">
+              Added ${esc(shortDate(lead.added_at))}${
+            lead.last_signal_at ? ` · Scanned ${esc(shortDate(lead.last_signal_at))}` : ""
+          }
+            </span>
+          </div>
 
-  $("#sort").value = state.sort;
-  $("#sort").addEventListener("change", (e) => {
-    state.sort = e.target.value;
-    renderContent();
+          <div>${scoreBadge(lead.score)}</div>
+
+          <div class="signal-cell">
+            ${
+              lead.top_signal
+                ? `<span class="type-tag type-${esc(lead.top_signal.signal_type)}">${esc(
+                    typeLabel(lead.top_signal.signal_type)
+                  )}</span>
+                   <span class="signal-title">${esc(lead.top_signal.title || "Untitled")}</span>`
+                : `<span class="signal-none">Scan to find signals</span>`
+            }
+          </div>
+
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" data-act="open" data-id="${lead.id}">Inspect</button>
+            ${
+              lead.owner_id === state.user.id
+                ? `<button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
+                : `<button class="btn btn-sm" data-act="claim" data-id="${lead.id}">${
+                    lead.owner_id ? "Take over" : "Add to My Leads"
+                  }</button>`
+            }
+          </div>
+        </div>`
+        )
+        .join("")}
+    </div>`;
+}
+
+/** My Outreach: the working view — signals, what to pitch, stage, contacts. */
+function myLeadCard(lead) {
+  const signals = lead.signals || [];
+
+  return `
+    <div class="mylead-card" data-lead="${lead.id}">
+      <div class="mylead-top">
+        <div class="mylead-heading">
+          <div class="company-name">
+            ${esc(lead.company)}
+            ${lead.new_count > 0 ? `<span class="new-pill">${lead.new_count} new</span>` : ""}
+          </div>
+          <div class="mylead-meta">
+            ${lead.signal_count} signal${lead.signal_count === 1 ? "" : "s"}${
+    lead.last_signal_at ? ` · Last scanned ${esc(shortDate(lead.last_signal_at))}` : " · Not scanned yet"
+  }
+          </div>
+        </div>
+        ${scoreBadge(lead.score)}
+      </div>
+
+      <div class="mylead-signals">
+        <div class="signal-list-label">Signals</div>
+        ${
+          signals.length
+            ? signals
+                .map(
+                  (sig) => `
+          <div class="mylead-signal-row">
+            <div class="mylead-signal-row-top">
+              <span class="type-tag type-${esc(sig.signal_type)}">${esc(typeLabel(sig.signal_type))}</span>
+              <span class="mylead-signal-date">${esc(timeAgo(sig.published || sig.created_at))}</span>
+            </div>
+            <a class="mylead-signal-title" href="${esc(sig.url)}" target="_blank" rel="noopener">${esc(
+                    sig.title || "Untitled"
+                  )}</a>
+          </div>`
+                )
+                .join("")
+            : `<div class="signal-none">Nothing yet — the next scan will fill this in.</div>`
+        }
+        ${
+          lead.signal_count > signals.length
+            ? `<button class="btn btn-ghost btn-sm mylead-more" data-act="open" data-id="${lead.id}">Show all ${lead.signal_count}</button>`
+            : ""
+        }
+      </div>
+
+      ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
+
+      <div class="mylead-bottom">
+        <button class="btn btn-sm" data-act="open" data-id="${lead.id}">
+          ${lead.contact_name ? esc(lead.contact_name) : "+ Add contact"}
+        </button>
+        <div class="stage-block">
+          <span class="filter-label">Execution stage</span>
+          <select class="filter-select stage-select" data-stage-for="${lead.id}">
+            ${STATUSES.map(
+              ([v, l]) => `<option value="${v}" ${v === lead.status ? "selected" : ""}>${esc(l)}</option>`
+            ).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div class="mylead-actions">
+        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${lead.id}">View raw signals</button>
+        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-id="${lead.id}">Release lead</button>
+      </div>
+    </div>`;
+}
+
+function wireListActions() {
+  const content = $("#content");
+
+  const upload = $("#ab-upload");
+  if (upload) {
+    upload.addEventListener("click", () => $("#ab-csv").click());
+    $("#ab-csv").addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        const csv = await file.text();
+        const r = await api("/api/admin/import", { method: "POST", body: { csv } });
+        toast(`${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}, ${r.contactsAdded} new contacts`);
+        refresh();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  }
+
+  const scan = $("#ab-scan");
+  if (scan) {
+    scan.addEventListener("click", async () => {
+      state.scanning = true;
+      renderContent();
+      try {
+        await api("/api/admin/run", { method: "POST" });
+        toast("Scanning — this takes a few minutes");
+        pollRun();
+      } catch (err) {
+        state.scanning = false;
+        toast(err.message, true);
+        renderContent();
+      }
+    });
+  }
+
+  content.querySelectorAll("[data-stage-for]").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      try {
+        await api(`/api/leads/${sel.dataset.stageFor}`, {
+          method: "PATCH",
+          body: { status: sel.value },
+        });
+        toast("Stage updated");
+        loadStats();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
   });
+}
 
-  $(".cards").addEventListener("click", onCardClick);
+/** Watches a running cycle so the button and counts settle on their own. */
+function pollRun() {
+  clearInterval(state.runPoll);
+  state.runPoll = setInterval(async () => {
+    try {
+      const { run } = await api("/api/stats");
+      if (!run.running) {
+        clearInterval(state.runPoll);
+        state.scanning = false;
+        state.lastRun = run.last;
+        toast("Scan finished");
+        refresh();
+      }
+    } catch {
+      clearInterval(state.runPoll);
+      state.scanning = false;
+    }
+  }, 4000);
+}
+
+function scoreBadge(n) {
+  return `<span class="score ${scoreClass(n)}">${n}<small>score</small></span>`;
+}
+
+function shortDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return "—";
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function uploadIcon() {
+  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M12 16V4M12 4l-4 4M12 4l4 4M5 18v1a2 2 0 002 2h10a2 2 0 002-2v-1"
+      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function scanIcon() {
+  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="2"/>
+    <path d="M4 8V6a2 2 0 012-2h2M20 8V6a2 2 0 00-2-2h-2M4 16v2a2 2 0 002 2h2M20 16v2a2 2 0 01-2 2h-2"
+      stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
 }
 
 function emptyState() {
@@ -376,70 +631,6 @@ function emptyState() {
 
 // ── Lead card ──────────────────────────────────────────────────────────────
 
-function leadCard(lead) {
-  const owner = lead.owner_name
-    ? `<span class="owner"><span class="avatar">${esc(initials(lead.owner_name))}</span>${esc(lead.owner_name)}</span>`
-    : `<span class="owner"><span class="avatar unclaimed">?</span>Unclaimed</span>`;
-
-  const followup = lead.next_followup_at
-    ? `<span class="sep">·</span>Follow up ${esc(dateOnly(lead.next_followup_at))}`
-    : "";
-
-  const contact = lead.contact_name
-    ? `<span class="sep">·</span>${esc(lead.contact_name)}${lead.contact_role ? ` (${esc(lead.contact_role)})` : ""}`
-    : "";
-
-  const signals = lead.signals
-    .map(
-      (s) => `
-      <div class="sig-row">
-        <span class="type-tag type-${esc(s.signal_type)}">${esc(typeLabel(s.signal_type))}</span>
-        <div class="sig-body">
-          <p class="sig-title">${esc(s.title || "Untitled article")}</p>
-          <p class="sig-sub">${esc(s.summary || "")}</p>
-          ${s.why_it_matters ? `<p class="sig-why">${esc(s.why_it_matters)}</p>` : ""}
-        </div>
-      </div>`
-    )
-    .join("");
-
-  return `
-    <article class="lead" data-id="${lead.id}">
-      <div class="lead-top">
-        <div>
-          <h3 class="lead-name">
-            ${esc(lead.company)}
-            <span class="tag tag-${esc(lead.status)}">${esc(statusLabel(lead.status))}</span>
-            ${lead.new_count > 0 ? `<span class="tag tag-fresh">${lead.new_count} new</span>` : ""}
-            ${lead.approval === "pending" ? `<span class="tag tag-discovered">Discovered</span>` : ""}
-          </h3>
-          <p class="lead-meta">
-            ${lead.signal_count} signal${lead.signal_count === 1 ? "" : "s"}
-            <span class="sep">·</span>last ${esc(timeAgo(lead.last_signal_at))}
-            ${contact}${followup}
-          </p>
-        </div>
-        <span class="score ${scoreClass(lead.score)}">${lead.score}<small>score</small></span>
-      </div>
-
-      ${signals ? `<div class="lead-signals">${signals}</div>` : ""}
-
-      <div class="lead-foot">
-        ${owner}
-        <div class="lead-actions">
-          ${
-            lead.owner_id === state.user.id
-              ? `<button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
-              : lead.owner_id
-              ? `<button class="btn btn-sm" data-act="claim" data-id="${lead.id}">Take over</button>`
-              : `<button class="btn btn-sm" data-act="claim" data-id="${lead.id}">Claim</button>`
-          }
-          <button class="btn btn-sm btn-primary" data-act="open" data-id="${lead.id}">Open</button>
-        </div>
-      </div>
-    </article>`;
-}
-
 async function onCardClick(e) {
   const actionBtn = e.target.closest("[data-act]");
   if (actionBtn) {
@@ -457,11 +648,36 @@ async function onCardClick(e) {
     return;
   }
 
-  const card = e.target.closest(".lead");
-  if (card) openDrawer(card.dataset.id);
+  const row = e.target.closest("[data-lead]");
+  if (row) openDrawer(row.dataset.lead);
 }
 
 // ── Drawer ─────────────────────────────────────────────────────────────────
+
+/** The firmographics panel — everything the CSV knew about the company. */
+function companyInfoCard(lead) {
+  const rows = [
+    ["Industry", lead.industry],
+    ["Employees", lead.employees],
+    ["Revenue", lead.revenue],
+    ["Domain", lead.domain || lead.website],
+  ].filter(([, v]) => v);
+
+  if (!rows.length && !lead.linkedin) return "";
+
+  return `
+    <div class="company-info-card">
+      ${rows
+        .map(([k, v]) => `<div class="company-info-line"><span>${esc(k)}</span>${esc(v)}</div>`)
+        .join("")}
+      ${
+        lead.linkedin
+          ? `<div class="company-info-line"><span>LinkedIn</span>
+               <a href="${esc(lead.linkedin)}" target="_blank" rel="noopener">Company page →</a></div>`
+          : ""
+      }
+    </div>`;
+}
 
 function closeDrawer() {
   $("#drawer").hidden = true;
@@ -515,6 +731,10 @@ function drawerHtml(lead) {
   </div>
 
   <div class="drawer-body">
+
+    ${companyInfoCard(lead)}
+
+    ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
 
     <section class="block">
       <h3>Ownership</h3>

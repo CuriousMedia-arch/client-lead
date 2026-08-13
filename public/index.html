@@ -79,42 +79,7 @@
     <button class="tab" data-tab="admin" id="tab-admin">Admin</button>
   </nav>
 
-  <main class="layout" id="layout">
-
-    <aside class="filters" id="filters">
-      <input class="search" id="search" type="search" placeholder="Search company…" />
-
-      <div class="filter-group">
-        <p class="filter-title">Outreach hygiene</p>
-        <label class="check"><input type="checkbox" data-hygiene="stale30" /> Not contacted in 30 days</label>
-        <label class="check"><input type="checkbox" data-hygiene="unclaimed" /> Unclaimed only</label>
-        <label class="check"><input type="checkbox" data-hygiene="mine" /> Assigned to me</label>
-        <label class="check"><input type="checkbox" data-hygiene="followup" /> Follow-up due</label>
-        <label class="check"><input type="checkbox" data-hygiene="hascontact" /> Has a contact on file</label>
-      </div>
-
-      <div class="filter-group">
-        <p class="filter-title">Signal freshness</p>
-        <div class="chips" id="freshness">
-          <button class="chip" data-freshness="24h">Last 24h</button>
-          <button class="chip" data-freshness="48h">Last 48h</button>
-          <button class="chip" data-freshness="7d">Last 7 days</button>
-          <button class="chip" data-freshness="30d">Last 30 days</button>
-        </div>
-      </div>
-
-      <div class="filter-group">
-        <p class="filter-title">Signal type</p>
-        <div class="chips" id="types"></div>
-      </div>
-
-      <div class="filter-group">
-        <p class="filter-title">Status</p>
-        <div class="chips" id="statuses"></div>
-      </div>
-
-      <button class="btn btn-quiet btn-block" id="clear-filters">Clear filters</button>
-    </aside>
+  <main class="layout is-wide" id="layout">
 
     <section class="content" id="content"></section>
   </main>

@@ -271,16 +271,25 @@ router.post("/import", async (req, res, next) => {
         // Existing companies keep their name and approval, but pick up any
         // keywords the sheet adds. A company already rejected stays rejected.
         const { rows } = await q(
-          `INSERT INTO companies (name, keywords, active, origin, approval)
-           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved')
+          `INSERT INTO companies
+             (name, keywords, active, origin, approval,
+              domain, website, linkedin, employees, revenue, industry)
+           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8)
            ON CONFLICT (lower(name)) DO UPDATE
-              SET keywords = $2::jsonb,
-                  active   = CASE WHEN companies.approval = 'rejected'
-                                  THEN companies.active ELSE true END,
-                  approval = CASE WHEN companies.approval = 'rejected'
-                                  THEN 'rejected' ELSE 'approved' END
+              SET keywords  = $2::jsonb,
+                  domain    = COALESCE(EXCLUDED.domain,    companies.domain),
+                  website   = COALESCE(EXCLUDED.website,   companies.website),
+                  linkedin  = COALESCE(EXCLUDED.linkedin,  companies.linkedin),
+                  employees = COALESCE(EXCLUDED.employees, companies.employees),
+                  revenue   = COALESCE(EXCLUDED.revenue,   companies.revenue),
+                  industry  = COALESCE(EXCLUDED.industry,  companies.industry),
+                  active    = CASE WHEN companies.approval = 'rejected'
+                                   THEN companies.active ELSE true END,
+                  approval  = CASE WHEN companies.approval = 'rejected'
+                                   THEN 'rejected' ELSE 'approved' END
            RETURNING id, (xmax = 0) AS inserted`,
-          [c.name, JSON.stringify(c.keywords)]
+          [c.name, JSON.stringify(c.keywords), c.domain, c.website, c.linkedin,
+           c.employees, c.revenue, c.industry]
         );
         if (rows[0].inserted) companiesAdded++;
       }
