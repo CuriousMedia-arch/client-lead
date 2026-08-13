@@ -233,62 +233,15 @@ a { color: var(--teal); }
 
 /* ── Layout ──────────────────────────────────────────────────────────────── */
 
+/* Single column. The filter sidebar was replaced by the horizontal filter
+   bar, so there is no second track to reserve — leaving the old 244px column
+   in place squeezed the whole page into it. */
 .layout {
-  display: grid;
-  grid-template-columns: 244px minmax(0, 1fr);
-  gap: 20px;
+  display: block;
   max-width: 1180px;
   margin: 0 auto;
   padding: 20px 28px 60px;
-  align-items: start;
 }
-
-.layout.is-wide { grid-template-columns: minmax(0, 1fr); }
-.layout.is-wide .filters { display: none; }
-
-/* ── Filters ─────────────────────────────────────────────────────────────── */
-
-.filters {
-  position: sticky;
-  top: 88px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px;
-}
-
-.search {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  padding: 9px 12px;
-  font-size: 13.5px;
-  background: var(--surface-sunk);
-  color: var(--ink);
-}
-.search:focus { background: #fff; }
-
-.filter-group { margin-top: 18px; }
-
-.filter-title {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  color: var(--ink-faint);
-  margin: 0 0 9px;
-}
-
-.check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--ink-soft);
-  padding: 4px 0;
-  cursor: pointer;
-}
-.check input { accent-color: var(--teal); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
@@ -876,8 +829,6 @@ table.mini tr:last-child td { border-bottom: none; }
 
 @media (max-width: 900px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
-  .layout { grid-template-columns: minmax(0, 1fr); }
-  .filters { position: static; }
   .grid-2 { grid-template-columns: 1fr; }
 }
 

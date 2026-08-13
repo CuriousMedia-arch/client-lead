@@ -185,7 +185,6 @@ function wireEvents() {
     if (!btn) return;
     state.tab = btn.dataset.tab;
     $$(".tab").forEach((t) => t.classList.toggle("is-active", t === btn));
-    $("#layout").classList.toggle("is-wide", state.tab === "admin");
     refresh();
   });
 
