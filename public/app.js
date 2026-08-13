@@ -31,7 +31,7 @@ const KIND_ICON = {
 
 const state = {
   user: null,
-  tab: "today",
+  tab: "all",
   search: "",
   hygiene: new Set(),
   freshness: null,
@@ -170,11 +170,14 @@ function wireEvents() {
     const errBox = $("#login-error");
     errBox.hidden = true;
     try {
-      const { user } = await api("/api/auth/login", {
+      const { user, scan } = await api("/api/auth/login", {
         method: "POST",
         body: { username: form.get("username"), password: form.get("password") },
       });
       await enterApp(user);
+      // A stale watchlist triggers a fresh sweep at sign-in; say so, because
+      // the numbers on screen will move on their own a few minutes later.
+      if (scan && scan.started) toast("Scanning for new signals — this takes a few minutes");
     } catch (err) {
       errBox.textContent = err.message;
       errBox.hidden = false;
@@ -279,7 +282,7 @@ async function loadStats() {
     $('[data-count="today"]').textContent = data.stats.newIn24h;
     $('[data-count="all"]').textContent = data.totals.leads;
     $('[data-count="mine"]').textContent = data.totals.mine;
-    $('[data-count="fresh"]').textContent = data.totals.fresh;
+    $('[data-count="today"]').textContent = data.totals.today;
     state.schedule = data.schedule;
     state.run = data.run;
   } catch (err) {
@@ -302,7 +305,6 @@ function currentQuery() {
 async function renderContent() {
   const content = $("#content");
   if (state.tab === "admin") return renderAdmin();
-  if (state.tab === "signals") return renderSignals();
 
   content.innerHTML = `<div class="empty"><p>Loading…</p></div>`;
 
@@ -319,12 +321,8 @@ async function renderContent() {
   content.innerHTML = `
     <div class="list-head">
       <p>${leads.length} lead${leads.length === 1 ? "" : "s"}${
-        state.tab === "today" ? " with something new since yesterday" : ""
-      }${
-        state.tab === "fresh"
-          ? " found in the news — not on your watchlist yet"
-          : ""
-      }</p>
+        state.tab === "today" ? " found in the news — not in your database yet" : ""
+      }${state.tab === "all" ? " in your database" : ""}</p>
       <div class="list-head-actions">
         <select class="sort-select" id="sort">
           <option value="score">Sort: signal strength</option>
@@ -351,12 +349,12 @@ function emptyState() {
 
   const copy = {
     today: [
-      "Nothing new since the last refresh",
-      `The next cycle runs at 2am and 2pm. Check All Leads for what's still open.`,
+      "No new companies found yet",
+      "A scan runs when you sign in. Companies found in the news that aren't in your database will land here for you to approve.",
     ],
     all: [
-      "No leads match these filters",
-      "Loosen the filters, or run a cycle from the Admin tab to pull fresh coverage.",
+      "Nothing in your database yet",
+      "Upload your contact sheet from the Admin tab and every company in it becomes a lead, with its people attached.",
     ],
     mine: [
       "You haven't claimed anything yet",
@@ -461,70 +459,6 @@ async function onCardClick(e) {
 
   const card = e.target.closest(".lead");
   if (card) openDrawer(card.dataset.id);
-}
-
-// ── Signals feed ───────────────────────────────────────────────────────────
-
-async function renderSignals() {
-  const content = $("#content");
-  content.innerHTML = `<div class="empty"><p>Loading…</p></div>`;
-
-  const p = new URLSearchParams();
-  if (state.search) p.set("q", state.search);
-  if (state.freshness) p.set("freshness", state.freshness);
-  if (state.types.size) p.set("types", [...state.types].join(","));
-
-  let signals, breakdown;
-  try {
-    [{ signals }, breakdown] = await Promise.all([
-      api(`/api/signals?${p}`),
-      api("/api/signals/breakdown"),
-    ]);
-  } catch (err) {
-    content.innerHTML = `<div class="empty"><h2>Couldn't load signals</h2><p>${esc(err.message)}</p></div>`;
-    return;
-  }
-
-  if (!signals.length) {
-    content.innerHTML = `<div class="empty">
-      <h2>No signals stored yet</h2>
-      <p>Run a cycle from the Admin tab to pull articles from your watchlist.</p>
-    </div>`;
-    return;
-  }
-
-  const spread = breakdown.byType
-    .map((t) => `<span class="type-tag type-${esc(t.signal_type)}">${esc(typeLabel(t.signal_type))} ${t.n}</span>`)
-    .join(" ");
-
-  content.innerHTML = `
-    <div class="list-head">
-      <p>${signals.length} article${signals.length === 1 ? "" : "s"} · last 30 days: ${spread}</p>
-    </div>
-    <div class="feed">
-      ${signals
-        .map(
-          (s) => `
-        <article class="feed-item">
-          <div class="feed-top">
-            <div>
-              <span class="feed-company">${esc(s.company)}</span>
-              <h3 class="feed-title"><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || "Untitled article")}</a></h3>
-              ${s.summary ? `<p class="feed-sub">${esc(s.summary)}</p>` : ""}
-              ${s.why_it_matters ? `<p class="sig-why">${esc(s.why_it_matters)}</p>` : ""}
-              <p class="feed-meta">
-                <span class="type-tag type-${esc(s.signal_type)}">${esc(typeLabel(s.signal_type))}</span>
-                <span>${esc(s.site || "")}</span>
-                ${s.author ? `<span>· ${esc(s.author)}</span>` : ""}
-                <span>· ${esc(timeAgo(s.published || s.created_at))}</span>
-              </p>
-            </div>
-            <span class="score ${scoreClass(s.score)}">${s.score}<small>score</small></span>
-          </div>
-        </article>`
-        )
-        .join("")}
-    </div>`;
 }
 
 // ── Drawer ─────────────────────────────────────────────────────────────────
@@ -635,7 +569,7 @@ function drawerHtml(lead) {
     </section>
 
     <section class="block">
-      <h3>All signals</h3>
+      <h3>Raw signals</h3>
       <div class="sig-list">
         ${
           lead.signals.length
@@ -850,6 +784,20 @@ async function renderAdmin() {
         : ""
     }
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>Import your contact sheet</h3>
+      <p class="hint">
+        Export the sheet as CSV and drop it here. Every <strong>Company name</strong> becomes a
+        lead in All Leads, and every person on that row is filed against it as a POC.
+        Re-uploading is safe — it adds what's new and tops up what's already there.
+      </p>
+      <div class="inline-form">
+        <input type="file" id="csv-file" accept=".csv,text/csv" />
+        <button class="btn btn-primary" id="csv-go">Upload</button>
+      </div>
+      <div id="csv-result"></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <div class="runbar">
         <div>
           <h3>Collection cycle</h3>
@@ -1048,9 +996,35 @@ function wireAdmin() {
     guard(() => api("/api/admin/topics/toggle-all", { method: "POST", body: { active: false } }))
   );
 
-  root.addEventListener("click", (e) => {
+  root.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
+
+    if (btn.id === "csv-go") {
+      const input = $("#csv-file");
+      const file = input.files && input.files[0];
+      const out = $("#csv-result");
+      if (!file) return toast("Pick a CSV file first.", true);
+
+      out.innerHTML = `<p class="hint" style="margin-top:12px">Reading ${esc(file.name)}…</p>`;
+      try {
+        const csv = await file.text();
+        const r = await api("/api/admin/import", { method: "POST", body: { csv } });
+        out.innerHTML = `<p class="hint" style="margin-top:12px">
+          <strong style="color:var(--teal)">Done.</strong>
+          ${r.companies} compan${r.companies === 1 ? "y" : "ies"} (${r.companiesAdded} new),
+          ${r.contacts} contact${r.contacts === 1 ? "" : "s"} (${r.contactsAdded} new)${
+            r.skipped ? `, ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped with no company name` : ""
+          }.
+        </p>`;
+        toast("Contact sheet imported");
+        input.value = "";
+        loadStats();
+      } catch (err) {
+        out.innerHTML = `<p class="hint" style="margin-top:12px"><strong>${esc(err.message)}</strong></p>`;
+      }
+      return;
+    }
 
     if (btn.dataset.approve)
       return guard(() =>

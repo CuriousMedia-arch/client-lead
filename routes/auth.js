@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { verifyPassword, createSession, destroySession, SESSION_DAYS } = require("../lib/auth");
+const { maybeScanOnLogin } = require("../lib/autoScan");
 
 const router = express.Router();
 
@@ -26,8 +27,18 @@ router.post("/login", async (req, res, next) => {
       secure: process.env.SECURE_COOKIES === "true",
     });
 
+    // Start a cycle if the last one is stale. Deliberately not awaited — a
+    // scan takes minutes and the sign-in must return immediately.
+    let scan = { started: false };
+    try {
+      scan = await maybeScanOnLogin();
+    } catch (err) {
+      console.error("[autoscan]", err.message);
+    }
+
     res.json({
       user: { id: user.id, username: user.username, name: user.display_name, role: user.role },
+      scan,
     });
   } catch (err) {
     next(err);

@@ -30,36 +30,26 @@ async function queryLeads(params, user) {
   const args = [];
   const bind = (v) => `$${args.push(v)}`;
 
-  // --- signal window ---------------------------------------------------------
+  // --- which pool -------------------------------------------------------------
+  //   today -> companies the sweep found in the news that aren't ours yet.
+  //            Claimable straight away; they join All Leads once approved.
+  //   all   -> the watchlist: everything imported from the CSV, plus every
+  //            discovered company that has been approved.
+  //   mine  -> whatever this user owns, from either pool.
   const tab = params.tab || "all";
   const freshness = FRESHNESS[params.freshness];
 
-  if (tab === "today") {
-    // "New since the last cycle" - based on when we discovered it, not the
-    // publish date, so a backdated article still shows up as new to the team.
-    where.push(
-      `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
-                AND s.created_at >= now() - interval '1 day')`
-    );
-  } else if (freshness) {
+  if (tab === "today") where.push("c.approval = 'pending'");
+  else if (tab === "mine") {
+    where.push(`l.owner_id = ${bind(user.id)}`);
+    where.push("c.approval <> 'rejected'");
+  } else where.push("c.approval = 'approved'");
+
+  if (freshness) {
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - interval '${freshness}')`
     );
-  }
-
-  if (tab === "mine") where.push(`l.owner_id = ${bind(user.id)}`);
-
-  // --- which pool -------------------------------------------------------------
-  // Fresh Leads are companies the discovery sweep found that nobody has
-  // approved onto the watchlist yet. They're claimable, but they stay out of
-  // the other tabs so the watchlist view doesn't fill with unvetted names.
-  if (tab === "fresh") {
-    where.push("c.approval = 'pending'");
-  } else if (tab !== "mine") {
-    where.push("c.approval = 'approved'");
-  } else {
-    where.push("c.approval <> 'rejected'");
   }
 
   // --- signal type -----------------------------------------------------------

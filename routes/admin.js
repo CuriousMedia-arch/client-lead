@@ -3,6 +3,7 @@ const db = require("../db");
 const { requireAuth, requireAdmin, hashPassword } = require("../lib/auth");
 const { runPipeline, isRunning, runState, buildQueries, ensureLead } = require("../services/pipeline");
 const { triggerRemoteRun, remoteRunConfigured } = require("../lib/remoteRun");
+const { parseContactSheet } = require("../lib/csvImport");
 
 const router = express.Router();
 
@@ -238,7 +239,87 @@ router.patch("/users/:id", async (req, res, next) => {
 });
 
 
-// --- discovered companies (Fresh Leads approval queue) -----------------------
+
+// --- CSV import --------------------------------------------------------------
+
+/**
+ * POST /api/admin/import   { csv: "<raw file text>" }
+ *
+ * One upload fills two tables: the company watchlist and the people directory.
+ * Merge semantics - new rows are added, existing ones are topped up, and
+ * nothing already in the system is removed.
+ */
+router.post("/import", async (req, res, next) => {
+  try {
+    const csv = String((req.body && req.body.csv) || "");
+    if (!csv.trim()) return res.status(400).json({ error: "The file looked empty." });
+
+    const { companies, contacts, skipped } = parseContactSheet(csv);
+
+    if (!companies.length) {
+      return res.status(400).json({
+        error:
+          "No company names found. The sheet needs a 'Company name' column - check the first row holds the headers.",
+      });
+    }
+
+    let companiesAdded = 0;
+    let contactsAdded = 0;
+
+    await db.tx(async (q) => {
+      for (const c of companies) {
+        // Existing companies keep their name and approval, but pick up any
+        // keywords the sheet adds. A company already rejected stays rejected.
+        const { rows } = await q(
+          `INSERT INTO companies (name, keywords, active, origin, approval)
+           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved')
+           ON CONFLICT (lower(name)) DO UPDATE
+              SET keywords = $2::jsonb,
+                  active   = CASE WHEN companies.approval = 'rejected'
+                                  THEN companies.active ELSE true END,
+                  approval = CASE WHEN companies.approval = 'rejected'
+                                  THEN 'rejected' ELSE 'approved' END
+           RETURNING id, (xmax = 0) AS inserted`,
+          [c.name, JSON.stringify(c.keywords)]
+        );
+        if (rows[0].inserted) companiesAdded++;
+      }
+
+      // Every company on the watchlist needs a lead row to hang signals off.
+      await q(`INSERT INTO leads (company_id)
+               SELECT id FROM companies ON CONFLICT (company_id) DO NOTHING`);
+
+      for (const p of contacts) {
+        const { rows } = await q(
+          `INSERT INTO company_contacts (company, name, role, email, phone, linkedin, notes, is_primary)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (lower(company), lower(name)) DO UPDATE
+              SET role       = COALESCE(EXCLUDED.role,     company_contacts.role),
+                  email      = COALESCE(EXCLUDED.email,    company_contacts.email),
+                  phone      = COALESCE(EXCLUDED.phone,    company_contacts.phone),
+                  linkedin   = COALESCE(EXCLUDED.linkedin, company_contacts.linkedin),
+                  notes      = COALESCE(EXCLUDED.notes,    company_contacts.notes),
+                  is_primary = company_contacts.is_primary OR EXCLUDED.is_primary
+           RETURNING (xmax = 0) AS inserted`,
+          [p.company, p.name, p.role, p.email, p.phone, p.linkedin, p.notes, p.is_primary]
+        );
+        if (rows[0].inserted) contactsAdded++;
+      }
+    });
+
+    res.json({
+      companies: companies.length,
+      contacts: contacts.length,
+      companiesAdded,
+      contactsAdded,
+      skipped,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- discovered companies (approval queue) -----------------------------------
 
 router.get("/discoveries", async (req, res, next) => {
   try {

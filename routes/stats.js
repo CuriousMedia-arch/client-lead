@@ -20,6 +20,8 @@ router.get("/", async (req, res, next) => {
               JOIN companies c ON c.id = l.company_id
              WHERE s.created_at >= now() - interval '1 day'
                AND c.approval = 'approved')                                   AS new_in_24h,
+           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
+             WHERE c.approval = 'pending')                                    AS today_pool,
            (SELECT COUNT(*) FROM leads
              WHERE status IN ('working','contacted','replied','qualified'))   AS active_pipeline,
            (SELECT COUNT(*) FROM leads
@@ -55,6 +57,7 @@ router.get("/", async (req, res, next) => {
         sites: row.total_sites,
         mine: row.mine,
         fresh: row.fresh,
+        today: row.today_pool,
       },
       run: { running: isRunning(), current: runState(), last: lastRun || null },
       schedule: { cron: SCHEDULE, timezone: TIMEZONE },
