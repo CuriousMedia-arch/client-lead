@@ -159,7 +159,7 @@ async function queryLeads(params, user) {
   // earned it — this is what the score popover shows.
   const triggerRows = await db.all(
     `SELECT DISTINCT ON (s.lead_id, s.signal_type)
-            s.lead_id, s.signal_type, s.title, s.url,
+            s.lead_id, s.signal_type, s.score, s.title, s.url,
             COALESCE(s.published, s.created_at) AS at
        FROM signals s
       WHERE s.lead_id = ANY($1)
@@ -179,6 +179,10 @@ async function queryLeads(params, user) {
     lead.top_signal = top;
     Object.assign(lead, playbookFor(top && top.signal_type, top && top.pitch));
     lead.score_breakdown = breakdownFor(triggersByLead.get(lead.id) || []);
+    // The stored column is a sort key that only refreshes on a scan. The
+    // breakdown is computed from the signals right now, so it wins — otherwise
+    // the badge and the explanation disagree.
+    lead.score = lead.score_breakdown.total;
   }
 
   return leads;
@@ -236,10 +240,11 @@ router.get("/:id", async (req, res, next) => {
       const key = playbook.segment(sig.signal_type).id;
       if (key === "none" || seenType.has(key)) continue;
       seenType.add(key);
-      triggers.push({ signal_type: sig.signal_type, title: sig.title, url: sig.url,
-                      at: sig.published || sig.created_at });
+      triggers.push({ signal_type: sig.signal_type, score: sig.score, title: sig.title,
+                      url: sig.url, at: sig.published || sig.created_at });
     }
     lead.score_breakdown = breakdownFor(triggers);
+    lead.score = lead.score_breakdown.total;
     res.json({ lead });
   } catch (err) {
     next(err);
@@ -404,7 +409,9 @@ function playbookFor(signalType, signalPitch) {
     tier_note: playbook.TIERS[seg.tier].note,
     segment: seg.id,
     segment_label: seg.label,
+    angle: seg.angle,
     pitch: (signalPitch && signalPitch.trim()) || seg.pitch,
+    pitch_general: seg.pitch,
     pitch_is_tailored: Boolean(signalPitch && signalPitch.trim()),
     next_action: seg.action,
   };
@@ -415,22 +422,7 @@ function playbookFor(signalType, signalPitch) {
  * pairing each weight with the headline that earned it.
  */
 function breakdownFor(triggers) {
-  const { total, lines } = playbook.scoreBreakdown(triggers.map((t) => t.signal_type));
-
-  const evidence = new Map();
-  for (const t of triggers) {
-    const id = playbook.segment(t.signal_type).id;
-    if (!evidence.has(id)) evidence.set(id, t);
-  }
-
-  return {
-    total,
-    max: 100,
-    lines: lines.map((l) => {
-      const ev = evidence.get(l.id);
-      return { ...l, title: ev ? ev.title : null, url: ev ? ev.url : null, at: ev ? ev.at : null };
-    }),
-  };
+  return playbook.scoreBreakdown(triggers);
 }
 
 function logActivity(leadId, userId, kind, body) {

@@ -398,7 +398,7 @@ async function recomputeLeadRollups() {
   // Distinct trigger per lead inside the window; the weights live in the
   // playbook so the number on screen always matches the breakdown beside it.
   const rows = await db.all(
-    `SELECT lead_id, signal_type
+    `SELECT lead_id, signal_type, MAX(score) AS score
        FROM signals
       WHERE COALESCE(published, created_at) >= now() - interval '30 days'
       GROUP BY lead_id, signal_type`
@@ -407,7 +407,7 @@ async function recomputeLeadRollups() {
   const byLead = new Map();
   for (const r of rows) {
     if (!byLead.has(r.lead_id)) byLead.set(r.lead_id, []);
-    byLead.get(r.lead_id).push(r.signal_type);
+    byLead.get(r.lead_id).push({ signal_type: r.signal_type, score: r.score });
   }
 
   await db.run("UPDATE leads SET score = 0 WHERE score <> 0 AND id <> ALL($1)", [

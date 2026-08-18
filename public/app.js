@@ -67,10 +67,17 @@ function scorePopover(breakdown, leadId) {
                ${lines
                  .map(
                    (l) => `<div class="score-pop-row">
-                     <span class="score-pop-pts">+${l.points}</span>
+                     <span class="score-pop-pts">
+                       ${l.points}<span class="score-pop-max">/${l.max}</span>
+                     </span>
                      <span class="score-pop-body">
                        <b>${esc(l.label)}</b>
                        ${l.title ? `<span>${esc(String(l.title).slice(0, 90))}</span>` : ""}
+                       ${
+                         l.points < l.max
+                           ? `<span class="score-pop-strength">Story rated ${l.strength}/100 for urgency, so it earns ${l.points} of the ${l.max} available.</span>`
+                           : ""
+                       }
                      </span>
                    </div>`
                  )
@@ -84,9 +91,10 @@ function scorePopover(breakdown, leadId) {
       </div>
 
       <p class="score-pop-note">
-        Each trigger counts once, however many articles reported it:
-        Funding +40, Launch &amp; Ambassador +30, Retail Expansion +10,
-        Leadership +10, Brand Crisis +10.
+        Each trigger counts once, however many articles reported it, and pays out
+        a share of its maximum based on how strong the story is.
+        Maximums: Funding 40, Launch &amp; Ambassador 30, Retail Expansion 10,
+        Leadership 10, Brand Crisis 10.
       </p>
     </div>`;
 }
@@ -568,8 +576,15 @@ function myLeadCard(lead) {
       ${
         lead.pitch
           ? `<div class="pitch-box">
-               <b>What to pitch${lead.pitch_is_tailored ? "" : " (general angle)"}</b>${esc(lead.pitch)}
-             </div>`
+             <b>What to pitch</b>
+             ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
+             <span class="pitch-body">${esc(lead.pitch)}</span>
+             ${
+               lead.pitch_is_tailored
+                 ? ""
+                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
+             }
+           </div>`
           : ""
       }
 
@@ -850,7 +865,14 @@ function drawerHtml(lead) {
     ${
       lead.pitch
         ? `<div class="pitch-box">
-             <b>What to pitch${lead.pitch_is_tailored ? "" : " (general angle)"}</b>${esc(lead.pitch)}
+             <b>What to pitch</b>
+             ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
+             <span class="pitch-body">${esc(lead.pitch)}</span>
+             ${
+               lead.pitch_is_tailored
+                 ? ""
+                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
+             }
            </div>`
         : ""
     }
