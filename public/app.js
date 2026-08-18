@@ -360,8 +360,10 @@ function currentQuery() {
 
 // ── Page furniture ─────────────────────────────────────────────────────────
 
+// The tab name already says what the list is, so All Leads carries no subtitle.
+// The other two do, because what they hold isn't obvious from the name alone.
 const PAGE_COPY = {
-  all: ["All Leads"],
+  all: ["All Leads", ""],
   today: ["Today's Leads", "Companies found in the news that aren't in your database yet."],
   mine: ["My Outreach", "Leads you've claimed. Everyone can see them; only you own them."],
 };
@@ -374,7 +376,7 @@ function actionBar() {
     <div class="action-bar">
       <div class="action-bar-left">
         <h1 class="page-title">${esc(title)}</h1>
-        <p class="page-desc">${esc(desc)}</p>
+        ${desc ? `<p class="page-desc">${esc(desc)}</p>` : ""}
         <p class="scan-status">
           <span class="scan-dot"></span>
           ${
@@ -579,11 +581,7 @@ function myLeadCard(lead) {
              <b>What to pitch</b>
              ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
              <span class="pitch-body">${esc(lead.pitch)}</span>
-             ${
-               lead.pitch_is_tailored
-                 ? ""
-                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
-             }
+
            </div>`
           : ""
       }
@@ -868,11 +866,7 @@ function drawerHtml(lead) {
              <b>What to pitch</b>
              ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
              <span class="pitch-body">${esc(lead.pitch)}</span>
-             ${
-               lead.pitch_is_tailored
-                 ? ""
-                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
-             }
+
            </div>`
         : ""
     }
@@ -1380,8 +1374,10 @@ function wireAdmin() {
         const r = await api("/api/admin/gemini-check");
         out.innerHTML = r.ok
           ? `<p class="hint" style="margin-top:10px"><strong style="color:var(--teal)">Working.</strong>
-               ${esc(r.model)} answered. Pitches will be written for each company.</p>`
-          : `<p class="hint" style="margin-top:10px"><strong>Not working.</strong> ${esc(r.reason)}</p>`;
+               ${esc(r.model)} answered. Pitches will be written for each company.<br>
+               <span style="font-family:var(--mono);font-size:11px">Key in use: ${esc(r.key || "—")}</span></p>`
+          : `<p class="hint" style="margin-top:10px"><strong>Not working.</strong> ${esc(r.reason)}<br>
+               <span style="font-family:var(--mono);font-size:11px">Model: ${esc(r.model || "—")} · Key in use: ${esc(r.key || "not set")}</span></p>`;
       } catch (err) {
         out.innerHTML = `<p class="hint" style="margin-top:10px"><strong>${esc(err.message)}</strong></p>`;
       }

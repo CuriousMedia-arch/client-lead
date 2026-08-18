@@ -177,7 +177,15 @@ async function queryLeads(params, user) {
     lead.signals = byLead.get(lead.id) || [];
     const top = lead.signals[0] || null;
     lead.top_signal = top;
-    Object.assign(lead, playbookFor(top && top.signal_type, top && top.pitch));
+    Object.assign(
+      lead,
+      playbookFor(top && top.signal_type, top && top.pitch, {
+        company: lead.company,
+        headline: top && top.title,
+        when: top ? timeAgo(top.published || top.created_at) : null,
+        industry: lead.industry,
+      })
+    );
     lead.score_breakdown = breakdownFor(triggersByLead.get(lead.id) || []);
     // The stored column is a sort key that only refreshes on a scan. The
     // breakdown is computed from the signals right now, so it wins — otherwise
@@ -231,7 +239,15 @@ router.get("/:id", async (req, res, next) => {
     lead.signals = signals;
     lead.activity = activity;
     const best = signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0] : null;
-    Object.assign(lead, playbookFor(best && best.signal_type, best && best.pitch));
+    Object.assign(
+      lead,
+      playbookFor(best && best.signal_type, best && best.pitch, {
+        company: lead.company,
+        headline: best && best.title,
+        when: best ? timeAgo(best.published || best.created_at) : null,
+        industry: lead.industry,
+      })
+    );
 
     // One entry per distinct trigger, best-scoring headline for each.
     const seenType = new Set();
@@ -401,8 +417,19 @@ router.post("/:id/activity", async (req, res, next) => {
  * the amount, the product, the city. The playbook's generic angle is only the
  * fallback for signals enriched before this existed, or when Gemini was down.
  */
-function playbookFor(signalType, signalPitch) {
+function playbookFor(signalType, signalPitch, context = {}) {
   const seg = playbook.segment(signalType || "none");
+
+  // No AI line yet? Compose one from the company, the story and the angle —
+  // still specific enough to read out, rather than a boilerplate paragraph.
+  const composed = playbook.composePitch({
+    company: context.company,
+    signalType,
+    headline: context.headline,
+    when: context.when,
+    industry: context.industry,
+  });
+
   return {
     tier: seg.tier,
     tier_label: playbook.TIERS[seg.tier].label,
@@ -410,8 +437,7 @@ function playbookFor(signalType, signalPitch) {
     segment: seg.id,
     segment_label: seg.label,
     angle: seg.angle,
-    pitch: (signalPitch && signalPitch.trim()) || seg.pitch,
-    pitch_general: seg.pitch,
+    pitch: (signalPitch && signalPitch.trim()) || composed,
     pitch_is_tailored: Boolean(signalPitch && signalPitch.trim()),
     next_action: seg.action,
   };
@@ -421,6 +447,21 @@ function playbookFor(signalType, signalPitch) {
  * Turns a lead's triggers into the line-by-line explanation of its score,
  * pairing each weight with the headline that earned it.
  */
+/** "3 days ago" style, for the composed pitch's opening line. */
+function timeAgo(iso) {
+  if (!iso) return null;
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (!Number.isFinite(mins) || mins < 0) return null;
+  if (mins < 60) return "today";
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return "today";
+  const days = Math.round(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const months = Math.round(days / 30);
+  return months === 1 ? "last month" : `${months} months ago`;
+}
+
 function breakdownFor(triggers) {
   return playbook.scoreBreakdown(triggers);
 }
