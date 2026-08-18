@@ -138,7 +138,7 @@ async function queryLeads(params, user) {
   const ranked = await db.all(
     `SELECT * FROM (
        SELECT s.id, s.lead_id, s.title, s.url, s.site, s.published, s.created_at,
-              s.signal_type, s.score, s.summary, s.why_it_matters,
+              s.signal_type, s.score, s.summary, s.why_it_matters, s.pitch,
               ROW_NUMBER() OVER (
                 PARTITION BY s.lead_id
                 ORDER BY s.score DESC, COALESCE(s.published, s.created_at) DESC
@@ -154,11 +154,31 @@ async function queryLeads(params, user) {
     if (!byLead.has(s.lead_id)) byLead.set(s.lead_id, []);
     byLead.get(s.lead_id).push(s);
   }
+
+  // Every distinct trigger in the scoring window, with the headline that
+  // earned it — this is what the score popover shows.
+  const triggerRows = await db.all(
+    `SELECT DISTINCT ON (s.lead_id, s.signal_type)
+            s.lead_id, s.signal_type, s.title, s.url,
+            COALESCE(s.published, s.created_at) AS at
+       FROM signals s
+      WHERE s.lead_id = ANY($1)
+        AND COALESCE(s.published, s.created_at) >= now() - interval '30 days'
+      ORDER BY s.lead_id, s.signal_type, s.score DESC`,
+    [leads.map((l) => l.id)]
+  );
+
+  const triggersByLead = new Map();
+  for (const t of triggerRows) {
+    if (!triggersByLead.has(t.lead_id)) triggersByLead.set(t.lead_id, []);
+    triggersByLead.get(t.lead_id).push(t);
+  }
   for (const lead of leads) {
     lead.signals = byLead.get(lead.id) || [];
     const top = lead.signals[0] || null;
     lead.top_signal = top;
-    Object.assign(lead, playbookFor(top && top.signal_type));
+    Object.assign(lead, playbookFor(top && top.signal_type, top && top.pitch));
+    lead.score_breakdown = breakdownFor(triggersByLead.get(lead.id) || []);
   }
 
   return leads;
@@ -191,7 +211,7 @@ router.get("/:id", async (req, res, next) => {
     const [signals, activity] = await Promise.all([
       db.all(
         `SELECT id, title, url, author, site, section_title, published, created_at,
-                signal_type, score, summary, why_it_matters, enriched
+                signal_type, score, summary, why_it_matters, pitch, enriched
            FROM signals WHERE lead_id = $1
           ORDER BY COALESCE(published, created_at) DESC`,
         [lead.id]
@@ -206,10 +226,20 @@ router.get("/:id", async (req, res, next) => {
 
     lead.signals = signals;
     lead.activity = activity;
-    Object.assign(
-      lead,
-      playbookFor(signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0].signal_type : null)
-    );
+    const best = signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0] : null;
+    Object.assign(lead, playbookFor(best && best.signal_type, best && best.pitch));
+
+    // One entry per distinct trigger, best-scoring headline for each.
+    const seenType = new Set();
+    const triggers = [];
+    for (const sig of signals.slice().sort((a, b) => b.score - a.score)) {
+      const key = playbook.segment(sig.signal_type).id;
+      if (key === "none" || seenType.has(key)) continue;
+      seenType.add(key);
+      triggers.push({ signal_type: sig.signal_type, title: sig.title, url: sig.url,
+                      at: sig.published || sig.created_at });
+    }
+    lead.score_breakdown = breakdownFor(triggers);
     res.json({ lead });
   } catch (err) {
     next(err);
@@ -359,8 +389,14 @@ router.post("/:id/activity", async (req, res, next) => {
   }
 });
 
-/** What the playbook says about a lead, given its strongest signal. */
-function playbookFor(signalType) {
+/**
+ * What the playbook says about a lead, given its strongest signal.
+ *
+ * The pitch prefers the line Gemini wrote for that specific story — it names
+ * the amount, the product, the city. The playbook's generic angle is only the
+ * fallback for signals enriched before this existed, or when Gemini was down.
+ */
+function playbookFor(signalType, signalPitch) {
   const seg = playbook.segment(signalType || "none");
   return {
     tier: seg.tier,
@@ -368,8 +404,32 @@ function playbookFor(signalType) {
     tier_note: playbook.TIERS[seg.tier].note,
     segment: seg.id,
     segment_label: seg.label,
-    pitch: seg.pitch,
+    pitch: (signalPitch && signalPitch.trim()) || seg.pitch,
+    pitch_is_tailored: Boolean(signalPitch && signalPitch.trim()),
     next_action: seg.action,
+  };
+}
+
+/**
+ * Turns a lead's triggers into the line-by-line explanation of its score,
+ * pairing each weight with the headline that earned it.
+ */
+function breakdownFor(triggers) {
+  const { total, lines } = playbook.scoreBreakdown(triggers.map((t) => t.signal_type));
+
+  const evidence = new Map();
+  for (const t of triggers) {
+    const id = playbook.segment(t.signal_type).id;
+    if (!evidence.has(id)) evidence.set(id, t);
+  }
+
+  return {
+    total,
+    max: 100,
+    lines: lines.map((l) => {
+      const ev = evidence.get(l.id);
+      return { ...l, title: ev ? ev.title : null, url: ev ? ev.url : null, at: ev ? ev.at : null };
+    }),
   };
 }
 

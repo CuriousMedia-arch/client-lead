@@ -29,17 +29,23 @@ async function discoveryScraper(config) {
     throw new Error("Discovery needs at least one keyword to sweep for.");
   }
 
-  const andConditions = [
-    { $or: topics.map((t) => ({ keyword: t })) },
-    { sourceUri: config.sourceUri },
-  ];
+  const sources = config.sourceUris && config.sourceUris.length
+    ? config.sourceUris
+    : [config.sourceUri].filter(Boolean);
+
+  const andConditions = [{ $or: topics.map((t) => ({ keyword: t })) }];
+
+  if (sources.length === 1) andConditions.push({ sourceUri: sources[0] });
+  else if (sources.length > 1) andConditions.push({ $or: sources.map((u) => ({ sourceUri: u })) });
 
   // Only look at the recent window - discovery is about what's happening now,
   // and an unbounded query burns API credits on old news.
   const since = new Date(Date.now() - (config.sinceHours || 48) * 3600e3);
   const dateStart = since.toISOString().slice(0, 10);
 
-  const { data } = await axios.post(
+  let data;
+  try {
+    ({ data } = await axios.post(
     NEWSAPI_URL,
     {
       query: {
@@ -52,8 +58,27 @@ async function discoveryScraper(config) {
       includeArticleImage: false,
       apiKey,
     },
-    { headers: { "Content-Type": "application/json" }, timeout: 30000 }
-  );
+      { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+    ));
+  } catch (err) {
+    // axios reports "Request failed with status code 403" and hides the body,
+    // which is where Event Registry actually explains itself. Surface it.
+    const res = err.response;
+    if (res) {
+      const body =
+        typeof res.data === "string"
+          ? res.data.slice(0, 300)
+          : JSON.stringify(res.data || {}).slice(0, 300);
+      const hint =
+        res.status === 403
+          ? " (403 usually means the NewsAPI.ai account is out of tokens, or the key is not authorised for this endpoint)"
+          : res.status === 401
+          ? " (401 means the key was rejected)"
+          : "";
+      throw new Error(`NewsAPI ${res.status}${hint}: ${body}`);
+    }
+    throw err;
+  }
 
   if (data && data.error) {
     throw new Error(typeof data.error === "string" ? data.error : JSON.stringify(data.error));
@@ -67,7 +92,7 @@ async function discoveryScraper(config) {
     url: post.url ?? null,
     author: post.authors?.[0]?.name ?? null,
     published: post.dateTime ?? post.date ?? null,
-    site: post.source?.title ?? post.source?.uri ?? config.sourceUri,
+    site: post.source?.title ?? post.source?.uri ?? null,
     section_title: post.categories?.[0]?.label ?? null,
     company: null,       // Gemini fills this in
     companyId: null,     // resolved once we know the company

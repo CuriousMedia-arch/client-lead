@@ -57,6 +57,7 @@ For each article below, return one object with these fields:
 ${playbook.promptRules()}
 - "summary": 2 sentences, plain English, concrete. Include numbers, names and dates where the article gives them.
 - "why_it_matters": 1 sentence on the marketing opening this creates for an agency pitching this company (new budget, new launch to promote, new decision-maker, new market to enter). If there is no real opening, say so.
+- "pitch": 2 sentences the salesperson could open the call with. Take the agency angle listed above for the signal_type you chose and apply it to THIS company and THIS specific news — name the amount, product, city, person, campaign or store count the article actually mentions, and say concretely what you would do for them. Never write it generically: if the same sentence would work for any other company, rewrite it.
 - "score": integer 0-100 within the tier — Tier 1 signals belong in 80-100, Tier 2 in 50-79, Tier 3 below 40 for how urgently a salesperson should act on this. 80+ means call them this week. Under 40 means background noise.
 
 Return ONLY a JSON array. No prose, no markdown fences.
@@ -96,6 +97,7 @@ async function enrichBatch(model, articles) {
       : TYPE_WEIGHT[type];
 
     return {
+      pitch: relevant && row.pitch ? String(row.pitch).trim() : null,
       signal_type: type,
       score,
       summary: row.summary ? String(row.summary).trim() : null,
@@ -170,6 +172,7 @@ For each article below, return one object with these fields:
 ${playbook.promptRules()}
 - "summary": 2 sentences, plain English, concrete. Include numbers, names and dates where the article gives them.
 - "why_it_matters": 1 sentence on the marketing opening this creates for an agency pitching this company. If there is no real opening, say so.
+- "pitch": 2 sentences the salesperson could open the call with. Take the agency angle listed above for the signal_type you chose and apply it to THIS company and THIS specific news — name the amount, product, city, person or campaign the article actually mentions, and say what you'd do for them. Never write it generically; if the same sentence would work for any company, rewrite it.
 - "score": integer 0-100 within the tier — Tier 1 signals belong in 80-100, Tier 2 in 50-79, Tier 3 below 40 for how urgently a salesperson should act. 80+ means call them this week. Under 40 means background noise.
 
 Be strict with "company". A wrong name creates a junk lead someone has to clean up. When in doubt, use null.
@@ -220,6 +223,7 @@ async function enrichDiscoveryBatch(model, articles) {
 
     return {
       company: cleanCompanyName(row.company),
+      pitch: row.pitch ? String(row.pitch).trim() : null,
       signal_type: type,
       score,
       summary: row.summary ? String(row.summary).trim() : null,

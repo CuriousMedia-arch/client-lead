@@ -34,15 +34,61 @@ const TIER_TEXT = {
 const segId = (t) => (TIER_OF[t] ? t : LEGACY_TYPES[t] || "none");
 const tierOf = (t) => TIER_OF[segId(t)];
 
-/** The badge a non-technical user reads instead of a number. */
-function tierBadge(signalType, score) {
+/**
+ * The badge a non-technical user reads instead of a number — and, on click,
+ * the arithmetic behind the number, so nobody has to take the score on trust.
+ */
+function tierBadge(signalType, score, breakdown, leadId) {
   const tier = tierOf(signalType);
   const [label] = TIER_TEXT[tier];
-  return `<span class="tier tier-${tier}">
-      <span class="tier-rank">Tier ${tier}</span>
-      <span class="tier-label">${label}</span>
-      ${Number.isFinite(score) ? `<span class="tier-score">${score}</span>` : ""}
+
+  return `<span class="tier-wrap">
+      <button class="tier tier-${tier}" data-score-for="${leadId}" title="See how this score was worked out">
+        <span class="tier-rank">Tier ${tier}</span>
+        <span class="tier-label">${label}</span>
+        ${Number.isFinite(score) ? `<span class="tier-score">${score}<span class="tier-why">?</span></span>` : ""}
+      </button>
+      ${scorePopover(breakdown, leadId)}
     </span>`;
+}
+
+/** The "why this score" panel. Hidden until the badge is clicked. */
+function scorePopover(breakdown, leadId) {
+  if (!breakdown) return "";
+
+  const lines = breakdown.lines || [];
+
+  return `<div class="score-pop" id="pop-${leadId}" hidden>
+      <div class="score-pop-head">How this score was worked out</div>
+
+      ${
+        lines.length
+          ? `<div class="score-pop-rows">
+               ${lines
+                 .map(
+                   (l) => `<div class="score-pop-row">
+                     <span class="score-pop-pts">+${l.points}</span>
+                     <span class="score-pop-body">
+                       <b>${esc(l.label)}</b>
+                       ${l.title ? `<span>${esc(String(l.title).slice(0, 90))}</span>` : ""}
+                     </span>
+                   </div>`
+                 )
+                 .join("")}
+             </div>`
+          : `<p class="score-pop-empty">No buying triggers found in the last 30 days, so this scores zero.</p>`
+      }
+
+      <div class="score-pop-total">
+        <span>Total</span><b>${breakdown.total} / ${breakdown.max || 100}</b>
+      </div>
+
+      <p class="score-pop-note">
+        Each trigger counts once, however many articles reported it:
+        Funding +40, Launch &amp; Ambassador +30, Retail Expansion +10,
+        Leadership +10, Brand Crisis +10.
+      </p>
+    </div>`;
 }
 
 const STATUSES = [
@@ -248,6 +294,11 @@ function wireEvents() {
   // so binding per render would stack duplicate handlers.
   $("#content").addEventListener("click", onCardClick);
 
+  window.document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-score-for]") || e.target.closest(".score-pop")) return;
+    $$(".score-pop").forEach((p) => (p.hidden = true));
+  });
+
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
@@ -429,7 +480,7 @@ function leadTable(leads) {
             </span>
           </div>
 
-          <div>${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score)}</div>
+          <div>${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score, lead.score_breakdown, lead.id)}</div>
 
           <div class="signal-cell">
             ${
@@ -476,7 +527,7 @@ function myLeadCard(lead) {
   }
           </div>
         </div>
-        ${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score)}
+        ${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score, lead.score_breakdown, lead.id)}
       </div>
 
       <div class="mylead-signals">
@@ -514,7 +565,13 @@ function myLeadCard(lead) {
           : ""
       }
 
-      ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
+      ${
+        lead.pitch
+          ? `<div class="pitch-box">
+               <b>What to pitch${lead.pitch_is_tailored ? "" : " (general angle)"}</b>${esc(lead.pitch)}
+             </div>`
+          : ""
+      }
 
       <div class="mylead-bottom">
         <button class="btn btn-sm" data-act="open" data-id="${lead.id}">
@@ -685,6 +742,16 @@ async function onCardClick(e) {
     return;
   }
 
+  const scoreBtn = e.target.closest("[data-score-for]");
+  if (scoreBtn) {
+    e.stopPropagation();
+    const pop = $(`#pop-${scoreBtn.dataset.scoreFor}`);
+    const wasOpen = pop && !pop.hidden;
+    $$(".score-pop").forEach((p) => (p.hidden = true));
+    if (pop) pop.hidden = wasOpen;
+    return;
+  }
+
   const row = e.target.closest("[data-lead]");
   if (row) openDrawer(row.dataset.lead);
 }
@@ -780,7 +847,13 @@ function drawerHtml(lead) {
 
     ${companyInfoCard(lead)}
 
-    ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
+    ${
+      lead.pitch
+        ? `<div class="pitch-box">
+             <b>What to pitch${lead.pitch_is_tailored ? "" : " (general angle)"}</b>${esc(lead.pitch)}
+           </div>`
+        : ""
+    }
 
     <section class="block">
       <h3>Ownership</h3>

@@ -7,7 +7,9 @@ const { enrichArticles, enrichDiscoveries } = require("./enrich");
 const playbook = require("../lib/triggers");
 
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 500);
-const RESULTS_PER_QUERY = Number(process.env.RESULTS_PER_QUERY || 10);
+// One query now spans every source, so it should return more than a single
+// source's worth of articles.
+const RESULTS_PER_QUERY = Number(process.env.RESULTS_PER_QUERY || 40);
 
 // Only one run at a time - the API has rate limits and Gemini costs money.
 let currentRun = null;
@@ -31,33 +33,34 @@ async function buildQueries() {
   ]);
 
   const topics = topicRows.map((t) => t.keyword);
+  const sourceUris = sites.map((s) => s.domain);
   const configs = [];
 
-  for (const site of sites) {
-    for (const company of companies) {
-      let keywords = company.keywords;              // jsonb comes back parsed
-      if (typeof keywords === "string") {
-        try {
-          keywords = JSON.parse(keywords);
-        } catch {
-          keywords = [company.name];
-        }
+  // One query per company across every source, rather than the cross-product.
+  // 16 companies x 23 sources was 368 API calls a scan; this is 16.
+  for (const company of companies) {
+    let keywords = company.keywords;              // jsonb comes back parsed
+    if (typeof keywords === "string") {
+      try {
+        keywords = JSON.parse(keywords);
+      } catch {
+        keywords = [company.name];
       }
-      if (!Array.isArray(keywords) || keywords.length === 0) keywords = [company.name];
-
-      configs.push({
-        name: `${site.name}-${company.name}`,
-        company: company.name,
-        companyId: company.id,
-        site: site.name,
-        sourceUri: site.domain,
-        companyKeyword: keywords,
-        topics,
-        size: RESULTS_PER_QUERY,
-        lang: "eng",
-      });
     }
+    if (!Array.isArray(keywords) || keywords.length === 0) keywords = [company.name];
+
+    configs.push({
+      name: company.name,
+      company: company.name,
+      companyId: company.id,
+      sourceUris,
+      companyKeyword: keywords,
+      topics,
+      size: RESULTS_PER_QUERY,
+      lang: "eng",
+    });
   }
+
   return configs;
 }
 
@@ -121,26 +124,25 @@ async function runDiscovery(runId, log = console.log, counters = null) {
   const articles = [];
   const seen = new Set();
 
-  for (const site of sites) {
-    try {
-      const found = await discoveryScraper({
-        site: site.name,
-        sourceUri: site.domain,
-        topics,
-        size: Number(process.env.DISCOVERY_PER_SITE || 20),
-        sinceHours: Number(process.env.DISCOVERY_WINDOW_HOURS || 48),
-      });
-      for (const a of found) {
-        if (!a.url || seen.has(a.url)) continue;
-        seen.add(a.url);
-        articles.push(a);
-      }
-    } catch (err) {
-      if (counters) counters.errors += 1;
-      log(`[discover] ${site.name} failed: ${err.message}`);
+  // Same batching as the watchlist sweep: all sources in one request.
+  try {
+    const found = await discoveryScraper({
+      site: "all",
+      sourceUris: sites.map((s) => s.domain),
+      topics,
+      size: Number(process.env.DISCOVERY_PER_SITE || 60),
+      sinceHours: Number(process.env.DISCOVERY_WINDOW_HOURS || 48),
+    });
+    for (const a of found) {
+      if (!a.url || seen.has(a.url)) continue;
+      seen.add(a.url);
+      articles.push(a);
     }
-    await delay(REQUEST_DELAY_MS);
+  } catch (err) {
+    if (counters) counters.errors += 1;
+    log(`[discover] sweep failed: ${err.message}`);
   }
+  await delay(REQUEST_DELAY_MS);
 
   if (!articles.length) {
     log("[discover] Nothing came back.");
@@ -192,8 +194,8 @@ async function runDiscovery(runId, log = console.log, counters = null) {
     const res = await db.run(
       `INSERT INTO signals
          (lead_id, company, title, url, author, published, site, section_title,
-          body, summary, why_it_matters, signal_type, score, enriched, run_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+          body, summary, why_it_matters, pitch, signal_type, score, enriched, run_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (url) DO NOTHING`,
       [
         leadId,
@@ -207,7 +209,8 @@ async function runDiscovery(runId, log = console.log, counters = null) {
         (article.body || "").slice(0, 8000) || null,
         e.summary || null,
         e.why_it_matters || null,
-        e.signal_type || "other",
+        e.pitch || null,
+        e.signal_type || "none",
         Number.isFinite(e.score) ? e.score : 40,
         Boolean(e.enriched),
         runId,
@@ -343,8 +346,8 @@ async function saveSignals(articles, enrichment, runId) {
       const result = await q(
         `INSERT INTO signals
            (lead_id, company, title, url, author, published, site, section_title,
-            body, summary, why_it_matters, signal_type, score, enriched, run_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            body, summary, why_it_matters, pitch, signal_type, score, enriched, run_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          ON CONFLICT (url) DO NOTHING`,
         [
           leadIds.get(article.companyId),
@@ -358,7 +361,8 @@ async function saveSignals(articles, enrichment, runId) {
           (article.body || "").slice(0, 8000) || null,
           e.summary || null,
           e.why_it_matters || null,
-          e.signal_type || "other",
+          e.pitch || null,
+          e.signal_type || "none",
           Number.isFinite(e.score) ? e.score : 40,
           Boolean(e.enriched),
           runId,
@@ -371,23 +375,52 @@ async function saveSignals(articles, enrichment, runId) {
   return inserted;
 }
 
-/** Keeps leads.last_signal_at / leads.score in sync with their signals. */
-function recomputeLeadRollups() {
-  return db.run(
+/**
+ * Keeps leads.last_signal_at and leads.score in sync with their signals.
+ *
+ * The score is the sum of the distinct triggers a company has shown in the
+ * last 30 days (see scoreBreakdown), not the maximum article score — a company
+ * that raised money AND launched a product is a better lead than one that only
+ * did one of those, and the number should say so.
+ */
+async function recomputeLeadRollups() {
+  await db.run(
     `UPDATE leads l
-        SET last_signal_at = agg.last_at,
-            score          = COALESCE(agg.recent_score, 0)
+        SET last_signal_at = agg.last_at
        FROM (
-         SELECT le.id,
-                MAX(COALESCE(s.published, s.created_at)) AS last_at,
-                MAX(s.score) FILTER (
-                  WHERE COALESCE(s.published, s.created_at) >= now() - interval '30 days'
-                ) AS recent_score
+         SELECT le.id, MAX(COALESCE(s.published, s.created_at)) AS last_at
            FROM leads le LEFT JOIN signals s ON s.lead_id = le.id
           GROUP BY le.id
        ) agg
       WHERE agg.id = l.id`
   );
+
+  // Distinct trigger per lead inside the window; the weights live in the
+  // playbook so the number on screen always matches the breakdown beside it.
+  const rows = await db.all(
+    `SELECT lead_id, signal_type
+       FROM signals
+      WHERE COALESCE(published, created_at) >= now() - interval '30 days'
+      GROUP BY lead_id, signal_type`
+  );
+
+  const byLead = new Map();
+  for (const r of rows) {
+    if (!byLead.has(r.lead_id)) byLead.set(r.lead_id, []);
+    byLead.get(r.lead_id).push(r.signal_type);
+  }
+
+  await db.run("UPDATE leads SET score = 0 WHERE score <> 0 AND id <> ALL($1)", [
+    [...byLead.keys()],
+  ]);
+
+  for (const [leadId, types] of byLead) {
+    const { total } = playbook.scoreBreakdown(types);
+    await db.run("UPDATE leads SET score = $1 WHERE id = $2 AND score IS DISTINCT FROM $1", [
+      total,
+      leadId,
+    ]);
+  }
 }
 
 function finishRun(runId, state, status, message) {
