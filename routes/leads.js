@@ -1,7 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../lib/auth");
-const { suggestPitch } = require("../lib/pitch");
+const playbook = require("../lib/triggers");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -158,7 +158,7 @@ async function queryLeads(params, user) {
     lead.signals = byLead.get(lead.id) || [];
     const top = lead.signals[0] || null;
     lead.top_signal = top;
-    lead.pitch = suggestPitch(lead.company, top && top.signal_type);
+    Object.assign(lead, playbookFor(top && top.signal_type));
   }
 
   return leads;
@@ -206,9 +206,9 @@ router.get("/:id", async (req, res, next) => {
 
     lead.signals = signals;
     lead.activity = activity;
-    lead.pitch = suggestPitch(
-      lead.company,
-      signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0].signal_type : null
+    Object.assign(
+      lead,
+      playbookFor(signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0].signal_type : null)
     );
     res.json({ lead });
   } catch (err) {
@@ -358,6 +358,20 @@ router.post("/:id/activity", async (req, res, next) => {
     next(err);
   }
 });
+
+/** What the playbook says about a lead, given its strongest signal. */
+function playbookFor(signalType) {
+  const seg = playbook.segment(signalType || "none");
+  return {
+    tier: seg.tier,
+    tier_label: playbook.TIERS[seg.tier].label,
+    tier_note: playbook.TIERS[seg.tier].note,
+    segment: seg.id,
+    segment_label: seg.label,
+    pitch: seg.pitch,
+    next_action: seg.action,
+  };
+}
 
 function logActivity(leadId, userId, kind, body) {
   return db.run("INSERT INTO activity (lead_id, user_id, kind, body) VALUES ($1, $2, $3, $4)", [

@@ -21,6 +21,18 @@ const SITES = [
   { name: "inc42", domain: "inc42.com" },
   { name: "filmibeat", domain: "filmibeat.com" },
   { name: "bollywood-hungama", domain: "bollywoodhungama.com" },
+
+  // Trade press from the PFA playbook — where the real buying signals appear.
+  { name: "afaqs", domain: "afaqs.com" },
+  { name: "exchange4media", domain: "exchange4media.com" },
+  { name: "storyboard18", domain: "storyboard18.com" },
+  { name: "campaign-india", domain: "campaignindia.in" },
+  { name: "brand-equity", domain: "brandequity.economictimes.indiatimes.com" },
+  { name: "vccircle", domain: "vccircle.com" },
+  { name: "techcrunch", domain: "techcrunch.com" },
+  { name: "retail4growth", domain: "retail4growth.com" },
+  { name: "indiaretailing", domain: "indiaretailing.com" },
+  { name: "indian-retailer", domain: "indianretailer.com" },
 ];
 
 const COMPANIES = [

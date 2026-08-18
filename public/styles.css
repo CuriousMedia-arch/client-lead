@@ -1137,3 +1137,78 @@ table.mini tr:last-child td { border-bottom: none; }
   .mylead-grid { grid-template-columns: minmax(0, 1fr); }
   .action-bar-right { width: 100%; }
 }
+
+/* ── Priority tier ────────────────────────────────────────────────────────── */
+
+.tier {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.tier-rank {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+}
+
+.tier-label {
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+
+.tier-score { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); }
+
+.tier-1 .tier-label { background: var(--coral-tint); color: var(--coral); }
+.tier-2 .tier-label { background: var(--amber-tint); color: var(--amber-ink); }
+.tier-3 .tier-label { background: var(--cold-tint);  color: var(--ink-faint); }
+
+/* "Do this next" — the instruction, kept visually distinct from the pitch. */
+.action-box {
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  border-left: 3px solid var(--cold);
+  background: var(--surface-sunk);
+  color: var(--ink-soft);
+}
+.action-box b {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-bottom: 5px;
+}
+
+.tier-1-box {
+  background: var(--coral-tint);
+  border-left-color: var(--coral);
+  color: #8E3F22;
+}
+.tier-1-box b { color: var(--coral); }
+
+.tier-2-box {
+  background: var(--amber-tint);
+  border-left-color: var(--amber);
+  color: #6B4A13;
+}
+.tier-2-box b { color: var(--amber-ink); }
+
+.tier-3-box b { color: var(--ink-faint); }
+
+/* Playbook segments */
+.type-capital          { background: var(--coral-tint);  color: var(--coral); }
+.type-brand_launch     { background: var(--teal-tint);   color: var(--teal-dark); }
+.type-retail_expansion { background: var(--violet-tint); color: var(--violet); }
+.type-crisis           { background: var(--amber-tint);  color: var(--amber-ink); }
+.type-none             { background: var(--cold-tint);   color: var(--ink-faint); }

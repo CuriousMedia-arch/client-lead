@@ -4,6 +4,7 @@ const db = require("../db");
 const genericScraper = require("../scrapers/genericScraper");
 const discoveryScraper = require("../scrapers/discoveryScraper");
 const { enrichArticles, enrichDiscoveries } = require("./enrich");
+const playbook = require("../lib/triggers");
 
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 500);
 const RESULTS_PER_QUERY = Number(process.env.RESULTS_PER_QUERY || 10);
@@ -99,7 +100,9 @@ async function runDiscovery(runId, log = console.log, counters = null) {
     db.all("SELECT keyword FROM topics"),
   ]);
 
-  const topics = topicRows.map((t) => t.keyword);
+  // The playbook's phrases are what actually define a buying signal; anything
+  // in the topics table is treated as an extra the user added by hand.
+  const topics = [...new Set([...playbook.allKeywords(), ...topicRows.map((t) => t.keyword)])];
   if (!sites.length || !topics.length) {
     log("[discover] Needs at least one active source and one keyword. Skipping.");
     return 0;

@@ -175,3 +175,32 @@ create index if not exists idx_companies_approval on companies (approval);
 -- Matching a discovered name against what we already have has to be
 -- case-insensitive, or "zomato" and "Zomato" become two companies.
 create unique index if not exists idx_companies_name_lower on companies (lower(name));
+
+-- ---------------------------------------------------------------------------
+-- Company firmographics, imported from the contact sheet.
+-- These power the Inspect drawer's detail panel.
+-- ---------------------------------------------------------------------------
+alter table companies add column if not exists domain    text;
+alter table companies add column if not exists website   text;
+alter table companies add column if not exists linkedin  text;
+alter table companies add column if not exists industry  text;
+alter table companies add column if not exists employees text;
+alter table companies add column if not exists revenue   text;
+
+-- ---------------------------------------------------------------------------
+-- Publications from the PFA playbook — the trade press where marketing,
+-- funding and retail-expansion signals actually appear. Added alongside the
+-- original sources rather than replacing them.
+-- ---------------------------------------------------------------------------
+insert into sites (name, domain) values
+  ('afaqs',            'afaqs.com'),
+  ('exchange4media',   'exchange4media.com'),
+  ('storyboard18',     'storyboard18.com'),
+  ('campaign-india',   'campaignindia.in'),
+  ('brand-equity',     'brandequity.economictimes.indiatimes.com'),
+  ('vccircle',         'vccircle.com'),
+  ('techcrunch',       'techcrunch.com'),
+  ('retail4growth',    'retail4growth.com'),
+  ('indiaretailing',   'indiaretailing.com'),
+  ('indian-retailer',  'indianretailer.com')
+on conflict (domain) do nothing;

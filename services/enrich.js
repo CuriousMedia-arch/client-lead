@@ -1,65 +1,24 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config();
 
+const playbook = require("../lib/triggers");
+
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 const BATCH_SIZE = 6;
 
-const SIGNAL_TYPES = [
-  "funding",
-  "launch",
-  "expansion",
-  "leadership",
-  "m_and_a",
-  "financials",
-  "partnership",
-  "other",
-];
+const SIGNAL_TYPES = playbook.SEGMENT_IDS;
 
-// Rough priority weights used by the fallback scorer and as a floor for Gemini.
-const TYPE_WEIGHT = {
-  funding: 90,
-  m_and_a: 85,
-  expansion: 78,
-  launch: 74,
-  leadership: 70,
-  partnership: 64,
-  financials: 58,
-  other: 40,
-};
-
-const KEYWORDS = {
-  funding: ["funding", "raises", "raised", "series a", "series b", "series c", "ipo",
-            "valuation", "investment", "investors", "funding round", "led by"],
-  m_and_a: ["acquires", "acquisition", "acquired", "merger", "merges", "stake sale",
-            "buyout", "takeover", "block deal", "divest"],
-  expansion: ["expands", "expansion", "new market", "enters", "opens in", "new city",
-              "scaling", "hiring spree", "new office", "warehouse"],
-  launch: ["launches", "launched", "unveils", "rolls out", "debuts", "introduces",
-           "new product", "goes live", "campaign"],
-  leadership: ["appoints", "appointed", "hires", "resigns", "resignation", "steps down",
-               "new ceo", "new cfo", "new cmo", "joins as", "elevated", "promoted"],
-  financials: ["profit", "loss", "revenue", "earnings", "quarterly results", "turnover",
-               "net income", "ebitda", "q1", "q2", "q3", "q4", "fy2"],
-  partnership: ["partners", "partnership", "ties up", "collaboration", "tie-up",
-                "joins hands", "mou", "alliance"],
-};
+// Kept for anything still importing it; the playbook owns the real weights now.
+const TYPE_WEIGHT = Object.fromEntries(playbook.SEGMENTS.map((x) => [x.id, x.score]));
 
 /**
  * Cheap, offline classification. Used when Gemini is unavailable, out of quota,
  * or returns something unusable - the platform must keep working either way.
  */
 function classifyOffline(article) {
-  const hay = `${article.title || ""} ${(article.body || "").slice(0, 1200)}`.toLowerCase();
-
-  let best = "other";
-  let bestHits = 0;
-  for (const [type, words] of Object.entries(KEYWORDS)) {
-    const hits = words.reduce((n, w) => (hay.includes(w) ? n + 1 : n), 0);
-    if (hits > bestHits) {
-      bestHits = hits;
-      best = type;
-    }
-  }
+  const { id, score } = playbook.classify(
+    `${article.title || ""} ${(article.body || "").slice(0, 1200)}`
+  );
 
   const summary = (article.body || article.title || "")
     .replace(/\s+/g, " ")
@@ -67,24 +26,11 @@ function classifyOffline(article) {
     .slice(0, 260);
 
   return {
-    signal_type: best,
-    score: Math.min(100, TYPE_WEIGHT[best] + Math.min(bestHits * 2, 10)),
+    signal_type: id,
+    score,
     summary: summary || null,
     why_it_matters: null,
   };
-}
-
-function safeJson(text) {
-  if (!text) return null;
-  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  const start = cleaned.indexOf("[");
-  const end = cleaned.lastIndexOf("]");
-  if (start === -1 || end === -1) return null;
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
-    return null;
-  }
 }
 
 function buildPrompt(articles) {
@@ -106,10 +52,12 @@ function buildPrompt(articles) {
 
 For each article below, return one object with these fields:
 - "index": the article number (1-based integer)
-- "signal_type": exactly one of ${SIGNAL_TYPES.join(", ")}
+- "about_company": true only if the article is genuinely ABOUT this company. False if the company is only mentioned in passing, quoted, listed in a roundup, or named as an investor in someone else's story.
+- "signal_type": exactly one of these, using the agency's own playbook:
+${playbook.promptRules()}
 - "summary": 2 sentences, plain English, concrete. Include numbers, names and dates where the article gives them.
 - "why_it_matters": 1 sentence on the marketing opening this creates for an agency pitching this company (new budget, new launch to promote, new decision-maker, new market to enter). If there is no real opening, say so.
-- "score": integer 0-100 for how urgently a salesperson should act on this. 80+ means call them this week. Under 40 means background noise.
+- "score": integer 0-100 within the tier — Tier 1 signals belong in 80-100, Tier 2 in 50-79, Tier 3 below 40 for how urgently a salesperson should act on this. 80+ means call them this week. Under 40 means background noise.
 
 Return ONLY a JSON array. No prose, no markdown fences.
 
@@ -131,8 +79,19 @@ async function enrichBatch(model, articles) {
     const row = byIndex.get(i + 1);
     if (!row) return { ...classifyOffline(article), enriched: 0 };
 
-    const type = SIGNAL_TYPES.includes(row.signal_type) ? row.signal_type : "other";
-    const score = Number.isFinite(Number(row.score))
+    // The news API matches any article mentioning the company, so roundups and
+    // investor name-drops come back too. Gemini tells us which are actually
+    // about them; the rest are demoted rather than dropped, so they stay
+    // visible under Raw signals without polluting the tier.
+    const relevant = row.about_company !== false;
+
+    const type = relevant
+      ? SIGNAL_TYPES.includes(row.signal_type) ? row.signal_type : "none"
+      : "none";
+
+    const score = !relevant
+      ? 15
+      : Number.isFinite(Number(row.score))
       ? Math.max(0, Math.min(100, Math.round(Number(row.score))))
       : TYPE_WEIGHT[type];
 
@@ -207,10 +166,11 @@ function buildDiscoveryPrompt(articles) {
 For each article below, return one object with these fields:
 - "index": the article number (1-based integer)
 - "company": the ONE company the story is primarily about, as a clean brand name ("Zomato", not "Zomato Ltd." or "Zomato's"). This is the company a salesperson would call. NOT the investor, NOT the acquirer's target if the story is about the acquirer, NOT a company merely mentioned in passing. If the story is about a person, a government body, a whole sector, a sports match, or is not about a specific company at all, use null.
-- "signal_type": exactly one of ${SIGNAL_TYPES.join(", ")}
+- "signal_type": exactly one of these, using the agency's own playbook:
+${playbook.promptRules()}
 - "summary": 2 sentences, plain English, concrete. Include numbers, names and dates where the article gives them.
 - "why_it_matters": 1 sentence on the marketing opening this creates for an agency pitching this company. If there is no real opening, say so.
-- "score": integer 0-100 for how urgently a salesperson should act. 80+ means call them this week. Under 40 means background noise.
+- "score": integer 0-100 within the tier — Tier 1 signals belong in 80-100, Tier 2 in 50-79, Tier 3 below 40 for how urgently a salesperson should act. 80+ means call them this week. Under 40 means background noise.
 
 Be strict with "company". A wrong name creates a junk lead someone has to clean up. When in doubt, use null.
 
@@ -253,7 +213,7 @@ async function enrichDiscoveryBatch(model, articles) {
     const row = byIndex.get(i + 1);
     if (!row) return { company: null, ...classifyOffline(article), enriched: 0 };
 
-    const type = SIGNAL_TYPES.includes(row.signal_type) ? row.signal_type : "other";
+    const type = SIGNAL_TYPES.includes(row.signal_type) ? row.signal_type : "none";
     const score = Number.isFinite(Number(row.score))
       ? Math.max(0, Math.min(100, Math.round(Number(row.score))))
       : TYPE_WEIGHT[type];

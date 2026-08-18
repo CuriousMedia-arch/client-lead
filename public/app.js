@@ -3,16 +3,47 @@
    No build step: plain ES modules-free JS so `npm start` is the only command.
    ========================================================================= */
 
+// Mirrors lib/triggers.js — the agency's own playbook.
 const SIGNAL_TYPES = [
-  ["funding", "Funding"],
-  ["launch", "Launch"],
-  ["expansion", "Expansion"],
-  ["leadership", "Leadership"],
-  ["m_and_a", "M&A"],
-  ["partnership", "Partnership"],
-  ["financials", "Financials"],
-  ["other", "Other"],
+  ["capital", "Funding & Capital"],
+  ["brand_launch", "Launch & Ambassador"],
+  ["retail_expansion", "Retail Expansion"],
+  ["leadership", "Leadership Move"],
+  ["crisis", "Brand Crisis"],
+  ["none", "No clear trigger"],
 ];
+
+// Signals filed before the playbook existed used older names.
+const LEGACY_TYPES = {
+  funding: "capital", m_and_a: "capital", financials: "capital",
+  launch: "brand_launch", partnership: "brand_launch",
+  expansion: "retail_expansion", other: "none",
+};
+
+const TIER_OF = {
+  capital: 1, brand_launch: 1, retail_expansion: 1,
+  leadership: 2, crisis: 2, none: 3,
+};
+
+const TIER_TEXT = {
+  1: ["HOT", "Call today"],
+  2: ["WARM", "Reach out this week"],
+  3: ["LOW", "Drip email only"],
+};
+
+const segId = (t) => (TIER_OF[t] ? t : LEGACY_TYPES[t] || "none");
+const tierOf = (t) => TIER_OF[segId(t)];
+
+/** The badge a non-technical user reads instead of a number. */
+function tierBadge(signalType, score) {
+  const tier = tierOf(signalType);
+  const [label] = TIER_TEXT[tier];
+  return `<span class="tier tier-${tier}">
+      <span class="tier-rank">Tier ${tier}</span>
+      <span class="tier-label">${label}</span>
+      ${Number.isFinite(score) ? `<span class="tier-score">${score}</span>` : ""}
+    </span>`;
+}
 
 const STATUSES = [
   ["new", "New"],
@@ -103,7 +134,7 @@ function dateOnly(iso) {
   return String(iso).slice(0, 10);
 }
 
-const typeLabel = (t) => (SIGNAL_TYPES.find((x) => x[0] === t) || [t, t])[1];
+const typeLabel = (t) => (SIGNAL_TYPES.find((x) => x[0] === segId(t)) || [t, t])[1];
 const statusLabel = (s) => (STATUSES.find((x) => x[0] === s) || [s, s])[1];
 
 function initials(name) {
@@ -320,12 +351,11 @@ function filterBar() {
       <input class="search-input" id="f-search" type="search"
              placeholder="Search company name…" value="${esc(state.search)}" />
 
-      <span class="filter-label">Min score</span>
+      <span class="filter-label">Priority</span>
       <select class="filter-select" id="f-min">
-        <option value="0">Any</option>
-        <option value="40">40+</option>
-        <option value="60">60+ (Warm)</option>
-        <option value="80">80+ (Hot)</option>
+        <option value="0">All</option>
+        <option value="80">Tier 1 · Hot only</option>
+        <option value="50">Tier 1 + 2</option>
       </select>
 
       <span class="filter-label">Signal</span>
@@ -336,9 +366,9 @@ function filterBar() {
 
       <span class="filter-label">Sort</span>
       <select class="filter-select" id="f-sort">
-        <option value="score">Highest score</option>
-        <option value="score_asc">Lowest score</option>
-        <option value="recent">Newest signal</option>
+        <option value="score">Most urgent first</option>
+        <option value="score_asc">Least urgent first</option>
+        <option value="recent">Newest signal first</option>
         <option value="added">Recently added</option>
         <option value="company">Company name (A–Z)</option>
       </select>
@@ -384,7 +414,7 @@ function leadTable(leads) {
   return `
     <div class="lead-table-wrap">
       <div class="lead-row-head">
-        <span>Company</span><span>Score</span><span>Top signal</span><span></span>
+        <span>Company</span><span>Priority</span><span>Top signal</span><span></span>
       </div>
       ${leads
         .map(
@@ -399,12 +429,12 @@ function leadTable(leads) {
             </span>
           </div>
 
-          <div>${scoreBadge(lead.score)}</div>
+          <div>${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score)}</div>
 
           <div class="signal-cell">
             ${
               lead.top_signal
-                ? `<span class="type-tag type-${esc(lead.top_signal.signal_type)}">${esc(
+                ? `<span class="type-tag type-${esc(segId(lead.top_signal.signal_type))}">${esc(
                     typeLabel(lead.top_signal.signal_type)
                   )}</span>
                    <span class="signal-title">${esc(lead.top_signal.title || "Untitled")}</span>`
@@ -446,7 +476,7 @@ function myLeadCard(lead) {
   }
           </div>
         </div>
-        ${scoreBadge(lead.score)}
+        ${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score)}
       </div>
 
       <div class="mylead-signals">
@@ -458,7 +488,7 @@ function myLeadCard(lead) {
                   (sig) => `
           <div class="mylead-signal-row">
             <div class="mylead-signal-row-top">
-              <span class="type-tag type-${esc(sig.signal_type)}">${esc(typeLabel(sig.signal_type))}</span>
+              <span class="type-tag type-${esc(segId(sig.signal_type))}">${esc(typeLabel(sig.signal_type))}</span>
               <span class="mylead-signal-date">${esc(timeAgo(sig.published || sig.created_at))}</span>
             </div>
             <a class="mylead-signal-title" href="${esc(sig.url)}" target="_blank" rel="noopener">${esc(
@@ -475,6 +505,14 @@ function myLeadCard(lead) {
             : ""
         }
       </div>
+
+      ${
+        lead.next_action
+          ? `<div class="action-box tier-${lead.tier || 3}-box">
+               <b>Do this next</b>${esc(lead.next_action)}
+             </div>`
+          : ""
+      }
 
       ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
 
@@ -731,6 +769,15 @@ function drawerHtml(lead) {
 
   <div class="drawer-body">
 
+    ${
+      lead.next_action
+        ? `<div class="action-box tier-${lead.tier || 3}-box">
+             <b>${esc(TIER_TEXT[lead.tier || 3][0])} · ${esc(TIER_TEXT[lead.tier || 3][1])}</b>
+             ${esc(lead.next_action)}
+           </div>`
+        : ""
+    }
+
     ${companyInfoCard(lead)}
 
     ${lead.pitch ? `<div class="pitch-box"><b>What to pitch</b>${esc(lead.pitch)}</div>` : ""}
@@ -796,7 +843,7 @@ function drawerHtml(lead) {
                 .map(
                   (s) => `
           <div class="sig-card">
-            <span class="type-tag type-${esc(s.signal_type)}">${esc(typeLabel(s.signal_type))}</span>
+            <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(typeLabel(s.signal_type))}</span>
             <span class="score ${scoreClass(s.score)}" style="float:right">${s.score}<small>score</small></span>
             <p class="sig-title" style="margin-top:8px">
               <a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || "Untitled article")}</a>
