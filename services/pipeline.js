@@ -105,8 +105,15 @@ async function runDiscovery(runId, log = console.log, counters = null) {
 
   // The playbook's phrases are what actually define a buying signal; anything
   // in the topics table is treated as an extra the user added by hand.
-  const topics = [...new Set([...playbook.allKeywords(), ...topicRows.map((t) => t.keyword)])];
-  if (!sites.length || !topics.length) {
+  // NewsAPI counts every WORD in the query against the plan's limit, so the
+  // full playbook (185 words) is rejected outright. Discovery uses compact
+  // single-word terms and splits them into queries that fit the budget.
+  const budget = Number(process.env.DISCOVERY_TERM_BUDGET || 15);
+  const extra = topicRows.map((t) => t.keyword).filter((k) => !/\s/.test(k));
+  const terms = [...new Set([...playbook.discoveryTerms(), ...extra])];
+  const groups = playbook.chunkTerms(terms, budget);
+
+  if (!sites.length || !groups.length) {
     log("[discover] Needs at least one active source and one keyword. Skipping.");
     return 0;
   }
@@ -124,25 +131,34 @@ async function runDiscovery(runId, log = console.log, counters = null) {
   const articles = [];
   const seen = new Set();
 
-  // Same batching as the watchlist sweep: all sources in one request.
-  try {
-    const found = await discoveryScraper({
-      site: "all",
-      sourceUris: sites.map((s) => s.domain),
-      topics,
-      size: Number(process.env.DISCOVERY_PER_SITE || 60),
-      sinceHours: Number(process.env.DISCOVERY_WINDOW_HOURS || 48),
-    });
-    for (const a of found) {
-      if (!a.url || seen.has(a.url)) continue;
-      seen.add(a.url);
-      articles.push(a);
+  // One query per term group. Each is a legal query on its own; together they
+  // cover the whole playbook without ever exceeding the word budget.
+  log(`[discover] ${terms.length} terms across ${groups.length} quer${groups.length === 1 ? "y" : "ies"} (budget ${budget} words each)`);
+
+  for (const group of groups) {
+    try {
+      const found = await discoveryScraper({
+        site: "all",
+        sourceUris: sites.map((s) => s.domain),
+        topics: group,
+        size: Number(process.env.DISCOVERY_PER_SITE || 60),
+        sinceHours: Number(process.env.DISCOVERY_WINDOW_HOURS || 48),
+      });
+
+      let added = 0;
+      for (const a of found) {
+        if (!a.url || seen.has(a.url)) continue;
+        seen.add(a.url);
+        articles.push(a);
+        added++;
+      }
+      log(`[discover] "${group.slice(0, 4).join(", ")}…" returned ${found.length}, ${added} new`);
+    } catch (err) {
+      if (counters) counters.errors += 1;
+      log(`[discover] sweep failed: ${err.message}`);
     }
-  } catch (err) {
-    if (counters) counters.errors += 1;
-    log(`[discover] sweep failed: ${err.message}`);
+    await delay(REQUEST_DELAY_MS);
   }
-  await delay(REQUEST_DELAY_MS);
 
   if (!articles.length) {
     log("[discover] Nothing came back.");

@@ -33,6 +33,37 @@ function classifyOffline(article) {
   };
 }
 
+/**
+ * Parse whatever the model returned as JSON.
+ *
+ * Models wrap JSON in ```json fences, add a sentence of preamble, or trail a
+ * closing remark — even when told not to. Rather than fail the whole batch on
+ * a stray character, strip the usual wrappers and, failing that, take the
+ * outermost array or object in the text.
+ */
+function safeJson(text) {
+  if (!text) return null;
+
+  let body = String(text).trim();
+
+  // ```json … ``` or ``` … ```
+  body = body.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    // Fall back to the widest bracketed span in the response.
+    const start = body.search(/[[{]/);
+    const end = Math.max(body.lastIndexOf("]"), body.lastIndexOf("}"));
+    if (start === -1 || end === -1 || end <= start) return null;
+    try {
+      return JSON.parse(body.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
 function buildPrompt(articles) {
   const block = articles
     .map((a, i) =>
@@ -66,7 +97,11 @@ ${block}`;
 }
 
 async function enrichBatch(articles) {
-  const parsed = safeJson(await gemini.generate(buildPrompt(articles)));
+  const raw = await gemini.generate(buildPrompt(articles));
+  const parsed = safeJson(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Gemini returned unparseable JSON: ${String(raw).slice(0, 120)}`);
+  }
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 
   const byIndex = new Map();
@@ -198,7 +233,11 @@ function cleanCompanyName(raw) {
 }
 
 async function enrichDiscoveryBatch(articles) {
-  const parsed = safeJson(await gemini.generate(buildDiscoveryPrompt(articles)));
+  const raw = await gemini.generate(buildDiscoveryPrompt(articles));
+  const parsed = safeJson(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Gemini returned unparseable JSON: ${String(raw).slice(0, 120)}`);
+  }
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 
   const byIndex = new Map();

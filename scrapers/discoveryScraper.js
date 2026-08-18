@@ -29,6 +29,17 @@ async function discoveryScraper(config) {
     throw new Error("Discovery needs at least one keyword to sweep for.");
   }
 
+  // NewsAPI counts WORDS, not phrases. Catch an over-budget query here rather
+  // than spending an API call to be told no.
+  const budget = Number(process.env.DISCOVERY_TERM_BUDGET || 15);
+  const words = topics.reduce((n, t) => n + String(t).trim().split(/\s+/).length, 0);
+  if (words > budget) {
+    throw new Error(
+      `Query would use ${words} keyword words but the plan allows ${budget}. ` +
+        `Lower DISCOVERY_TERM_BUDGET to match your NewsAPI subscription, or shorten the terms.`
+    );
+  }
+
   const sources = config.sourceUris && config.sourceUris.length
     ? config.sourceUris
     : [config.sourceUri].filter(Boolean);
