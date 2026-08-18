@@ -4,6 +4,7 @@ const { requireAuth, requireAdmin, hashPassword } = require("../lib/auth");
 const { runPipeline, isRunning, runState, buildQueries, ensureLead } = require("../services/pipeline");
 const { triggerRemoteRun, remoteRunConfigured } = require("../lib/remoteRun");
 const { parseContactSheet } = require("../lib/csvImport");
+const gemini = require("../lib/gemini");
 
 const router = express.Router();
 
@@ -377,6 +378,21 @@ router.post("/discoveries/:id/:decision", async (req, res, next) => {
     }
 
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- diagnostics -------------------------------------------------------------
+
+/**
+ * Sends one tiny prompt to Gemini and reports exactly what came back, so a
+ * dead key, a wrong model name or an exhausted quota can be told apart
+ * without reading server logs.
+ */
+router.get("/gemini-check", async (req, res, next) => {
+  try {
+    res.json(await gemini.healthCheck());
   } catch (err) {
     next(err);
   }

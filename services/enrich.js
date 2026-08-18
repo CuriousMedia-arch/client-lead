@@ -1,9 +1,9 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const gemini = require("../lib/gemini");
 require("dotenv").config();
 
 const playbook = require("../lib/triggers");
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = gemini.MODEL;
 const BATCH_SIZE = 6;
 
 const SIGNAL_TYPES = playbook.SEGMENT_IDS;
@@ -65,9 +65,8 @@ Return ONLY a JSON array. No prose, no markdown fences.
 ${block}`;
 }
 
-async function enrichBatch(model, articles) {
-  const result = await model.generateContent(buildPrompt(articles));
-  const parsed = safeJson(result.response.text());
+async function enrichBatch(articles) {
+  const parsed = safeJson(await gemini.generate(buildPrompt(articles)));
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 
   const byIndex = new Map();
@@ -119,15 +118,12 @@ async function enrichArticles(articles, log = console.log) {
     return articles.map((a) => ({ ...classifyOffline(a), enriched: 0 }));
   }
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: MODEL });
-
   const out = [];
   for (let i = 0; i < articles.length; i += BATCH_SIZE) {
     const batch = articles.slice(i, i + BATCH_SIZE);
     try {
       log(`[enrich] ${MODEL}: batch ${Math.floor(i / BATCH_SIZE) + 1} (${batch.length} articles)`);
-      out.push(...(await enrichBatch(model, batch)));
+      out.push(...(await enrichBatch(batch)));
     } catch (err) {
       log(`[enrich] Batch failed (${err.message}) - falling back to keywords.`);
       out.push(...batch.map((a) => ({ ...classifyOffline(a), enriched: 0 })));
@@ -201,9 +197,8 @@ function cleanCompanyName(raw) {
   return name;
 }
 
-async function enrichDiscoveryBatch(model, articles) {
-  const result = await model.generateContent(buildDiscoveryPrompt(articles));
-  const parsed = safeJson(result.response.text());
+async function enrichDiscoveryBatch(articles) {
+  const parsed = safeJson(await gemini.generate(buildDiscoveryPrompt(articles)));
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 
   const byIndex = new Map();
@@ -249,15 +244,12 @@ async function enrichDiscoveries(articles, log = console.log) {
     return articles.map(() => ({ company: null, enriched: 0 }));
   }
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: MODEL });
-
   const out = [];
   for (let i = 0; i < articles.length; i += BATCH_SIZE) {
     const batch = articles.slice(i, i + BATCH_SIZE);
     try {
       log(`[discover] ${MODEL}: batch ${Math.floor(i / BATCH_SIZE) + 1} (${batch.length} articles)`);
-      out.push(...(await enrichDiscoveryBatch(model, batch)));
+      out.push(...(await enrichDiscoveryBatch(batch)));
     } catch (err) {
       log(`[discover] Batch failed (${err.message}) - those articles are dropped.`);
       out.push(...batch.map(() => ({ company: null, enriched: 0 })));

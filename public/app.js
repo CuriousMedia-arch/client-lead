@@ -361,7 +361,7 @@ function currentQuery() {
 // ── Page furniture ─────────────────────────────────────────────────────────
 
 const PAGE_COPY = {
-  all: ["All Leads", "Your database, scored by how likely they are to buy right now."],
+  all: ["All Leads"],
   today: ["Today's Leads", "Companies found in the news that aren't in your database yet."],
   mine: ["My Outreach", "Leads you've claimed. Everyone can see them; only you own them."],
 };
@@ -1145,6 +1145,18 @@ async function renderAdmin() {
         : ""
     }
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>AI enrichment</h3>
+      <p class="hint">
+        Gemini writes the summary, the company-specific pitch, and finds companies for
+        Today's Leads. Without it the portal still works, but pitches stay generic.
+      </p>
+      <div class="inline-form">
+        <button class="btn" id="gemini-check">Test the connection</button>
+      </div>
+      <div id="gemini-result"></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <h3>Import your contact sheet</h3>
       <p class="hint">
         Export the sheet as CSV and drop it here. Every <strong>Company name</strong> becomes a
@@ -1360,6 +1372,21 @@ function wireAdmin() {
   root.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
+
+    if (btn.id === "gemini-check") {
+      const out = $("#gemini-result");
+      out.innerHTML = `<p class="hint" style="margin-top:10px">Sending a test prompt…</p>`;
+      try {
+        const r = await api("/api/admin/gemini-check");
+        out.innerHTML = r.ok
+          ? `<p class="hint" style="margin-top:10px"><strong style="color:var(--teal)">Working.</strong>
+               ${esc(r.model)} answered. Pitches will be written for each company.</p>`
+          : `<p class="hint" style="margin-top:10px"><strong>Not working.</strong> ${esc(r.reason)}</p>`;
+      } catch (err) {
+        out.innerHTML = `<p class="hint" style="margin-top:10px"><strong>${esc(err.message)}</strong></p>`;
+      }
+      return;
+    }
 
     if (btn.id === "csv-go") {
       const input = $("#csv-file");
