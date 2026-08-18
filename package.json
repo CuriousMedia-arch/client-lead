@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "setup": "node db/seed.js",
-    "scrape": "node services/runOnce.js"
+    "scrape": "node services/runOnce.js",
+    "discover": "node services/discoverOnce.js"
   },
   "dependencies": {
     "axios": "^1.7.0",
