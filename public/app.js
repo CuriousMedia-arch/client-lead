@@ -1442,7 +1442,6 @@ function drawerHtml(lead) {
                   (s) => `
           <div class="sig-card">
             <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(typeLabel(s.signal_type))}</span>
-            <span class="score ${scoreClass(s.score)}" style="float:right">${s.score}<small>score</small></span>
             <p class="sig-title" style="margin-top:8px">
               <a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || "Untitled article")}</a>
             </p>
