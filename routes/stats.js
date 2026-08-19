@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../lib/auth");
+const lifecycle = require("../lib/lifecycle");
 const { isRunning, runState } = require("../services/pipeline");
 const { SCHEDULE, TIMEZONE } = require("../services/scheduler");
 
@@ -9,58 +10,57 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
+    await lifecycle.sweepExpired();
     // This used to be ten separate COUNT queries. Over a remote connection
     // that's ten lots of latency for numbers that all fit in one row, so
     // they're scalar subqueries in a single round trip instead.
+    const days = Number(process.env.FRESH_WINDOW_DAYS || 3);
+
     const [row, lastRun] = await Promise.all([
       db.one(
         `SELECT
-           (SELECT COUNT(DISTINCT s.lead_id) FROM signals s
-              JOIN leads l ON l.id = s.lead_id
-              JOIN companies c ON c.id = l.company_id
-             WHERE s.created_at >= now() - interval '1 day'
-               AND c.approval = 'approved')                                   AS new_in_24h,
-           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
-             WHERE c.approval = 'pending')                                    AS today_pool,
+           (SELECT COUNT(*) FROM leads WHERE pool = 'all')                     AS total_leads,
+           (SELECT COUNT(*) FROM leads l
+             WHERE l.pool = 'all'
+               AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
+                            AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
+                                                                               AS fresh,
+           (SELECT COUNT(*) FROM leads WHERE owner_id = $1)                    AS mine,
+           (SELECT COUNT(*) FROM leads WHERE pool = 'newspaper')               AS newspaper,
            (SELECT COUNT(*) FROM leads
-             WHERE status IN ('working','contacted','replied','qualified'))   AS active_pipeline,
-           (SELECT COUNT(*) FROM leads
-             WHERE next_followup_at IS NOT NULL
-               AND next_followup_at <= current_date)                          AS followups_due,
-           (SELECT COUNT(DISTINCT lead_id) FROM activity
-             WHERE created_at >= now() - interval '7 days')                   AS touched_this_week,
-           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
-             WHERE c.approval = 'approved')                                   AS total_leads,
-           (SELECT COUNT(*) FROM signals)                                     AS total_signals,
-           (SELECT COUNT(*) FROM companies WHERE active)                      AS total_companies,
-           (SELECT COUNT(*) FROM sites WHERE active)                          AS total_sites,
-           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
-             WHERE l.owner_id = $1 AND c.approval <> 'rejected')              AS mine,
-           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
-             WHERE c.approval = 'pending')                                   AS fresh`,
-        [req.user.id]
+             WHERE owner_id = $1 AND closed_at IS NULL
+               AND deadline_at IS NOT NULL
+               AND deadline_at < now() + interval '3 days')                    AS due_soon,
+           (SELECT COUNT(*) FROM leads WHERE owner_id = $1 AND closed_at IS NOT NULL)
+                                                                               AS closed_by_me,
+           (SELECT COUNT(*) FROM signals)                                      AS total_signals,
+           (SELECT COUNT(*) FROM companies WHERE active)                       AS total_companies,
+           (SELECT COUNT(*) FROM sites WHERE active)                           AS total_sites,
+           (SELECT COUNT(*) FROM company_contacts)                             AS total_contacts`,
+        [req.user.id, days]
       ),
       db.one("SELECT * FROM runs WHERE status <> 'running' ORDER BY id DESC LIMIT 1"),
     ]);
 
     res.json({
       stats: {
-        newIn24h: row.new_in_24h,
-        activePipeline: row.active_pipeline,
-        followupsDue: row.followups_due,
-        touchedThisWeek: row.touched_this_week,
+        fresh: row.fresh,
+        dueSoon: row.due_soon,
+        mine: row.mine,
+        closedByMe: row.closed_by_me,
       },
       totals: {
         leads: row.total_leads,
+        fresh: row.fresh,
+        mine: row.mine,
+        newspaper: row.newspaper,
         signals: row.total_signals,
         companies: row.total_companies,
         sites: row.total_sites,
-        mine: row.mine,
-        fresh: row.fresh,
-        today: row.today_pool,
+        contacts: row.total_contacts,
       },
       run: { running: isRunning(), current: runState(), last: lastRun || null },
-      schedule: { cron: SCHEDULE, timezone: TIMEZONE },
+      schedule: { cron: SCHEDULE, timezone: TIMEZONE, freshWindowDays: days },
     });
   } catch (err) {
     next(err);

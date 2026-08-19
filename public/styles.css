@@ -1351,3 +1351,128 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   letter-spacing: .04em;
   color: var(--amber-ink);
 }
+
+/* ── Priority tier (no numeric score) ────────────────────────────────────── */
+
+.tier { display: inline-flex; align-items: center; gap: 8px; }
+.tier-note { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+
+/* ── Claim countdown ─────────────────────────────────────────────────────── */
+
+.clock {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.clock-ok   { background: var(--teal-tint);  color: var(--teal-dark); }
+.clock-soon { background: var(--amber-tint); color: var(--amber-ink); }
+.clock-over { background: var(--coral-tint); color: var(--coral); }
+.clock-done { background: var(--green-tint); color: #26663B; }
+
+.mylead-corner { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.mylead-card.is-closed { opacity: .72; }
+
+.drawer-clock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 20px;
+}
+
+/* ── All Leads: the database table ───────────────────────────────────────── */
+
+.db-table {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.db-head, .db-row {
+  display: grid;
+  grid-template-columns: 34px minmax(150px, 1.4fr) minmax(110px, 1fr) 100px 120px 70px 130px auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.db-head {
+  background: var(--surface-sunk);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+}
+
+.db-row { border-bottom: 1px solid var(--line); }
+.db-row:hover { background: var(--surface-sunk); }
+
+.db-toggle {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink-faint);
+  padding: 4px;
+  border-radius: var(--radius-sm);
+}
+.db-toggle:hover { background: var(--line); color: var(--ink); }
+
+.db-company { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.db-cell { font-size: 13px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; }
+.muted { color: var(--ink-faint); font-size: 12.5px; }
+
+.db-contacts { background: var(--surface-sunk); border-bottom: 1px solid var(--line); }
+
+.contact-head, .contact-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(130px, 1.2fr) minmax(150px, 1.3fr) 130px 80px;
+  gap: 12px;
+  padding: 9px 16px 9px 50px;
+  font-size: 12.5px;
+  align-items: center;
+}
+.contact-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+}
+.contact-row { border-top: 1px solid var(--line); }
+.contact-row a { color: var(--teal); text-decoration: none; }
+.contact-row a:hover { text-decoration: underline; }
+
+/* ── Signals grouped by day ──────────────────────────────────────────────── */
+
+.sig-day { display: flex; flex-direction: column; gap: 8px; }
+.sig-day + .sig-day { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.sig-day-label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+}
+.mylead-signal-row { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+
+@media (max-width: 1000px) {
+  .db-head { display: none; }
+  .db-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    row-gap: 6px;
+  }
+  .db-row > .db-cell { display: none; }
+  .contact-head { display: none; }
+  .contact-row { grid-template-columns: minmax(0, 1fr); padding-left: 24px; row-gap: 2px; }
+}

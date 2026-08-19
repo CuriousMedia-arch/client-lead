@@ -301,17 +301,24 @@ router.post("/import", async (req, res, next) => {
 
       for (const p of contacts) {
         const { rows } = await q(
-          `INSERT INTO company_contacts (company, name, role, email, phone, linkedin, notes, is_primary)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          `INSERT INTO company_contacts
+             (company, name, role, email, phone, phone_type, linkedin, notes,
+              seniority, department, city, is_primary)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
            ON CONFLICT (lower(company), lower(name)) DO UPDATE
-              SET role       = COALESCE(EXCLUDED.role,     company_contacts.role),
-                  email      = COALESCE(EXCLUDED.email,    company_contacts.email),
-                  phone      = COALESCE(EXCLUDED.phone,    company_contacts.phone),
-                  linkedin   = COALESCE(EXCLUDED.linkedin, company_contacts.linkedin),
-                  notes      = COALESCE(EXCLUDED.notes,    company_contacts.notes),
+              SET role       = COALESCE(EXCLUDED.role,       company_contacts.role),
+                  email      = COALESCE(EXCLUDED.email,      company_contacts.email),
+                  phone      = COALESCE(EXCLUDED.phone,      company_contacts.phone),
+                  phone_type = COALESCE(EXCLUDED.phone_type, company_contacts.phone_type),
+                  linkedin   = COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
+                  notes      = COALESCE(EXCLUDED.notes,      company_contacts.notes),
+                  seniority  = COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
+                  department = COALESCE(EXCLUDED.department, company_contacts.department),
+                  city       = COALESCE(EXCLUDED.city,       company_contacts.city),
                   is_primary = company_contacts.is_primary OR EXCLUDED.is_primary
            RETURNING (xmax = 0) AS inserted`,
-          [p.company, p.name, p.role, p.email, p.phone, p.linkedin, p.notes, p.is_primary]
+          [p.company, p.name, p.role, p.email, p.phone, p.phone_type, p.linkedin, p.notes,
+           p.seniority, p.department, p.city, p.is_primary]
         );
         if (rows[0].inserted) contactsAdded++;
       }
@@ -329,70 +336,31 @@ router.post("/import", async (req, res, next) => {
   }
 });
 
-// --- discovered companies (approval queue) -----------------------------------
-
-router.get("/discoveries", async (req, res, next) => {
+/**
+ * Fresh Leads nobody has claimed.
+ *
+ * Fresh Leads are news about companies already in the database, so there are
+ * no new companies to approve any more. What an admin does need is a list of
+ * signals the team has walked past.
+ */
+router.get("/unclaimed", async (req, res, next) => {
   try {
-    const companies = await db.all(
-      `SELECT c.id, c.name, c.approval, c.created_at, l.id AS lead_id,
-              (SELECT COUNT(*)::int FROM signals s WHERE s.lead_id = l.id) AS signal_count,
-              (SELECT MAX(s.score) FROM signals s WHERE s.lead_id = l.id)  AS top_score,
+    const days = Number(process.env.FRESH_WINDOW_DAYS || 3);
+    const leads = await db.all(
+      `SELECT l.id, c.name AS company, l.last_signal_at,
+              (SELECT COUNT(*)::int FROM signals s WHERE s.lead_id = l.id
+                AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval) AS fresh_count,
               (SELECT s.title FROM signals s WHERE s.lead_id = l.id
-                ORDER BY s.score DESC LIMIT 1)                             AS top_title
-         FROM companies c LEFT JOIN leads l ON l.company_id = c.id
-        WHERE c.approval = 'pending'
-        ORDER BY top_score DESC NULLS LAST, c.name`
+                ORDER BY COALESCE(s.published, s.created_at) DESC LIMIT 1) AS top_title
+         FROM leads l JOIN companies c ON c.id = l.company_id
+        WHERE l.owner_id IS NULL
+          AND l.pool = 'all'
+          AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
+                       AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval)
+        ORDER BY l.last_signal_at DESC NULLS LAST`,
+      [days]
     );
-    res.json({ companies });
-  } catch (err) {
-    next(err);
-  }
-});
-
-/**
- * Approve  -> joins the watchlist and gets scanned on every cycle from now on.
- * Reject   -> stays out of every tab, and the sweep won't file it again.
- */
-router.post("/discoveries/:id/:decision", async (req, res, next) => {
-  try {
-    const decision = req.params.decision;
-    if (!["approve", "reject"].includes(decision)) {
-      return res.status(400).json({ error: "Approve or reject." });
-    }
-
-    const company = await db.one("SELECT * FROM companies WHERE id = $1", [req.params.id]);
-    if (!company) return res.status(404).json({ error: "That company is no longer listed." });
-
-    if (decision === "approve") {
-      await db.run(
-        `UPDATE companies SET approval = 'approved', origin = 'watchlist', active = true
-          WHERE id = $1`,
-        [company.id]
-      );
-    } else {
-      // Keep the row so the sweep recognises the name and skips it next time.
-      await db.run(
-        "UPDATE companies SET approval = 'rejected', active = false WHERE id = $1",
-        [company.id]
-      );
-    }
-
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// --- diagnostics -------------------------------------------------------------
-
-/**
- * Sends one tiny prompt to Gemini and reports exactly what came back, so a
- * dead key, a wrong model name or an exhausted quota can be told apart
- * without reading server logs.
- */
-router.get("/gemini-check", async (req, res, next) => {
-  try {
-    res.json(await gemini.healthCheck());
+    res.json({ leads, windowDays: days });
   } catch (err) {
     next(err);
   }

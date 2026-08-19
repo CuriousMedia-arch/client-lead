@@ -317,8 +317,10 @@ async function runPipeline(trigger = "manual", log = console.log) {
       currentRun.newSignals = await saveSignals(fresh, enrichment, runId);
     }
 
-    // Second phase: find companies that aren't on the watchlist at all.
-    if (process.env.DISCOVERY_ENABLED !== "false") {
+    // Fresh Leads is news about companies already in the database, so the
+    // portal no longer hunts for unknown companies. The sweep is kept behind a
+    // flag rather than deleted, in case that changes back.
+    if (process.env.DISCOVERY_ENABLED === "true") {
       currentRun.phase = "discovery";
       try {
         currentRun.newSignals += await runDiscovery(runId, log, currentRun);

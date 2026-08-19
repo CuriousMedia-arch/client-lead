@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../lib/auth");
 const playbook = require("../lib/triggers");
+const lifecycle = require("../lib/lifecycle");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -10,8 +11,8 @@ const STATUSES = ["new", "working", "contacted", "replied", "qualified", "won", 
 const OPEN_STATUSES = ["working", "contacted", "replied", "qualified"];
 const CONTACT_KINDS = ["email", "call", "linkedin", "meeting"];
 
-// Whitelisted so a query string can never inject an interval.
-const FRESHNESS = { "24h": "1 day", "48h": "2 days", "7d": "7 days", "30d": "30 days" };
+// How recent a signal must be to put a company in Fresh Leads.
+const FRESH_DAYS = Number(process.env.FRESH_WINDOW_DAYS || 3);
 
 const list = (v) =>
   String(v || "")
@@ -20,40 +21,33 @@ const list = (v) =>
     .filter(Boolean);
 
 /**
- * The one query that powers Today's Leads, All Leads and My Outreach.
- * Everything is a WHERE clause on the same shape, so the tabs stay consistent.
+ * The four views are all the same query with a different WHERE.
  *
- * Postgres takes positional parameters, so bind() appends a value and hands
- * back the $n placeholder to drop into the SQL.
+ *   all       - the contact database. Every company, no signals shown.
+ *   fresh     - companies from that database with news in the last few days.
+ *   mine      - what this user has claimed, with its countdown.
+ *   newspaper - the parking lot: Fresh claims that ran out of time.
  */
 async function queryLeads(params, user) {
+  const tab = params.tab || "all";
   const where = [];
   const args = [];
   const bind = (v) => `$${args.push(v)}`;
 
-  // --- which pool -------------------------------------------------------------
-  //   today -> companies the sweep found in the news that aren't ours yet.
-  //            Claimable straight away; they join All Leads once approved.
-  //   all   -> the watchlist: everything imported from the CSV, plus every
-  //            discovered company that has been approved.
-  //   mine  -> whatever this user owns, from either pool.
-  const tab = params.tab || "all";
-  const freshness = FRESHNESS[params.freshness];
-
-  if (tab === "today") where.push("c.approval = 'pending'");
-  else if (tab === "mine") {
-    where.push(`l.owner_id = ${bind(user.id)}`);
-    where.push("c.approval <> 'rejected'");
-  } else where.push("c.approval = 'approved'");
-
-  if (freshness) {
+  if (tab === "fresh") {
+    where.push("l.pool = 'all'");
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
-                AND COALESCE(s.published, s.created_at) >= now() - interval '${freshness}')`
+                AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days')`
     );
+  } else if (tab === "mine") {
+    where.push(`l.owner_id = ${bind(user.id)}`);
+  } else if (tab === "newspaper") {
+    where.push("l.pool = 'newspaper'");
+  } else {
+    where.push("l.pool = 'all'");
   }
 
-  // --- signal type -----------------------------------------------------------
   const types = list(params.types);
   if (types.length) {
     where.push(
@@ -62,143 +56,151 @@ async function queryLeads(params, user) {
     );
   }
 
-  // --- status ----------------------------------------------------------------
   const statuses = list(params.status).filter((s) => STATUSES.includes(s));
   if (statuses.length) where.push(`l.status = ANY(${bind(statuses)})`);
 
-  // --- outreach hygiene ------------------------------------------------------
-  for (const flag of list(params.hygiene)) {
-    switch (flag) {
-      case "stale30":
-        where.push(
-          "(l.last_contacted_at IS NULL OR l.last_contacted_at < now() - interval '30 days')"
-        );
-        break;
-      case "unclaimed":
-        where.push("l.owner_id IS NULL");
-        break;
-      case "mine":
-        where.push(`l.owner_id = ${bind(user.id)}`);
-        break;
-      case "followup":
-        where.push("(l.next_followup_at IS NOT NULL AND l.next_followup_at <= current_date)");
-        break;
-      case "hascontact":
-        where.push("(l.contact_email IS NOT NULL AND l.contact_email <> '')");
-        break;
+  if (params.q) {
+    const q = bind(`%${String(params.q).toLowerCase()}%`);
+    where.push(`(LOWER(c.name) LIKE ${q} OR LOWER(COALESCE(c.industry,'')) LIKE ${q})`);
+  }
+
+  if (params.tier) {
+    // Tier is derived from the trigger, so filter on the trigger types it covers.
+    const ids = playbook.SEGMENTS.filter((s) => String(s.tier) === String(params.tier)).map(
+      (s) => s.id
+    );
+    if (ids.length) {
+      where.push(
+        `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id AND s.signal_type = ANY(${bind(ids)}))`
+      );
     }
   }
 
-  // --- minimum score ---------------------------------------------------------
-  const minScore = Number(params.minScore || 0);
-  if (Number.isFinite(minScore) && minScore > 0) where.push(`l.score >= ${bind(minScore)}`);
-
-  // --- search ----------------------------------------------------------------
-  if (params.q) {
-    const q = bind(`%${String(params.q).toLowerCase()}%`);
-    where.push(`(LOWER(c.name) LIKE ${q} OR LOWER(COALESCE(l.contact_name,'')) LIKE ${q})`);
-  }
-
   const sortMap = {
-    score: "l.score DESC, l.last_signal_at DESC NULLS LAST",
-    score_asc: "l.score ASC, LOWER(c.name) ASC",
-    recent: "l.last_signal_at DESC NULLS LAST, l.score DESC",
-    added: "c.created_at DESC, LOWER(c.name) ASC",
+    urgent: "l.deadline_at ASC NULLS LAST, LOWER(c.name) ASC",
+    recent: "l.last_signal_at DESC NULLS LAST, LOWER(c.name) ASC",
     company: "LOWER(c.name) ASC",
-    followup: "l.next_followup_at ASC NULLS LAST",
+    added: "c.created_at DESC, LOWER(c.name) ASC",
   };
-  const orderBy = sortMap[params.sort] || sortMap.score;
+  const orderBy = sortMap[params.sort] || (tab === "mine" ? sortMap.urgent : sortMap.company);
 
   const leads = await db.all(
-    `SELECT l.id, l.status, l.owner_id, l.contact_name, l.contact_role,
-            l.contact_email, l.contact_phone, l.last_contacted_at,
-            l.next_followup_at, l.last_signal_at, l.score,
-            c.name AS company, c.id AS company_id, c.origin, c.approval,
+    `SELECT l.id, l.status, l.owner_id, l.pool,
+            l.claimed_at, l.claim_source, l.deadline_at, l.closed_at,
+            l.contact_name, l.contact_role, l.contact_email, l.contact_phone,
+            l.last_contacted_at, l.next_followup_at, l.last_signal_at,
+            c.name AS company, c.id AS company_id,
             c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
             c.created_at AS added_at,
             u.display_name AS owner_name,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
-               AND s.created_at >= now() - interval '1 day') AS new_count,
-            (SELECT COUNT(*) FROM activity a WHERE a.lead_id = l.id) AS activity_count
+               AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days') AS fresh_count,
+            (SELECT COUNT(*) FROM company_contacts cc
+              WHERE lower(cc.company) = lower(c.name)) AS contact_count
        FROM leads l
        JOIN companies c ON c.id = l.company_id
        LEFT JOIN users u ON u.id = l.owner_id
       ${where.length ? "WHERE " + where.join("\n        AND ") : ""}
       ORDER BY ${orderBy}
-      LIMIT 300`,
+      LIMIT 400`,
     args
   );
 
   if (!leads.length) return leads;
 
-  // Attach the three most useful signals per lead for the card preview.
-  // One query for the whole page rather than one per lead - on a serverless
-  // connection every extra round trip is real latency.
-  const ranked = await db.all(
-    `SELECT * FROM (
-       SELECT s.id, s.lead_id, s.title, s.url, s.site, s.published, s.created_at,
-              s.signal_type, s.score, s.summary, s.why_it_matters, s.pitch,
-              ROW_NUMBER() OVER (
-                PARTITION BY s.lead_id
-                ORDER BY s.score DESC, COALESCE(s.published, s.created_at) DESC
-              ) AS rn
-         FROM signals s
-        WHERE s.lead_id = ANY($1)
-     ) t WHERE t.rn <= 3`,
-    [leads.map((l) => l.id)]
-  );
+  // All Leads is a database view — no signals, no pitch. Everywhere else gets
+  // the news that justifies the lead.
+  if (tab !== "all") await attachSignals(leads);
 
-  const byLead = new Map();
-  for (const s of ranked) {
-    if (!byLead.has(s.lead_id)) byLead.set(s.lead_id, []);
-    byLead.get(s.lead_id).push(s);
-  }
-
-  // Every distinct trigger in the scoring window, with the headline that
-  // earned it — this is what the score popover shows.
-  const triggerRows = await db.all(
-    `SELECT DISTINCT ON (s.lead_id, s.signal_type)
-            s.lead_id, s.signal_type, s.score, s.title, s.url,
-            COALESCE(s.published, s.created_at) AS at
-       FROM signals s
-      WHERE s.lead_id = ANY($1)
-        AND COALESCE(s.published, s.created_at) >= now() - interval '30 days'
-      ORDER BY s.lead_id, s.signal_type, s.score DESC`,
-    [leads.map((l) => l.id)]
-  );
-
-  const triggersByLead = new Map();
-  for (const t of triggerRows) {
-    if (!triggersByLead.has(t.lead_id)) triggersByLead.set(t.lead_id, []);
-    triggersByLead.get(t.lead_id).push(t);
-  }
   for (const lead of leads) {
-    lead.signals = byLead.get(lead.id) || [];
-    const top = lead.signals[0] || null;
-    lead.top_signal = top;
-    Object.assign(
-      lead,
-      playbookFor(top && top.signal_type, top && top.pitch, {
-        company: lead.company,
-        headline: top && top.title,
-        when: top ? timeAgo(top.published || top.created_at) : null,
-        industry: lead.industry,
-      })
-    );
-    lead.score_breakdown = breakdownFor(triggersByLead.get(lead.id) || []);
-    // The stored column is a sort key that only refreshes on a scan. The
-    // breakdown is computed from the signals right now, so it wins — otherwise
-    // the badge and the explanation disagree.
-    lead.score = lead.score_breakdown.total;
+    lead.countdown = lifecycle.countdown(lead);
+    lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
   }
 
   return leads;
 }
 
+/** Recent signals per lead, newest first, plus the tier they imply. */
+async function attachSignals(leads) {
+  const rows = await db.all(
+    `SELECT * FROM (
+       SELECT s.id, s.lead_id, s.title, s.url, s.site, s.published, s.created_at,
+              s.signal_type, s.summary, s.why_it_matters, s.pitch,
+              ROW_NUMBER() OVER (
+                PARTITION BY s.lead_id
+                ORDER BY COALESCE(s.published, s.created_at) DESC
+              ) AS rn
+         FROM signals s
+        WHERE s.lead_id = ANY($1)
+     ) t WHERE t.rn <= 8`,
+    [leads.map((l) => l.id)]
+  );
+
+  const byLead = new Map();
+  for (const s of rows) {
+    if (!byLead.has(s.lead_id)) byLead.set(s.lead_id, []);
+    byLead.get(s.lead_id).push(s);
+  }
+
+  for (const lead of leads) {
+    const signals = byLead.get(lead.id) || [];
+    lead.signals = signals;
+
+    // The strongest trigger present decides the tier — no numeric score.
+    const best = signals
+      .slice()
+      .sort((a, b) => playbook.tierOf(a.signal_type) - playbook.tierOf(b.signal_type))[0];
+
+    const seg = playbook.segment(best && best.signal_type);
+    lead.tier = seg.tier;
+    lead.tier_label = playbook.TIERS[seg.tier].label;
+    lead.tier_note = playbook.TIERS[seg.tier].note;
+    lead.segment_label = seg.label;
+    lead.angle = seg.angle;
+    lead.next_action = seg.action;
+    lead.pitch =
+      (best && best.pitch && best.pitch.trim()) ||
+      playbook.composePitch({
+        company: lead.company,
+        signalType: best && best.signal_type,
+        headline: best && best.title,
+        when: best ? timeAgo(best.published || best.created_at) : null,
+        industry: lead.industry,
+      });
+    lead.pitch_is_tailored = Boolean(best && best.pitch && best.pitch.trim());
+  }
+}
+
 router.get("/", async (req, res, next) => {
   try {
+    // Always settle expired claims before answering, so nobody sees a lead as
+    // owned when its clock ran out an hour ago.
+    await lifecycle.sweepExpired();
     res.json({ leads: await queryLeads(req.query, req.user) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** The people behind one company — All Leads expands into this. */
+router.get("/:id/contacts", async (req, res, next) => {
+  try {
+    const lead = await db.one(
+      `SELECT c.name FROM leads l JOIN companies c ON c.id = l.company_id WHERE l.id = $1`,
+      [req.params.id]
+    );
+    if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
+
+    const contacts = await db.all(
+      `SELECT id, name, role, email, phone, linkedin, seniority, department, city, is_primary
+         FROM company_contacts
+        WHERE lower(company) = lower($1)
+        ORDER BY is_primary DESC, name ASC`,
+      [lead.name]
+    );
+
+    res.json({ contacts });
   } catch (err) {
     next(err);
   }
@@ -206,11 +208,12 @@ router.get("/", async (req, res, next) => {
 
 router.get("/:id", async (req, res, next) => {
   try {
+    await lifecycle.sweepExpired();
+
     const lead = await db.one(
-      `SELECT l.*, c.name AS company, c.keywords, c.origin, c.approval,
+      `SELECT l.*, c.name AS company, c.keywords,
               c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
-              c.created_at AS added_at,
-              u.display_name AS owner_name
+              c.created_at AS added_at, u.display_name AS owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          LEFT JOIN users u ON u.id = l.owner_id
@@ -220,10 +223,10 @@ router.get("/:id", async (req, res, next) => {
 
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
-    const [signals, activity] = await Promise.all([
+    const [signals, activity, contacts] = await Promise.all([
       db.all(
         `SELECT id, title, url, author, site, section_title, published, created_at,
-                signal_type, score, summary, why_it_matters, pitch, enriched
+                signal_type, summary, why_it_matters, pitch
            FROM signals WHERE lead_id = $1
           ORDER BY COALESCE(published, created_at) DESC`,
         [lead.id]
@@ -234,33 +237,41 @@ router.get("/:id", async (req, res, next) => {
           WHERE a.lead_id = $1 ORDER BY a.created_at DESC`,
         [lead.id]
       ),
+      db.all(
+        `SELECT id, name, role, email, phone, linkedin, seniority, department, city, is_primary
+           FROM company_contacts WHERE lower(company) = lower($1)
+          ORDER BY is_primary DESC, name ASC`,
+        [lead.company]
+      ),
     ]);
 
     lead.signals = signals;
     lead.activity = activity;
-    const best = signals.length ? signals.slice().sort((a, b) => b.score - a.score)[0] : null;
-    Object.assign(
-      lead,
-      playbookFor(best && best.signal_type, best && best.pitch, {
+    lead.contacts = contacts;
+    lead.countdown = lifecycle.countdown(lead);
+    lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
+
+    const best = signals
+      .slice()
+      .sort((a, b) => playbook.tierOf(a.signal_type) - playbook.tierOf(b.signal_type))[0];
+    const seg = playbook.segment(best && best.signal_type);
+    lead.tier = seg.tier;
+    lead.tier_label = playbook.TIERS[seg.tier].label;
+    lead.tier_note = playbook.TIERS[seg.tier].note;
+    lead.segment_label = seg.label;
+    lead.angle = seg.angle;
+    lead.next_action = seg.action;
+    lead.pitch =
+      (best && best.pitch && best.pitch.trim()) ||
+      playbook.composePitch({
         company: lead.company,
+        signalType: best && best.signal_type,
         headline: best && best.title,
         when: best ? timeAgo(best.published || best.created_at) : null,
         industry: lead.industry,
-      })
-    );
+      });
+    lead.pitch_is_tailored = Boolean(best && best.pitch && best.pitch.trim());
 
-    // One entry per distinct trigger, best-scoring headline for each.
-    const seenType = new Set();
-    const triggers = [];
-    for (const sig of signals.slice().sort((a, b) => b.score - a.score)) {
-      const key = playbook.segment(sig.signal_type).id;
-      if (key === "none" || seenType.has(key)) continue;
-      seenType.add(key);
-      triggers.push({ signal_type: sig.signal_type, score: sig.score, title: sig.title,
-                      url: sig.url, at: sig.published || sig.created_at });
-    }
-    lead.score_breakdown = breakdownFor(triggers);
-    lead.score = lead.score_breakdown.total;
     res.json({ lead });
   } catch (err) {
     next(err);
@@ -276,18 +287,15 @@ router.patch("/:id", async (req, res, next) => {
     const sets = [];
     const args = [];
     const bind = (v) => `$${args.push(v)}`;
-    const changes = {};
 
     if (b.status !== undefined) {
       if (!STATUSES.includes(b.status))
         return res.status(400).json({ error: `Unknown status "${b.status}".` });
-      changes.status = b.status;
       sets.push(`status = ${bind(b.status)}`);
     }
 
     if (b.owner_id !== undefined) {
-      changes.owner_id = b.owner_id === null || b.owner_id === "" ? null : Number(b.owner_id);
-      sets.push(`owner_id = ${bind(changes.owner_id)}`);
+      sets.push(`owner_id = ${bind(b.owner_id === null || b.owner_id === "" ? null : Number(b.owner_id))}`);
     }
 
     for (const key of ["contact_name", "contact_role", "contact_email", "contact_phone"]) {
@@ -305,58 +313,68 @@ router.patch("/:id", async (req, res, next) => {
       args
     );
 
-    // Log the moves worth remembering.
-    if (changes.status && changes.status !== lead.status) {
-      await logActivity(
-        lead.id,
-        req.user.id,
-        "status",
-        `Moved from ${lead.status} to ${changes.status}`
-      );
-    }
-    if (changes.owner_id !== undefined && changes.owner_id !== lead.owner_id) {
-      const who = changes.owner_id
-        ? await db.one("SELECT display_name FROM users WHERE id = $1", [changes.owner_id])
-        : null;
-      await logActivity(
-        lead.id,
-        req.user.id,
-        "claim",
-        who ? `Assigned to ${who.display_name}` : "Released back to the pool"
-      );
+    if (b.status && b.status !== lead.status) {
+      await logActivity(lead.id, req.user.id, "status", `Moved from ${lead.status} to ${b.status}`);
     }
 
+    updated.countdown = lifecycle.countdown(updated);
     res.json({ lead: updated });
   } catch (err) {
     next(err);
   }
 });
 
+/** Claim. `source` decides the deadline: 10 days from Fresh, 30 from All. */
 router.post("/:id/claim", async (req, res, next) => {
   try {
     const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
-    const release = Boolean(req.body && req.body.release);
-    const ownerId = release ? null : req.user.id;
+    if (req.body && req.body.release) {
+      const released = await lifecycle.release(lead.id);
+      await logActivity(lead.id, req.user.id, "claim", "Released back to the pool");
+      released.countdown = null;
+      return res.json({ lead: released });
+    }
 
-    const updated = await db.one(
-      `UPDATE leads
-          SET owner_id = $1,
-              status = CASE WHEN $1::bigint IS NULL THEN status
-                            WHEN status = 'new' THEN 'working'
-                            ELSE status END,
-              updated_at = now()
-        WHERE id = $2 RETURNING *`,
-      [ownerId, lead.id]
-    );
+    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
+    const claimed = await lifecycle.claim(lead.id, req.user.id, source);
 
     await logActivity(
       lead.id,
       req.user.id,
       "claim",
-      release ? "Released back to the pool" : "Claimed this lead"
+      `Claimed from ${source === "fresh" ? "Fresh Leads" : "All Leads"} — ${lifecycle.windowFor(
+        source
+      )} days to close`
     );
+
+    claimed.countdown = lifecycle.countdown(claimed);
+    res.json({ lead: claimed });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Close stops the clock. Reopen restarts it. */
+router.post("/:id/close", async (req, res, next) => {
+  try {
+    const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
+    if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
+
+    const reopening = Boolean(req.body && req.body.reopen);
+    const updated = reopening
+      ? await lifecycle.reopen(lead.id, lead.claim_source || "all")
+      : await lifecycle.close(lead.id);
+
+    await logActivity(
+      lead.id,
+      req.user.id,
+      "status",
+      reopening ? "Reopened — clock restarted" : "Marked closed"
+    );
+
+    updated.countdown = lifecycle.countdown(updated);
     res.json({ lead: updated });
   } catch (err) {
     next(err);
@@ -374,7 +392,6 @@ router.post("/:id/activity", async (req, res, next) => {
 
     await logActivity(lead.id, req.user.id, kind, body);
 
-    // Logging a real touch updates the outreach clock and nudges the status forward.
     if (CONTACT_KINDS.includes(kind)) {
       await db.run(
         `UPDATE leads
@@ -404,50 +421,13 @@ router.post("/:id/activity", async (req, res, next) => {
       ),
     ]);
 
+    fresh.countdown = lifecycle.countdown(fresh);
     res.json({ lead: fresh, activity });
   } catch (err) {
     next(err);
   }
 });
 
-/**
- * What the playbook says about a lead, given its strongest signal.
- *
- * The pitch prefers the line Gemini wrote for that specific story — it names
- * the amount, the product, the city. The playbook's generic angle is only the
- * fallback for signals enriched before this existed, or when Gemini was down.
- */
-function playbookFor(signalType, signalPitch, context = {}) {
-  const seg = playbook.segment(signalType || "none");
-
-  // No AI line yet? Compose one from the company, the story and the angle —
-  // still specific enough to read out, rather than a boilerplate paragraph.
-  const composed = playbook.composePitch({
-    company: context.company,
-    signalType,
-    headline: context.headline,
-    when: context.when,
-    industry: context.industry,
-  });
-
-  return {
-    tier: seg.tier,
-    tier_label: playbook.TIERS[seg.tier].label,
-    tier_note: playbook.TIERS[seg.tier].note,
-    segment: seg.id,
-    segment_label: seg.label,
-    angle: seg.angle,
-    pitch: (signalPitch && signalPitch.trim()) || composed,
-    pitch_is_tailored: Boolean(signalPitch && signalPitch.trim()),
-    next_action: seg.action,
-  };
-}
-
-/**
- * Turns a lead's triggers into the line-by-line explanation of its score,
- * pairing each weight with the headline that earned it.
- */
-/** "3 days ago" style, for the composed pitch's opening line. */
 function timeAgo(iso) {
   if (!iso) return null;
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -460,10 +440,6 @@ function timeAgo(iso) {
   if (days < 30) return `${days} days ago`;
   const months = Math.round(days / 30);
   return months === 1 ? "last month" : `${months} months ago`;
-}
-
-function breakdownFor(triggers) {
-  return playbook.scoreBreakdown(triggers);
 }
 
 function logActivity(leadId, userId, kind, body) {

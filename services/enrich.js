@@ -4,7 +4,10 @@ require("dotenv").config();
 const playbook = require("../lib/triggers");
 
 const MODEL = gemini.MODEL;
-const BATCH_SIZE = 6;
+// Each article costs a summary, a why-it-matters line and a pitch. Six at a
+// time overran the model's output limit and truncated the JSON, so batches are
+// smaller and tunable.
+const BATCH_SIZE = Number(process.env.GEMINI_BATCH_SIZE || 3);
 
 const SIGNAL_TYPES = playbook.SEGMENT_IDS;
 
@@ -55,13 +58,62 @@ function safeJson(text) {
     // Fall back to the widest bracketed span in the response.
     const start = body.search(/[[{]/);
     const end = Math.max(body.lastIndexOf("]"), body.lastIndexOf("}"));
-    if (start === -1 || end === -1 || end <= start) return null;
-    try {
-      return JSON.parse(body.slice(start, end + 1));
-    } catch {
-      return null;
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(body.slice(start, end + 1));
+      } catch {
+        /* fall through to salvage */
+      }
+    }
+    return salvageObjects(body);
+  }
+}
+
+/**
+ * Rescue what survived a truncated reply.
+ *
+ * When the model runs out of output tokens it stops mid-array, so JSON.parse
+ * fails on the whole thing even though the first several entries are complete.
+ * Walk the text and keep every object that closed properly — five good
+ * classifications beat throwing all six away.
+ */
+function salvageObjects(text) {
+  const out = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+
+    if (ch === '"') { inString = true; continue; }
+
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        try {
+          out.push(JSON.parse(text.slice(start, i + 1)));
+        } catch {
+          /* skip a malformed object */
+        }
+        start = -1;
+      }
+      if (depth < 0) depth = 0;
     }
   }
+
+  return out.length ? out : null;
 }
 
 function buildPrompt(articles) {
@@ -100,7 +152,10 @@ async function enrichBatch(articles) {
   const raw = await gemini.generate(buildPrompt(articles));
   const parsed = safeJson(raw);
   if (!Array.isArray(parsed)) {
-    throw new Error(`Gemini returned unparseable JSON: ${String(raw).slice(0, 120)}`);
+    const t = String(raw);
+    throw new Error(
+      `Gemini returned unparseable JSON (${t.length} chars, ends: ${JSON.stringify(t.slice(-60))})`
+    );
   }
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 
@@ -236,7 +291,10 @@ async function enrichDiscoveryBatch(articles) {
   const raw = await gemini.generate(buildDiscoveryPrompt(articles));
   const parsed = safeJson(raw);
   if (!Array.isArray(parsed)) {
-    throw new Error(`Gemini returned unparseable JSON: ${String(raw).slice(0, 120)}`);
+    const t = String(raw);
+    throw new Error(
+      `Gemini returned unparseable JSON (${t.length} chars, ends: ${JSON.stringify(t.slice(-60))})`
+    );
   }
   if (!Array.isArray(parsed)) throw new Error("Gemini returned unparseable JSON");
 

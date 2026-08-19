@@ -3,6 +3,110 @@
    No build step: plain ES modules-free JS so `npm start` is the only command.
    ========================================================================= */
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+/** Escape anything user- or news-supplied before it goes into innerHTML. */
+function esc(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Every request the page makes. Throws with the server's message on failure. */
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || "GET",
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* an empty body is fine for some responses */
+  }
+
+  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  return data || {};
+}
+
+let toastTimer;
+function toast(message, isError = false) {
+  let el = $("#toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    document.body.appendChild(el);
+  }
+  el.className = `toast ${isError ? "is-error" : ""}`;
+  el.textContent = message;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, isError ? 6000 : 3200);
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (!Number.isFinite(mins)) return "";
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  return months === 1 ? "last month" : `${months}mo ago`;
+}
+
+/** Outreach stages, shown in the dropdown on a claimed lead. */
+const STATUSES = [
+  ["new", "New"],
+  ["working", "Working"],
+  ["contacted", "Contacted"],
+  ["replied", "Replied"],
+  ["qualified", "Qualified"],
+  ["won", "Won"],
+  ["lost", "Lost"],
+];
+
+/** Little markers on the outreach timeline. */
+const KIND_ICON = {
+  note: "\u270E",
+  email: "\u2709",
+  call: "\u260E",
+  linkedin: "in",
+  meeting: "\u2691",
+  status: "\u21C4",
+  claim: "\u2691",
+};
+
+/** Everything the page keeps in memory between renders. */
+const state = {
+  user: null,
+  team: [],
+  tab: "all",
+  search: "",
+  types: new Set(),
+  statuses: new Set(),
+  hygiene: new Set(),
+  freshness: null,
+  tier: "",
+  sort: "company",
+  scanning: false,
+  runPoll: null,
+  lastRun: null,
+  freshWindowDays: 3,
+};
+
 // Mirrors lib/triggers.js — the agency's own playbook.
 const SIGNAL_TYPES = [
   ["capital", "Funding & Capital"],
@@ -34,158 +138,21 @@ const TIER_TEXT = {
 const segId = (t) => (TIER_OF[t] ? t : LEGACY_TYPES[t] || "none");
 const tierOf = (t) => TIER_OF[segId(t)];
 
-/**
- * The badge a non-technical user reads instead of a number — and, on click,
- * the arithmetic behind the number, so nobody has to take the score on trust.
- */
-function tierBadge(signalType, score, breakdown, leadId) {
-  const tier = tierOf(signalType);
-  const [label] = TIER_TEXT[tier];
-
-  return `<span class="tier-wrap">
-      <button class="tier tier-${tier}" data-score-for="${leadId}" title="See how this score was worked out">
-        <span class="tier-rank">Tier ${tier}</span>
-        <span class="tier-label">${label}</span>
-        ${Number.isFinite(score) ? `<span class="tier-score">${score}<span class="tier-why">?</span></span>` : ""}
-      </button>
-      ${scorePopover(breakdown, leadId)}
+/** Priority, in words. No numeric score anywhere — the tier IS the answer. */
+function tierBadge(tier, note) {
+  const t = tier || 3;
+  const [label, fallback] = TIER_TEXT[t];
+  return `<span class="tier tier-${t}">
+      <span class="tier-label">${label}</span>
+      <span class="tier-note">${esc(note || fallback)}</span>
     </span>`;
 }
 
-/** The "why this score" panel. Hidden until the badge is clicked. */
-function scorePopover(breakdown, leadId) {
-  if (!breakdown) return "";
-
-  const lines = breakdown.lines || [];
-
-  return `<div class="score-pop" id="pop-${leadId}" hidden>
-      <div class="score-pop-head">How this score was worked out</div>
-
-      ${
-        lines.length
-          ? `<div class="score-pop-rows">
-               ${lines
-                 .map(
-                   (l) => `<div class="score-pop-row">
-                     <span class="score-pop-pts">
-                       ${l.points}<span class="score-pop-max">/${l.max}</span>
-                     </span>
-                     <span class="score-pop-body">
-                       <b>${esc(l.label)}</b>
-                       ${l.title ? `<span>${esc(String(l.title).slice(0, 90))}</span>` : ""}
-                       ${
-                         l.points < l.max
-                           ? `<span class="score-pop-strength">Story rated ${l.strength}/100 for urgency, so it earns ${l.points} of the ${l.max} available.</span>`
-                           : ""
-                       }
-                     </span>
-                   </div>`
-                 )
-                 .join("")}
-             </div>`
-          : `<p class="score-pop-empty">No buying triggers found in the last 30 days, so this scores zero.</p>`
-      }
-
-      <div class="score-pop-total">
-        <span>Total</span><b>${breakdown.total} / ${breakdown.max || 100}</b>
-      </div>
-
-      <p class="score-pop-note">
-        Each trigger counts once, however many articles reported it, and pays out
-        a share of its maximum based on how strong the story is.
-        Maximums: Funding 40, Launch &amp; Ambassador 30, Retail Expansion 10,
-        Leadership 10, Brand Crisis 10.
-      </p>
-    </div>`;
-}
-
-const STATUSES = [
-  ["new", "New"],
-  ["working", "Working"],
-  ["contacted", "Contacted"],
-  ["replied", "Replied"],
-  ["qualified", "Qualified"],
-  ["won", "Won"],
-  ["lost", "Lost"],
-];
-
-const KIND_ICON = {
-  note: "✎", email: "✉", call: "☎", linkedin: "in",
-  meeting: "◷", status: "→", claim: "★",
-};
-
-const state = {
-  user: null,
-  tab: "all",
-  search: "",
-  hygiene: new Set(),
-  freshness: null,
-  types: new Set(),
-  statuses: new Set(),
-  minScore: 0,
-  sort: "score",
-  scanning: false,
-  team: [],
-  openLeadId: null,
-  runPoll: null,
-};
-
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-// ── API ────────────────────────────────────────────────────────────────────
-
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
-
-  if (!res.ok) {
-    const err = new Error((data && data.error) || `Request failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
-}
-
-function toast(message, isError = false) {
-  const el = $("#toast");
-  el.textContent = message;
-  el.classList.toggle("is-error", isError);
-  el.hidden = false;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 3200);
-}
-
-// ── Formatting ─────────────────────────────────────────────────────────────
-
-const esc = (s) =>
-  String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-  );
-
-function timeAgo(iso) {
-  if (!iso) return "—";
-  const then = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  if (isNaN(then)) return "—";
-  const mins = Math.round((Date.now() - then.getTime()) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  if (days < 30) return `${days}d ago`;
-  return then.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
-
-function dateOnly(iso) {
-  if (!iso) return "";
-  return String(iso).slice(0, 10);
+/** The claim clock, shown top-right of a claimed lead. */
+function countdownChip(cd) {
+  if (!cd) return "";
+  const cls = cd.overdue ? "clock-over" : cd.urgent ? "clock-soon" : "clock-ok";
+  return `<span class="clock ${cls}">${esc(cd.label)}</span>`;
 }
 
 const typeLabel = (t) => (SIGNAL_TYPES.find((x) => x[0] === segId(t)) || [t, t])[1];
@@ -288,7 +255,7 @@ function wireEvents() {
 
   $("#content").addEventListener("change", (e) => {
     const el = e.target;
-    if (el.id === "f-min") state.minScore = Number(el.value);
+    if (el.id === "f-tier") state.tier = el.value;
     else if (el.id === "f-type") {
       state.types.clear();
       if (el.value) state.types.add(el.value);
@@ -301,11 +268,6 @@ function wireEvents() {
   // Bound once on the container — the list inside is replaced on every render,
   // so binding per render would stack duplicate handlers.
   $("#content").addEventListener("click", onCardClick);
-
-  window.document.addEventListener("click", (e) => {
-    if (e.target.closest("[data-score-for]") || e.target.closest(".score-pop")) return;
-    $$(".score-pop").forEach((p) => (p.hidden = true));
-  });
 
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {
@@ -353,7 +315,7 @@ function currentQuery() {
   if (state.types.size) p.set("types", [...state.types].join(","));
   if (state.statuses.size) p.set("status", [...state.statuses].join(","));
   if (state.hygiene.size) p.set("hygiene", [...state.hygiene].join(","));
-  if (state.minScore) p.set("minScore", String(state.minScore));
+  if (state.tier) p.set("tier", state.tier);
   p.set("sort", state.sort);
   return p.toString();
 }
@@ -363,9 +325,10 @@ function currentQuery() {
 // The tab name already says what the list is, so All Leads carries no subtitle.
 // The other two do, because what they hold isn't obvious from the name alone.
 const PAGE_COPY = {
-  all: ["All Leads", ""],
-  today: ["Today's Leads", "Companies found in the news that aren't in your database yet."],
-  mine: ["My Outreach", "Leads you've claimed. Everyone can see them; only you own them."],
+  all: ["All Leads", "Your contact database. Claim one and you have 30 days to close it."],
+  fresh: ["Fresh Leads", "News about companies in your database. Claim one and you have 10 days."],
+  mine: ["My Outreach", "What you're working, and how long is left on each."],
+  newspaper: ["Newspaper", "Fresh Leads that ran out of time. Anyone can pick these up."],
 };
 
 function actionBar() {
@@ -381,20 +344,24 @@ function actionBar() {
           <span class="scan-dot"></span>
           ${
             run && run.finished_at
-              ? `Last scan ${esc(timeAgo(run.finished_at))} · ${run.new_signals} new signal${
-                  run.new_signals === 1 ? "" : "s"
-                }`
-              : "No scan yet — one starts when you sign in"
+              ? `Last refresh ${esc(timeAgo(run.finished_at))} · refreshes every ${
+                  state.freshWindowDays || 3
+                } days`
+              : "Not refreshed yet"
           }
         </p>
       </div>
       ${
-        state.tab === "all" && state.user.role === "admin"
+        state.user.role === "admin"
           ? `<div class="action-bar-right">
-               <input type="file" id="ab-csv" accept=".csv,text/csv" class="upload-input" />
-               <button class="btn" id="ab-upload">${uploadIcon()} Add more companies (CSV)</button>
+               ${
+                 state.tab === "all"
+                   ? `<input type="file" id="ab-csv" accept=".csv,text/csv" class="upload-input" />
+                      <button class="btn" id="ab-upload">Import contacts (CSV)</button>`
+                   : ""
+               }
                <button class="btn btn-primary" id="ab-scan" ${state.scanning ? "disabled" : ""}>
-                 ${scanIcon()} ${state.scanning ? "Scanning…" : "Scan for signals"}
+                 ${state.scanning ? "Refreshing…" : "Refresh now"}
                </button>
              </div>`
           : ""
@@ -403,35 +370,41 @@ function actionBar() {
 }
 
 function filterBar() {
-  const typeOptions = SIGNAL_TYPES.map(
-    ([v, l]) => `<option value="${v}">${esc(l)}</option>`
-  ).join("");
+  const typeOptions = SIGNAL_TYPES.filter(([v]) => v !== "none")
+    .map(([v, l]) => `<option value="${v}">${esc(l)}</option>`)
+    .join("");
+
+  const showTier = state.tab !== "all";
 
   return `
     <div class="filter-bar">
       <input class="search-input" id="f-search" type="search"
-             placeholder="Search company name…" value="${esc(state.search)}" />
+             placeholder="Search company or industry…" value="${esc(state.search)}" />
 
-      <span class="filter-label">Priority</span>
-      <select class="filter-select" id="f-min">
-        <option value="0">All</option>
-        <option value="80">Tier 1 · Hot only</option>
-        <option value="50">Tier 1 + 2</option>
-      </select>
+      ${
+        showTier
+          ? `<span class="filter-label">Priority</span>
+             <select class="filter-select" id="f-tier">
+               <option value="">All</option>
+               <option value="1">Hot only</option>
+               <option value="2">Warm</option>
+               <option value="3">Low</option>
+             </select>
 
-      <span class="filter-label">Signal</span>
-      <select class="filter-select" id="f-type">
-        <option value="">Any</option>
-        ${typeOptions}
-      </select>
+             <span class="filter-label">Trigger</span>
+             <select class="filter-select" id="f-type">
+               <option value="">Any</option>
+               ${typeOptions}
+             </select>`
+          : ""
+      }
 
       <span class="filter-label">Sort</span>
       <select class="filter-select" id="f-sort">
-        <option value="score">Most urgent first</option>
-        <option value="score_asc">Least urgent first</option>
+        ${state.tab === "mine" ? `<option value="urgent">Deadline soonest</option>` : ""}
+        <option value="company">Company name (A–Z)</option>
         <option value="recent">Newest signal first</option>
         <option value="added">Recently added</option>
-        <option value="company">Company name (A–Z)</option>
       </select>
     </div>`;
 }
@@ -450,15 +423,18 @@ async function renderContent(opts = {}) {
 
   const body = !leads.length
     ? emptyState().outerHTML
-    : state.tab === "mine"
-    ? `<div class="mylead-grid">${leads.map(myLeadCard).join("")}</div>`
-    : leadTable(leads);
+    : state.tab === "all"
+    ? databaseTable(leads)
+    : state.tab === "newspaper"
+    ? `<div class="mylead-grid">${leads.map(newspaperCard).join("")}</div>`
+    : state.tab === "fresh"
+    ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
+    : `<div class="mylead-grid">${leads.map(outreachCard).join("")}</div>`;
 
   content.innerHTML = actionBar() + filterBar() + body;
 
-  // Restore the control values — innerHTML wipes them every render.
-  $("#f-min").value = String(state.minScore);
-  $("#f-type").value = [...state.types][0] || "";
+  if ($("#f-tier")) $("#f-tier").value = state.tier || "";
+  if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
   $("#f-sort").value = state.sort;
 
   if (opts.keepFocus) {
@@ -466,106 +442,131 @@ async function renderContent(opts = {}) {
     if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
   }
 
-  content.querySelectorAll("[data-lead]").forEach(() => {});   // no-op, kept for clarity
   wireListActions();
 }
 
-/** All Leads and Today's Leads: a scannable table, signals hidden behind Inspect. */
-function leadTable(leads) {
+/* ── All Leads: the database ─────────────────────────────────────────────── */
+
+/**
+ * A record of the contact sheet, one row per company, expandable into its
+ * people. No signals, no pitch — that lives in Fresh Leads and Outreach.
+ */
+function databaseTable(leads) {
   return `
-    <div class="lead-table-wrap">
-      <div class="lead-row-head">
-        <span>Company</span><span>Priority</span><span>Top signal</span><span></span>
+    <div class="db-table">
+      <div class="db-head">
+        <span></span><span>Company</span><span>Industry</span><span>Size</span>
+        <span>Revenue</span><span>People</span><span>Owner</span><span></span>
       </div>
       ${leads
         .map(
           (lead) => `
-        <div class="lead-row" data-lead="${lead.id}">
-          <div class="company-cell">
+        <div class="db-row" data-lead="${lead.id}">
+          <button class="db-toggle" data-expand="${lead.id}" aria-label="Show contacts">▸</button>
+
+          <div class="db-company">
             <span class="company-name">${esc(lead.company)}</span>
-            <span class="company-meta">
-              Added ${esc(shortDate(lead.added_at))}${
-            lead.last_signal_at ? ` · Scanned ${esc(shortDate(lead.last_signal_at))}` : ""
-          }
-            </span>
+            ${
+              lead.domain || lead.website
+                ? `<span class="company-meta">${esc(lead.domain || lead.website)}</span>`
+                : ""
+            }
           </div>
 
-          <div>${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score, lead.score_breakdown, lead.id)}</div>
+          <div class="db-cell">${esc(lead.industry || "—")}</div>
+          <div class="db-cell">${esc(lead.employees || "—")}</div>
+          <div class="db-cell">${esc(lead.revenue || "—")}</div>
+          <div class="db-cell">${lead.contact_count || 0}</div>
 
-          <div class="signal-cell">
+          <div class="db-cell">
             ${
-              lead.top_signal
-                ? `<span class="type-tag type-${esc(segId(lead.top_signal.signal_type))}">${esc(
-                    typeLabel(lead.top_signal.signal_type)
-                  )}</span>
-                   <span class="signal-title">${esc(lead.top_signal.title || "Untitled")}</span>`
-                : `<span class="signal-none">Scan to find signals</span>`
+              lead.owner_id
+                ? `<span class="owner"><span class="avatar">${esc(
+                    initials(lead.owner_name)
+                  )}</span>${esc(lead.owner_name)}</span>`
+                : `<span class="muted">Unclaimed</span>`
             }
           </div>
 
           <div class="row-actions">
-            <button class="btn btn-ghost btn-sm" data-act="open" data-id="${lead.id}">Inspect</button>
             ${
               lead.owner_id === state.user.id
                 ? `<button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
-                : `<button class="btn btn-sm" data-act="claim" data-id="${lead.id}">${
-                    lead.owner_id ? "Take over" : "Add to My Leads"
+                : `<button class="btn btn-sm" data-act="claim" data-source="all" data-id="${lead.id}">${
+                    lead.owner_id ? "Take over" : "Claim"
                   }</button>`
             }
           </div>
-        </div>`
+        </div>
+        <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`
         )
         .join("")}
     </div>`;
 }
 
-/** My Outreach: the working view — signals, what to pitch, stage, contacts. */
-function myLeadCard(lead) {
-  const signals = lead.signals || [];
+/* ── Fresh Leads ─────────────────────────────────────────────────────────── */
 
+/** News on a company you already have. Claimable, no Inspect. */
+function freshCard(lead) {
   return `
-    <div class="mylead-card" data-lead="${lead.id}">
+    <div class="mylead-card">
       <div class="mylead-top">
         <div class="mylead-heading">
-          <div class="company-name">
-            ${esc(lead.company)}
-            ${lead.new_count > 0 ? `<span class="new-pill">${lead.new_count} new</span>` : ""}
-          </div>
+          <div class="company-name">${esc(lead.company)}</div>
           <div class="mylead-meta">
-            ${lead.signal_count} signal${lead.signal_count === 1 ? "" : "s"}${
-    lead.last_signal_at ? ` · Last scanned ${esc(shortDate(lead.last_signal_at))}` : " · Not scanned yet"
+            ${lead.fresh_count} new signal${lead.fresh_count === 1 ? "" : "s"}${
+    lead.industry ? ` · ${esc(lead.industry)}` : ""
   }
           </div>
         </div>
-        ${tierBadge(lead.top_signal && lead.top_signal.signal_type, lead.score, lead.score_breakdown, lead.id)}
+        ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      <div class="mylead-signals">
-        <div class="signal-list-label">Signals</div>
+      ${signalsByDate(lead.signals)}
+
+      <div class="mylead-actions">
         ${
-          signals.length
-            ? signals
-                .map(
-                  (sig) => `
-          <div class="mylead-signal-row">
-            <div class="mylead-signal-row-top">
-              <span class="type-tag type-${esc(segId(sig.signal_type))}">${esc(typeLabel(sig.signal_type))}</span>
-              <span class="mylead-signal-date">${esc(timeAgo(sig.published || sig.created_at))}</span>
-            </div>
-            <a class="mylead-signal-title" href="${esc(sig.url)}" target="_blank" rel="noopener">${esc(
-                    sig.title || "Untitled"
-                  )}</a>
-          </div>`
-                )
-                .join("")
-            : `<div class="signal-none">Nothing yet — the next scan will fill this in.</div>`
-        }
-        ${
-          lead.signal_count > signals.length
-            ? `<button class="btn btn-ghost btn-sm mylead-more" data-act="open" data-id="${lead.id}">Show all ${lead.signal_count}</button>`
-            : ""
+          lead.owner_id === state.user.id
+            ? `<span class="muted">Yours — see My Outreach</span>
+               <button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
+            : `<span class="muted">${
+                lead.owner_id ? `With ${esc(lead.owner_name)}` : "10 days to close once claimed"
+              }</span>
+               <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
+                 ${lead.owner_id ? "Take over" : "Claim"}
+               </button>`
         }
       </div>
+    </div>`;
+}
+
+/* ── My Outreach ─────────────────────────────────────────────────────────── */
+
+function outreachCard(lead) {
+  const closed = Boolean(lead.closed_at);
+
+  return `
+    <div class="mylead-card ${closed ? "is-closed" : ""}" data-lead="${lead.id}">
+      <div class="mylead-top">
+        <div class="mylead-heading">
+          <div class="company-name">${esc(lead.company)}</div>
+          <div class="mylead-meta">
+            ${
+              closed
+                ? `Closed ${esc(shortDate(lead.closed_at))}`
+                : `Claimed from ${lead.claim_source === "fresh" ? "Fresh Leads" : "All Leads"} · ${
+                    lead.claim_window
+                  } day window`
+            }
+          </div>
+        </div>
+        <div class="mylead-corner">
+          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
+          ${tierBadge(lead.tier, lead.tier_note)}
+        </div>
+      </div>
+
+      ${signalsByDate(lead.signals, 3)}
 
       ${
         lead.next_action
@@ -578,24 +579,19 @@ function myLeadCard(lead) {
       ${
         lead.pitch
           ? `<div class="pitch-box">
-             <b>What to pitch</b>
-             ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
-             <span class="pitch-body">${esc(lead.pitch)}</span>
-             ${
-               lead.pitch_is_tailored
-                 ? ""
-                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
-             }
-           </div>`
+               <b>What to pitch</b>
+               ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
+               <span class="pitch-body">${esc(lead.pitch)}</span>
+             </div>`
           : ""
       }
 
       <div class="mylead-bottom">
         <button class="btn btn-sm" data-act="open" data-id="${lead.id}">
-          ${lead.contact_name ? esc(lead.contact_name) : "+ Add contact"}
+          ${lead.contact_name ? esc(lead.contact_name) : "Contacts & log"}
         </button>
         <div class="stage-block">
-          <span class="filter-label">Execution stage</span>
+          <span class="filter-label">Stage</span>
           <select class="filter-select stage-select" data-stage-for="${lead.id}">
             ${STATUSES.map(
               ([v, l]) => `<option value="${v}" ${v === lead.status ? "selected" : ""}>${esc(l)}</option>`
@@ -605,15 +601,95 @@ function myLeadCard(lead) {
       </div>
 
       <div class="mylead-actions">
-        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${lead.id}">View raw signals</button>
-        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-id="${lead.id}">Release lead</button>
+        ${
+          closed
+            ? `<button class="btn btn-ghost btn-sm" data-act="reopen" data-id="${lead.id}">Reopen</button>`
+            : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+        }
+        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-id="${lead.id}">Release</button>
       </div>
     </div>`;
 }
 
-function wireListActions() {
-  const content = $("#content");
+/* ── Newspaper ───────────────────────────────────────────────────────────── */
 
+/** The parking lot: Fresh claims whose 10 days ran out. Anyone can take them. */
+function newspaperCard(lead) {
+  return `
+    <div class="mylead-card">
+      <div class="mylead-top">
+        <div class="mylead-heading">
+          <div class="company-name">${esc(lead.company)}</div>
+          <div class="mylead-meta">
+            Released${lead.last_signal_at ? ` · last news ${esc(timeAgo(lead.last_signal_at))}` : ""}
+          </div>
+        </div>
+        ${tierBadge(lead.tier, lead.tier_note)}
+      </div>
+
+      ${signalsByDate(lead.signals, 3)}
+
+      <div class="mylead-actions">
+        <span class="muted">Went unworked past its deadline</span>
+        <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
+          Pick this up
+        </button>
+      </div>
+    </div>`;
+}
+
+/* ── Signals, grouped by the day they ran ────────────────────────────────── */
+
+function signalsByDate(signals, limit) {
+  const list = (signals || []).slice(0, limit || 8);
+  if (!list.length) {
+    return `<div class="mylead-signals"><div class="signal-none">No news in the window.</div></div>`;
+  }
+
+  const byDay = new Map();
+  for (const s of list) {
+    const key = shortDate(s.published || s.created_at);
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(s);
+  }
+
+  return `
+    <div class="mylead-signals">
+      ${[...byDay.entries()]
+        .map(
+          ([day, items]) => `
+        <div class="sig-day">
+          <div class="sig-day-label">${esc(day)}</div>
+          ${items
+            .map(
+              (s) => `
+            <div class="mylead-signal-row">
+              <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(
+                typeLabel(s.signal_type)
+              )}</span>
+              <a class="mylead-signal-title" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(
+                s.title || "Untitled"
+              )}</a>
+              ${s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
+            </div>`
+            )
+            .join("")}
+        </div>`
+        )
+        .join("")}
+    </div>`;
+}
+
+function initials(name) {
+  return String(name || "?")
+    .split(/\s+/)
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+}
+
+function wireListActions() {
   const upload = $("#ab-upload");
   if (upload) {
     upload.addEventListener("click", () => $("#ab-csv").click());
@@ -639,7 +715,7 @@ function wireListActions() {
       renderContent();
       try {
         await api("/api/admin/run", { method: "POST" });
-        toast("Scanning — this takes a few minutes");
+        toast("Refreshing — this takes a few minutes");
         pollRun();
       } catch (err) {
         state.scanning = false;
@@ -649,7 +725,7 @@ function wireListActions() {
     });
   }
 
-  content.querySelectorAll("[data-stage-for]").forEach((sel) => {
+  $("#content").querySelectorAll("[data-stage-for]").forEach((sel) => {
     sel.addEventListener("change", async () => {
       try {
         await api(`/api/leads/${sel.dataset.stageFor}`, {
@@ -665,7 +741,7 @@ function wireListActions() {
   });
 }
 
-/** Watches a running cycle so the button and counts settle on their own. */
+/** Watches a running refresh so the button and counts settle on their own. */
 function pollRun() {
   clearInterval(state.runPoll);
   state.runPoll = setInterval(async () => {
@@ -675,7 +751,7 @@ function pollRun() {
         clearInterval(state.runPoll);
         state.scanning = false;
         state.lastRun = run.last;
-        toast("Scan finished");
+        toast("Refresh finished");
         refresh();
       }
     } catch {
@@ -685,10 +761,6 @@ function pollRun() {
   }, 4000);
 }
 
-function scoreBadge(n) {
-  return `<span class="score ${scoreClass(n)}">${n}<small>score</small></span>`;
-}
-
 function shortDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -696,79 +768,120 @@ function shortDate(iso) {
   return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 }
 
-function uploadIcon() {
-  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path d="M12 16V4M12 4l-4 4M12 4l4 4M5 18v1a2 2 0 002 2h10a2 2 0 002-2v-1"
-      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-}
-
-function scanIcon() {
-  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="2"/>
-    <path d="M4 8V6a2 2 0 012-2h2M20 8V6a2 2 0 00-2-2h-2M4 16v2a2 2 0 002 2h2M20 16v2a2 2 0 01-2 2h-2"
-      stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
-}
-
 function emptyState() {
   const div = document.createElement("div");
   div.className = "empty";
 
   const copy = {
-    today: [
-      "No new companies found yet",
-      "A scan runs when you sign in. Companies found in the news that aren't in your database will land here for you to approve.",
-    ],
     all: [
       "Nothing in your database yet",
-      "Upload your contact sheet from the Admin tab and every company in it becomes a lead, with its people attached.",
+      "Import your contact sheet from this tab and every company in it becomes a lead, with its people attached.",
+    ],
+    fresh: [
+      "No news in the last few days",
+      "Fresh Leads shows companies from your database that made the news. Refresh, or widen the window in settings.",
     ],
     mine: [
       "You haven't claimed anything yet",
-      "Open All Leads and claim the ones you want to own. They'll collect here.",
+      "Claim from All Leads for a 30-day window, or from Fresh Leads for 10 days. They collect here with their countdown.",
+    ],
+    newspaper: [
+      "Nothing has been released",
+      "Fresh Leads that aren't closed within 10 days land here for anyone to pick up. An empty page means the team is keeping up.",
     ],
   }[state.tab] || ["Nothing here yet", ""];
 
   div.innerHTML = `<h2>${esc(copy[0])}</h2><p>${esc(copy[1])}</p>`;
-
-  if (state.tab !== "today") {
-    const btn = document.createElement("button");
-    btn.className = "btn";
-    btn.textContent = "Clear filters";
-    btn.addEventListener("click", () => $("#clear-filters").click());
-    div.appendChild(btn);
-  }
   return div;
 }
 
-// ── Lead card ──────────────────────────────────────────────────────────────
+// ── Card interactions ──────────────────────────────────────────────────────
 
 async function onCardClick(e) {
+  // Expanding a company into its people — All Leads only.
+  const expander = e.target.closest("[data-expand]");
+  if (expander) {
+    e.stopPropagation();
+    const id = expander.dataset.expand;
+    const box = $(`#contacts-${id}`);
+    if (!box) return;
+
+    if (!box.hidden) {
+      box.hidden = true;
+      expander.textContent = "\u25B8";
+      return;
+    }
+
+    expander.textContent = "\u25BE";
+    box.hidden = false;
+    box.innerHTML = `<p class="muted" style="padding:10px 16px">Loading contacts…</p>`;
+
+    try {
+      const { contacts } = await api(`/api/leads/${id}/contacts`);
+      box.innerHTML = contacts.length
+        ? `<div class="contact-head"><span>Name</span><span>Position</span><span>Email</span><span>Mobile</span><span></span></div>` +
+          contacts
+            .map(
+              (c) => `<div class="contact-row">
+                <span>${esc(c.name)}${c.is_primary ? ` <span class="poc-flag">Primary</span>` : ""}</span>
+                <span>${esc(c.role || "—")}</span>
+                <span>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—"}</span>
+                <span>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "—"}</span>
+                <span>${
+                  c.linkedin
+                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`
+                    : ""
+                }</span>
+              </div>`
+            )
+            .join("")
+        : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
+    } catch (err) {
+      box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
+    }
+    return;
+  }
+
   const actionBtn = e.target.closest("[data-act]");
   if (actionBtn) {
     e.stopPropagation();
     const id = actionBtn.dataset.id;
-    if (actionBtn.dataset.act === "open") return openDrawer(id);
+    const act = actionBtn.dataset.act;
+
+    if (act === "open") return openDrawer(id);
+
     try {
-      await api(`/api/leads/${id}/claim`, {
-        method: "POST",
-        body: { release: actionBtn.dataset.act === "release" },
-      });
-      toast(actionBtn.dataset.act === "release" ? "Released" : "Claimed");
+      if (act === "close" || act === "reopen") {
+        await api(`/api/leads/${id}/close`, {
+          method: "POST",
+          body: { reopen: act === "reopen" },
+        });
+        toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
+      } else {
+        // Where it was claimed from decides the deadline: 10 days or 30.
+        await api(`/api/leads/${id}/claim`, {
+          method: "POST",
+          body: {
+            release: act === "release",
+            source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
+          },
+        });
+        toast(
+          act === "release"
+            ? "Released"
+            : `Claimed — ${actionBtn.dataset.source === "fresh" ? 10 : 30} days to close`
+        );
+      }
       refresh();
-    } catch (err) { toast(err.message, true); }
+    } catch (err) {
+      toast(err.message, true);
+    }
     return;
   }
 
-  const scoreBtn = e.target.closest("[data-score-for]");
-  if (scoreBtn) {
-    e.stopPropagation();
-    const pop = $(`#pop-${scoreBtn.dataset.scoreFor}`);
-    const wasOpen = pop && !pop.hidden;
-    $$(".score-pop").forEach((p) => (p.hidden = true));
-    if (pop) pop.hidden = wasOpen;
-    return;
-  }
-
+  // Rows in All Leads expand rather than open a drawer; everywhere else the
+  // card opens the detail panel.
+  if (state.tab === "all") return;
   const row = e.target.closest("[data-lead]");
   if (row) openDrawer(row.dataset.lead);
 }
@@ -854,6 +967,19 @@ function drawerHtml(lead) {
   <div class="drawer-body">
 
     ${
+      lead.owner_id
+        ? `<div class="drawer-clock">
+             ${lead.closed_at ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
+             ${
+               lead.closed_at
+                 ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-id="${lead.id}">Reopen</button>`
+                 : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+             }
+           </div>`
+        : ""
+    }
+
+    ${
       lead.next_action
         ? `<div class="action-box tier-${lead.tier || 3}-box">
              <b>${esc(TIER_TEXT[lead.tier || 3][0])} · ${esc(TIER_TEXT[lead.tier || 3][1])}</b>
@@ -870,11 +996,7 @@ function drawerHtml(lead) {
              <b>What to pitch</b>
              ${lead.angle ? `<span class="pitch-angle">${esc(lead.angle)}</span>` : ""}
              <span class="pitch-body">${esc(lead.pitch)}</span>
-             ${
-               lead.pitch_is_tailored
-                 ? ""
-                 : `<span class="pitch-flag">General angle — a scan with AI enrichment will write this for ${esc(lead.company)} specifically.</span>`
-             }
+
            </div>`
         : ""
     }
@@ -1382,8 +1504,10 @@ function wireAdmin() {
         const r = await api("/api/admin/gemini-check");
         out.innerHTML = r.ok
           ? `<p class="hint" style="margin-top:10px"><strong style="color:var(--teal)">Working.</strong>
-               ${esc(r.model)} answered. Pitches will be written for each company.</p>`
-          : `<p class="hint" style="margin-top:10px"><strong>Not working.</strong> ${esc(r.reason)}</p>`;
+               ${esc(r.model)} answered. Pitches will be written for each company.<br>
+               <span style="font-family:var(--mono);font-size:11px">Key in use: ${esc(r.key || "—")}</span></p>`
+          : `<p class="hint" style="margin-top:10px"><strong>Not working.</strong> ${esc(r.reason)}<br>
+               <span style="font-family:var(--mono);font-size:11px">Model: ${esc(r.model || "—")} · Key in use: ${esc(r.key || "not set")}</span></p>`;
       } catch (err) {
         out.innerHTML = `<p class="hint" style="margin-top:10px"><strong>${esc(err.message)}</strong></p>`;
       }
