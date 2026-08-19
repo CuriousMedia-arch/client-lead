@@ -1043,6 +1043,14 @@ function shortDate(iso) {
   return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 }
 
+/** ISO timestamp/date -> "YYYY-MM-DD", the only format <input type="date"> accepts. */
+function dateOnly(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toISOString().slice(0, 10);
+}
+
 function emptyState() {
   const div = document.createElement("div");
   div.className = "empty";
