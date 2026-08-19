@@ -1608,17 +1608,24 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   text-align: center;
 }
 
-/* ── Signals grouped by day ──────────────────────────────────────────────── */
+/* ── Signals grouped by type ─────────────────────────────────────────────── */
 
-.sig-day { display: flex; flex-direction: column; gap: 8px; }
-.sig-day + .sig-day { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
-.sig-day-label {
+.sig-group { display: flex; flex-direction: column; gap: 8px; }
+.sig-group + .sig-group { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sig-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
   font-family: var(--mono);
   font-size: 10.5px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: .05em;
-  color: var(--ink-faint);
+  letter-spacing: .04em;
+  padding: 4px 10px;
+  border-radius: 999px;
 }
+.sig-group-count { opacity: .7; }
 .mylead-signal-row { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 
 @media (max-width: 1000px) {

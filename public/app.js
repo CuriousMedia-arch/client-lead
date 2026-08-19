@@ -617,7 +617,7 @@ function freshCard(lead) {
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      ${signalsByDate(lead.signals, null, true)}
+      ${signalsByType(lead.signals, null, true)}
 
       <div class="mylead-actions">
         ${
@@ -659,7 +659,7 @@ function outreachCard(lead) {
         </div>
       </div>
 
-      ${signalsByDate(lead.signals, 3)}
+      ${signalsByType(lead.signals, 3, true)}
 
       ${
         lead.next_action
@@ -881,7 +881,7 @@ function newspaperCard(lead) {
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      ${signalsByDate(lead.signals, 3)}
+      ${signalsByType(lead.signals, 3)}
 
       <div class="mylead-actions">
         <span class="muted">Went unworked past its deadline</span>
@@ -892,38 +892,45 @@ function newspaperCard(lead) {
     </div>`;
 }
 
-/* ── Signals, grouped by the day they ran ────────────────────────────────── */
+/* ── Signals, grouped by type (Funding, Leadership, …) ───────────────────── */
 
-function signalsByDate(signals, limit, hideSummary) {
+// Order the groups the same way the playbook orders priority: hottest first.
+const TYPE_ORDER = ["capital", "brand_launch", "retail_expansion", "leadership", "crisis", "none"];
+
+function signalsByType(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);
   if (!list.length) {
     return `<div class="mylead-signals"><div class="signal-none">No news in the window.</div></div>`;
   }
 
-  const byDay = new Map();
+  const groups = new Map();
   for (const s of list) {
-    const key = shortDate(s.published || s.created_at);
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key).push(s);
+    const key = segId(s.signal_type);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
   }
+
+  const ordered = [...groups.entries()].sort(
+    (a, b) => TYPE_ORDER.indexOf(a[0]) - TYPE_ORDER.indexOf(b[0])
+  );
 
   return `
     <div class="mylead-signals">
-      ${[...byDay.entries()]
+      ${ordered
         .map(
-          ([day, items]) => `
-        <div class="sig-day">
-          <div class="sig-day-label">${esc(day)}</div>
+          ([type, items]) => `
+        <div class="sig-group">
+          <div class="sig-group-label type-${esc(type)}">${esc(typeLabel(type))}
+            <span class="sig-group-count">${items.length}</span>
+          </div>
           ${items
             .map(
               (s) => `
             <div class="mylead-signal-row">
-              <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(
-                typeLabel(s.signal_type)
-              )}</span>
               <a class="mylead-signal-title" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(
                 s.title || "Untitled"
               )}</a>
+              <span class="mylead-signal-date">${esc(shortDate(s.published || s.created_at))}</span>
               ${!hideSummary && s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
             </div>`
             )
