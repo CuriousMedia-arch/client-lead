@@ -33,6 +33,11 @@ router.get("/", async (req, res, next) => {
                AND deadline_at < now() + interval '3 days')                    AS due_soon,
            (SELECT COUNT(*) FROM leads WHERE owner_id = $1 AND closed_at IS NOT NULL)
                                                                                AS closed_by_me,
+           (SELECT COUNT(*) FROM leads l
+             WHERE l.pool = 'all' AND l.owner_id IS NULL
+               AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
+                            AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
+                                                                               AS unclaimed_fresh,
            (SELECT COUNT(*) FROM signals)                                      AS total_signals,
            (SELECT COUNT(*) FROM companies WHERE active)                       AS total_companies,
            (SELECT COUNT(*) FROM sites WHERE active)                           AS total_sites,
@@ -48,6 +53,7 @@ router.get("/", async (req, res, next) => {
         dueSoon: row.due_soon,
         mine: row.mine,
         closedByMe: row.closed_by_me,
+        unclaimedFresh: row.unclaimed_fresh,
       },
       totals: {
         leads: row.total_leads,

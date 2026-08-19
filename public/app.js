@@ -89,6 +89,12 @@ const KIND_ICON = {
   claim: "\u2691",
 };
 
+/** Small inline LinkedIn glyph, used wherever a link points at a LinkedIn page. */
+const LI_ICON =
+  `<svg class="li-icon" width="14" height="14" viewBox="0 0 448 448" aria-hidden="true">` +
+  `<path fill="currentColor" d="M100 55a45 45 0 1 1-90 0 45 45 0 0 1 90 0ZM8 149h84v261H8V149Zm146 0h81v36h1c11-21 39-43 81-43 87 0 103 57 103 132v136h-84V291c0-32-1-74-45-74-46 0-53 36-53 72v121h-84V149Z"/>` +
+  `</svg>`;
+
 /** Everything the page keeps in memory between renders. */
 const state = {
   user: null,
@@ -198,6 +204,7 @@ async function enterApp(user) {
   $("#me-name").textContent = user.name;
   $("#me-role").textContent = user.role === "admin" ? "Admin" : "Team";
   $("#tab-admin").hidden = user.role !== "admin";
+  $("#stat-admin-unclaimed").hidden = user.role !== "admin";
 
   // Fire the roster alongside the dashboard rather than before it - on a
   // remote database each sequential request is a fresh round trip of latency.
@@ -552,8 +559,8 @@ function databaseTable(leads) {
           <div class="db-cell">
             ${
               lead.linkedin
-                ? `<a class="db-link" href="${esc(lead.linkedin)}"
-                      target="_blank" rel="noopener">Company page</a>`
+                ? `<a class="db-link li-link" href="${esc(lead.linkedin)}"
+                      target="_blank" rel="noopener">${LI_ICON}LinkedIn</a>`
                 : `<span class="muted">—</span>`
             }
           </div>
@@ -579,9 +586,11 @@ function databaseTable(leads) {
             ${
               lead.owner_id === state.user.id
                 ? `<button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
-                : `<button class="btn btn-sm" data-act="claim" data-source="all" data-id="${lead.id}">${
-                    lead.owner_id ? "Take over" : "Claim"
-                  }</button>`
+                : lead.owner_id
+                ? `<span class="muted locked-tag" title="Locked to ${esc(
+                    lead.owner_name || "its owner"
+                  )} until released or closed">🔒 Locked</span>`
+                : `<button class="btn btn-sm" data-act="claim" data-source="all" data-id="${lead.id}">Claim</button>`
             }
           </div>
         </div>
@@ -608,18 +617,16 @@ function freshCard(lead) {
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      ${signalsByDate(lead.signals)}
+      ${signalsByDate(lead.signals, null, true)}
 
       <div class="mylead-actions">
         ${
           lead.owner_id === state.user.id
             ? `<span class="muted">Yours — see My Outreach</span>
                <button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
-            : `<span class="muted">${
-                lead.owner_id ? `With ${esc(lead.owner_name)}` : "10 days to close once claimed"
-              }</span>
+            : `<span class="muted">10 days to close once claimed</span>
                <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
-                 ${lead.owner_id ? "Take over" : "Claim"}
+                 Claim
                </button>`
         }
       </div>
@@ -887,7 +894,7 @@ function newspaperCard(lead) {
 
 /* ── Signals, grouped by the day they ran ────────────────────────────────── */
 
-function signalsByDate(signals, limit) {
+function signalsByDate(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);
   if (!list.length) {
     return `<div class="mylead-signals"><div class="signal-none">No news in the window.</div></div>`;
@@ -917,7 +924,7 @@ function signalsByDate(signals, limit) {
               <a class="mylead-signal-title" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(
                 s.title || "Untitled"
               )}</a>
-              ${s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
+              ${!hideSummary && s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
             </div>`
             )
             .join("")}

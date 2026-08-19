@@ -94,6 +94,60 @@ router.delete("/companies/:id", async (req, res, next) => {
   }
 });
 
+// --- discoveries ---------------------------------------------------------------
+
+/**
+ * Companies the discovery sweep found on its own (origin='discovered',
+ * approval='pending'). They already show up in Fresh Leads; approving one
+ * just adds it to the daily watchlist scan, rejecting hides it for good.
+ */
+router.get("/discoveries", async (req, res, next) => {
+  try {
+    const companies = await db.all(
+      `SELECT c.id, c.name,
+              (SELECT COUNT(*)::int FROM signals s WHERE s.lead_id = l.id) AS signal_count,
+              (SELECT s.title FROM signals s WHERE s.lead_id = l.id
+                ORDER BY COALESCE(s.published, s.created_at) DESC LIMIT 1) AS top_title,
+              (SELECT s.score FROM signals s WHERE s.lead_id = l.id
+                ORDER BY s.score DESC LIMIT 1) AS top_score
+         FROM companies c LEFT JOIN leads l ON l.company_id = c.id
+        WHERE c.origin = 'discovered' AND c.approval = 'pending'
+        ORDER BY c.created_at DESC`
+    );
+    res.json({ companies });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/discoveries/:id/approve", async (req, res, next) => {
+  try {
+    const row = await db.one(
+      `UPDATE companies SET approval = 'approved', active = true
+        WHERE id = $1 AND approval = 'pending' RETURNING id`,
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: "That discovery is no longer pending." });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/discoveries/:id/reject", async (req, res, next) => {
+  try {
+    const row = await db.one(
+      `UPDATE companies SET approval = 'rejected', active = false
+        WHERE id = $1 AND approval = 'pending' RETURNING id`,
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: "That discovery is no longer pending." });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- sources -----------------------------------------------------------------
 
 router.get("/sites", async (req, res, next) => {

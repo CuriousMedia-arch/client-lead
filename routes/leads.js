@@ -36,6 +36,7 @@ async function queryLeads(params, user) {
 
   if (tab === "fresh") {
     where.push("l.pool = 'all'");
+    where.push("l.owner_id IS NULL");
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days')`
@@ -352,17 +353,33 @@ router.patch("/:id", async (req, res, next) => {
   }
 });
 
-/** Claim. `source` decides the deadline: 10 days from Fresh, 30 from All. */
+/** Claim. `source` decides the deadline: 10 days from Fresh, 30 from All.
+ *  Once someone owns a lead nobody else can take it over — only that owner
+ *  (by releasing or closing it) or the deadline sweep frees it back up. */
 router.post("/:id/claim", async (req, res, next) => {
   try {
-    const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
+    const lead = await db.one(
+      `SELECT l.*, u.display_name AS owner_name
+         FROM leads l LEFT JOIN users u ON u.id = l.owner_id
+        WHERE l.id = $1`,
+      [req.params.id]
+    );
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     if (req.body && req.body.release) {
+      if (lead.owner_id && lead.owner_id !== req.user.id) {
+        return res.status(403).json({ error: "Only the owner can release this lead." });
+      }
       const released = await lifecycle.release(lead.id);
       await logActivity(lead.id, req.user.id, "claim", "Released back to the pool");
       released.countdown = null;
       return res.json({ lead: released });
+    }
+
+    if (lead.owner_id && lead.owner_id !== req.user.id) {
+      return res
+        .status(409)
+        .json({ error: `Already claimed by ${lead.owner_name || "someone else"} — it's locked to them.` });
     }
 
     const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
