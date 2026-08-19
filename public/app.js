@@ -495,8 +495,12 @@ function companyUrl(lead) {
  * "City, State" — or whichever half the sheet actually has. The State column
  * is blank for Delhi and the other union territories, so a lead that only
  * knows its city still reads properly rather than as "Delhi, ".
+ *
+ * Named companyLocation, not location: a top-level `function location` becomes
+ * a property of window and collides with window.location, which breaks the
+ * whole file and the two location.reload() calls in it.
  */
-function location(lead) {
+function companyLocation(lead) {
   return [lead.city, lead.state].filter(Boolean).join(", ") || null;
 }
 
@@ -554,8 +558,8 @@ function databaseTable(leads) {
             }
           </div>
 
-          <div class="db-cell" title="${esc(location(lead) || "")}">
-            ${location(lead) ? esc(location(lead)) : `<span class="muted">—</span>`}
+          <div class="db-cell" title="${esc(companyLocation(lead) || "")}">
+            ${companyLocation(lead) ? esc(companyLocation(lead)) : `<span class="muted">—</span>`}
           </div>
 
           <div class="db-cell">${esc(lead.employees || "—")}</div>
@@ -1170,7 +1174,7 @@ async function onCardClick(e) {
 function companyInfoCard(lead) {
   const rows = [
     ["Founded", lead.founded],
-    ["Location", location(lead)],
+    ["Location", companyLocation(lead)],
     ["Industry", lead.industry],
     ["Employees", lead.employees],
     ["Revenue", lead.revenue],
