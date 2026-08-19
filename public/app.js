@@ -294,10 +294,18 @@ async function loadStats() {
       const el = $(`[data-stat="${key}"]`);
       if (el) el.textContent = value;
     }
-    $('[data-count="today"]').textContent = data.stats.newIn24h;
-    $('[data-count="all"]').textContent = data.totals.leads;
-    $('[data-count="mine"]').textContent = data.totals.mine;
-    $('[data-count="today"]').textContent = data.totals.today;
+    // One pill per tab. These were still pointing at the old tab names, which
+    // is why every count sat at zero.
+    for (const [tab, value] of [
+      ["all", data.totals.leads],
+      ["fresh", data.totals.fresh],
+      ["mine", data.totals.mine],
+      ["newspaper", data.totals.newspaper],
+    ]) {
+      const pill = $(`[data-count="${tab}"]`);
+      if (pill) pill.textContent = value;
+    }
+    state.freshWindowDays = (data.schedule && data.schedule.freshWindowDays) || 3;
     state.schedule = data.schedule;
     state.run = data.run;
     state.lastRun = data.run.last;
@@ -455,8 +463,8 @@ function databaseTable(leads) {
   return `
     <div class="db-table">
       <div class="db-head">
-        <span></span><span>Company</span><span>Industry</span><span>Size</span>
-        <span>Revenue</span><span>People</span><span>Owner</span><span></span>
+        <span></span><span>Company</span><span>Contacts</span><span>Industry</span>
+        <span>Size</span><span>Revenue</span><span>Owner</span><span></span>
       </div>
       ${leads
         .map(
@@ -473,10 +481,19 @@ function databaseTable(leads) {
             }
           </div>
 
+          <div class="db-cell">
+            ${
+              Number(lead.contact_count) > 0
+                ? `<button class="contact-btn" data-expand="${lead.id}">
+                     ${lead.contact_count} contact${Number(lead.contact_count) === 1 ? "" : "s"}
+                   </button>`
+                : `<span class="muted">None on file</span>`
+            }
+          </div>
+
           <div class="db-cell">${esc(lead.industry || "—")}</div>
           <div class="db-cell">${esc(lead.employees || "—")}</div>
           <div class="db-cell">${esc(lead.revenue || "—")}</div>
-          <div class="db-cell">${lead.contact_count || 0}</div>
 
           <div class="db-cell">
             ${
@@ -700,7 +717,17 @@ function wireListActions() {
       try {
         const csv = await file.text();
         const r = await api("/api/admin/import", { method: "POST", body: { csv } });
-        toast(`${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}, ${r.contactsAdded} new contacts`);
+
+        if (r.warning) {
+          toast(r.warning, true);
+          console.warn("Columns recognised:", r.matched, "| ignored:", r.unmatched);
+        } else {
+          toast(
+            `${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}, ` +
+              `${r.contactsAdded} new contact${r.contactsAdded === 1 ? "" : "s"}` +
+              (r.skipped ? ` · ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped` : "")
+          );
+        }
         refresh();
       } catch (err) {
         toast(err.message, true);
@@ -806,13 +833,18 @@ async function onCardClick(e) {
     const box = $(`#contacts-${id}`);
     if (!box) return;
 
+    const arrow = $(`[data-expand="${id}"].db-toggle`);
+    const chip = $(`[data-expand="${id}"].contact-btn`);
+
     if (!box.hidden) {
       box.hidden = true;
-      expander.textContent = "\u25B8";
+      if (arrow) arrow.textContent = "\u25B8";
+      if (chip) chip.classList.remove("is-open");
       return;
     }
 
-    expander.textContent = "\u25BE";
+    if (arrow) arrow.textContent = "\u25BE";
+    if (chip) chip.classList.add("is-open");
     box.hidden = false;
     box.innerHTML = `<p class="muted" style="padding:10px 16px">Loading contacts…</p>`;
 

@@ -255,7 +255,7 @@ router.post("/import", async (req, res, next) => {
     const csv = String((req.body && req.body.csv) || "");
     if (!csv.trim()) return res.status(400).json({ error: "The file looked empty." });
 
-    const { companies, contacts, skipped } = parseContactSheet(csv);
+    const { companies, contacts, skipped, matched, unmatched, rows } = parseContactSheet(csv);
 
     if (!companies.length) {
       return res.status(400).json({
@@ -325,11 +325,20 @@ router.post("/import", async (req, res, next) => {
     });
 
     res.json({
+      rows,
       companies: companies.length,
       contacts: contacts.length,
       companiesAdded,
       contactsAdded,
       skipped,
+      matched,
+      unmatched,
+      // A sheet of companies with no recognisable person column is almost
+      // always a header-naming problem, so say so rather than reporting success.
+      warning:
+        contacts.length === 0
+          ? "No contacts were found. The sheet needs a name column (First name / Last name, or Name) alongside Company name."
+          : null,
     });
   } catch (err) {
     next(err);
