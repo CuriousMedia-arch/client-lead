@@ -274,8 +274,10 @@ router.post("/import", async (req, res, next) => {
         const { rows } = await q(
           `INSERT INTO companies
              (name, keywords, active, origin, approval,
-              domain, website, linkedin, employees, revenue, industry)
-           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8)
+              domain, website, linkedin, employees, revenue, industry, founded,
+              city, state)
+           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8, $9,
+                   $10, $11)
            ON CONFLICT (lower(name)) DO UPDATE
               SET keywords  = $2::jsonb,
                   domain    = COALESCE(EXCLUDED.domain,    companies.domain),
@@ -284,13 +286,16 @@ router.post("/import", async (req, res, next) => {
                   employees = COALESCE(EXCLUDED.employees, companies.employees),
                   revenue   = COALESCE(EXCLUDED.revenue,   companies.revenue),
                   industry  = COALESCE(EXCLUDED.industry,  companies.industry),
+                  founded   = COALESCE(EXCLUDED.founded,   companies.founded),
+                  city      = COALESCE(EXCLUDED.city,      companies.city),
+                  state     = COALESCE(EXCLUDED.state,     companies.state),
                   active    = CASE WHEN companies.approval = 'rejected'
                                    THEN companies.active ELSE true END,
                   approval  = CASE WHEN companies.approval = 'rejected'
                                    THEN 'rejected' ELSE 'approved' END
            RETURNING id, (xmax = 0) AS inserted`,
           [c.name, JSON.stringify(c.keywords), c.domain, c.website, c.linkedin,
-           c.employees, c.revenue, c.industry]
+           c.employees, c.revenue, c.industry, c.founded, c.city, c.state]
         );
         if (rows[0].inserted) companiesAdded++;
       }
@@ -302,23 +307,25 @@ router.post("/import", async (req, res, next) => {
       for (const p of contacts) {
         const { rows } = await q(
           `INSERT INTO company_contacts
-             (company, name, role, email, phone, phone_type, linkedin, notes,
-              seniority, department, city, is_primary)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             (company, name, role, email, phone, phone_type, phone2, phone2_type,
+              linkedin, notes, seniority, department, city, is_primary)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
            ON CONFLICT (lower(company), lower(name)) DO UPDATE
-              SET role       = COALESCE(EXCLUDED.role,       company_contacts.role),
-                  email      = COALESCE(EXCLUDED.email,      company_contacts.email),
-                  phone      = COALESCE(EXCLUDED.phone,      company_contacts.phone),
-                  phone_type = COALESCE(EXCLUDED.phone_type, company_contacts.phone_type),
-                  linkedin   = COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
-                  notes      = COALESCE(EXCLUDED.notes,      company_contacts.notes),
-                  seniority  = COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
-                  department = COALESCE(EXCLUDED.department, company_contacts.department),
-                  city       = COALESCE(EXCLUDED.city,       company_contacts.city),
-                  is_primary = company_contacts.is_primary OR EXCLUDED.is_primary
+              SET role        = COALESCE(EXCLUDED.role,        company_contacts.role),
+                  email       = COALESCE(EXCLUDED.email,       company_contacts.email),
+                  phone       = COALESCE(EXCLUDED.phone,       company_contacts.phone),
+                  phone_type  = COALESCE(EXCLUDED.phone_type,  company_contacts.phone_type),
+                  phone2      = COALESCE(EXCLUDED.phone2,      company_contacts.phone2),
+                  phone2_type = COALESCE(EXCLUDED.phone2_type, company_contacts.phone2_type),
+                  linkedin    = COALESCE(EXCLUDED.linkedin,    company_contacts.linkedin),
+                  notes       = COALESCE(EXCLUDED.notes,       company_contacts.notes),
+                  seniority   = COALESCE(EXCLUDED.seniority,   company_contacts.seniority),
+                  department  = COALESCE(EXCLUDED.department,  company_contacts.department),
+                  city        = COALESCE(EXCLUDED.city,        company_contacts.city),
+                  is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
            RETURNING (xmax = 0) AS inserted`,
-          [p.company, p.name, p.role, p.email, p.phone, p.phone_type, p.linkedin, p.notes,
-           p.seniority, p.department, p.city, p.is_primary]
+          [p.company, p.name, p.role, p.email, p.phone, p.phone_type, p.phone2, p.phone2_type,
+           p.linkedin, p.notes, p.seniority, p.department, p.city, p.is_primary]
         );
         if (rows[0].inserted) contactsAdded++;
       }

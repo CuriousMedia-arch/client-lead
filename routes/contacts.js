@@ -18,7 +18,7 @@ router.get("/", async (req, res, next) => {
     if (!company) return res.status(400).json({ error: "Which company?" });
 
     const contacts = await db.all(
-      `SELECT id, name, role, email, phone, linkedin, notes, is_primary
+      `SELECT id, name, role, email, phone, phone2, linkedin, notes, is_primary
          FROM company_contacts
         WHERE lower(company) = lower($1)
         ORDER BY is_primary DESC, name ASC`,
@@ -50,7 +50,7 @@ router.post("/", async (req, res, next) => {
               email      = COALESCE(EXCLUDED.email, company_contacts.email),
               phone      = COALESCE(EXCLUDED.phone, company_contacts.phone),
               is_primary = EXCLUDED.is_primary
-       RETURNING id, name, role, email, phone, linkedin, notes, is_primary`,
+       RETURNING id, name, role, email, phone, phone2, linkedin, notes, is_primary`,
       [company, name, clean(b.role), clean(b.email), clean(b.phone), Boolean(b.is_primary)]
     );
 

@@ -81,8 +81,14 @@ async function queryLeads(params, user) {
     recent: "l.last_signal_at DESC NULLS LAST, LOWER(c.name) ASC",
     company: "LOWER(c.name) ASC",
     added: "c.created_at DESC, LOWER(c.name) ASC",
+    released: "COALESCE(l.released_at, l.last_signal_at, l.updated_at) DESC, LOWER(c.name) ASC",
   };
-  const orderBy = sortMap[params.sort] || (tab === "mine" ? sortMap.urgent : sortMap.company);
+  // The Newspaper is browsed by date, so it always comes back newest first —
+  // the frontend buckets it into year, month and day from there.
+  const orderBy =
+    tab === "newspaper"
+      ? sortMap.released
+      : sortMap[params.sort] || (tab === "mine" ? sortMap.urgent : sortMap.company);
 
   const leads = await db.all(
     `SELECT l.id, l.status, l.owner_id, l.pool,
@@ -91,7 +97,11 @@ async function queryLeads(params, user) {
             l.last_contacted_at, l.next_followup_at, l.last_signal_at,
             c.name AS company, c.id AS company_id,
             c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
-            c.created_at AS added_at,
+            c.founded, c.city, c.state, c.created_at AS added_at,
+            -- The day this landed in the Newspaper. Rows released before the
+            -- column existed fall back to their last news, then to updated_at,
+            -- so nothing turns up in an "Undated" bucket.
+            COALESCE(l.released_at, l.last_signal_at, l.updated_at) AS newspaper_date,
             u.display_name AS owner_name,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
@@ -111,7 +121,12 @@ async function queryLeads(params, user) {
 
   // All Leads is a database view — no signals, no pitch. Everywhere else gets
   // the news that justifies the lead.
-  if (tab !== "all") await attachSignals(leads);
+  //
+  // Fresh Leads is the exception that needs a second limit: a company qualifies
+  // on having news in the last few days, but without this it would then be
+  // shown its whole back catalogue, so a lead with one item from today read as
+  // though it had eight. Fresh only ever shows what's inside the window.
+  if (tab !== "all") await attachSignals(leads, tab === "fresh" ? FRESH_DAYS : null);
 
   for (const lead of leads) {
     lead.countdown = lifecycle.countdown(lead);
@@ -121,8 +136,20 @@ async function queryLeads(params, user) {
   return leads;
 }
 
-/** Recent signals per lead, newest first, plus the tier they imply. */
-async function attachSignals(leads) {
+/**
+ * Recent signals per lead, newest first, plus the tier they imply.
+ *
+ * `maxAgeDays` caps how far back the news may reach. Number() rather than a
+ * bind parameter because it sits inside an interval literal, and it keeps a
+ * value straight off the query string out of the SQL.
+ */
+async function attachSignals(leads, maxAgeDays = null) {
+  const window = Number(maxAgeDays);
+  const ageFilter =
+    Number.isFinite(window) && window > 0
+      ? `AND COALESCE(s.published, s.created_at) >= now() - interval '${window} days'`
+      : "";
+
   const rows = await db.all(
     `SELECT * FROM (
        SELECT s.id, s.lead_id, s.title, s.url, s.site, s.published, s.created_at,
@@ -133,6 +160,7 @@ async function attachSignals(leads) {
               ) AS rn
          FROM signals s
         WHERE s.lead_id = ANY($1)
+          ${ageFilter}
      ) t WHERE t.rn <= 8`,
     [leads.map((l) => l.id)]
   );
@@ -193,7 +221,7 @@ router.get("/:id/contacts", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     const contacts = await db.all(
-      `SELECT id, name, role, email, phone, linkedin, seniority, department, city, is_primary
+      `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department, city, is_primary
          FROM company_contacts
         WHERE lower(company) = lower($1)
         ORDER BY is_primary DESC, name ASC`,
@@ -213,7 +241,7 @@ router.get("/:id", async (req, res, next) => {
     const lead = await db.one(
       `SELECT l.*, c.name AS company, c.keywords,
               c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
-              c.created_at AS added_at, u.display_name AS owner_name
+              c.founded, c.city, c.state, c.created_at AS added_at, u.display_name AS owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          LEFT JOIN users u ON u.id = l.owner_id
@@ -238,7 +266,7 @@ router.get("/:id", async (req, res, next) => {
         [lead.id]
       ),
       db.all(
-        `SELECT id, name, role, email, phone, linkedin, seniority, department, city, is_primary
+        `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department, city, is_primary
            FROM company_contacts WHERE lower(company) = lower($1)
           ORDER BY is_primary DESC, name ASC`,
         [lead.company]

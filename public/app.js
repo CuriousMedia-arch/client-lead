@@ -105,6 +105,10 @@ const state = {
   runPoll: null,
   lastRun: null,
   freshWindowDays: 3,
+  // Where the Newspaper drill-down currently is. null at a level means that
+  // level hasn't been chosen yet, so that's the picker being shown.
+  np: { year: null, month: null, day: null },
+  npLeads: [],
 };
 
 // Mirrors lib/triggers.js — the agency's own playbook.
@@ -235,6 +239,9 @@ function wireEvents() {
   $("#tabs").addEventListener("click", (e) => {
     const btn = e.target.closest(".tab");
     if (!btn) return;
+    // Opening the Newspaper starts at the year list rather than wherever the
+    // last visit left off, so the tab always looks the same when you arrive.
+    if (btn.dataset.tab !== state.tab) state.np = { year: null, month: null, day: null };
     state.tab = btn.dataset.tab;
     $$(".tab").forEach((t) => t.classList.toggle("is-active", t === btn));
     refresh();
@@ -334,9 +341,15 @@ function currentQuery() {
 // The other two do, because what they hold isn't obvious from the name alone.
 const PAGE_COPY = {
   all: ["All Leads", "Your contact database. Claim one and you have 30 days to close it."],
-  fresh: ["Fresh Leads", "News about companies in your database. Claim one and you have 10 days."],
+  fresh: [
+    "Fresh Leads",
+    "News from the last 3 days only. Claim one and you have 10 days.",
+  ],
   mine: ["My Outreach", "What you're working, and how long is left on each."],
-  newspaper: ["Newspaper", "Fresh Leads that ran out of time. Anyone can pick these up."],
+  newspaper: [
+    "Newspaper",
+    "Fresh Leads that ran out of time, filed by the date they were released. Anyone can pick these up.",
+  ],
 };
 
 function actionBar() {
@@ -407,13 +420,19 @@ function filterBar() {
           : ""
       }
 
-      <span class="filter-label">Sort</span>
-      <select class="filter-select" id="f-sort">
-        ${state.tab === "mine" ? `<option value="urgent">Deadline soonest</option>` : ""}
-        <option value="company">Company name (A–Z)</option>
-        <option value="recent">Newest signal first</option>
-        <option value="added">Recently added</option>
-      </select>
+      ${
+        // The Newspaper has its own ordering — year, then month, then day — so
+        // a second sort control there would only fight with it.
+        state.tab === "newspaper"
+          ? ""
+          : `<span class="filter-label">Sort</span>
+             <select class="filter-select" id="f-sort">
+               ${state.tab === "mine" ? `<option value="urgent">Deadline soonest</option>` : ""}
+               <option value="company">Company name (A–Z)</option>
+               <option value="recent">Newest signal first</option>
+               <option value="added">Recently added</option>
+             </select>`
+      }
     </div>`;
 }
 
@@ -434,7 +453,7 @@ async function renderContent(opts = {}) {
     : state.tab === "all"
     ? databaseTable(leads)
     : state.tab === "newspaper"
-    ? `<div class="mylead-grid">${leads.map(newspaperCard).join("")}</div>`
+    ? newspaperView(leads)
     : state.tab === "fresh"
     ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
     : `<div class="mylead-grid">${leads.map(outreachCard).join("")}</div>`;
@@ -443,7 +462,7 @@ async function renderContent(opts = {}) {
 
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
-  $("#f-sort").value = state.sort;
+  if ($("#f-sort")) $("#f-sort").value = state.sort;
 
   if (opts.keepFocus) {
     const el = $("#" + opts.keepFocus);
@@ -459,39 +478,86 @@ async function renderContent(opts = {}) {
  * A record of the contact sheet, one row per company, expandable into its
  * people. No signals, no pitch — that lives in Fresh Leads and Outreach.
  */
+/**
+ * The sheet writes the website with a scheme sometimes and without one others,
+ * and the domain column never has one. An href without a scheme is read as a
+ * relative path, so normalise before it goes into the link.
+ */
+function companyUrl(lead) {
+  const raw = lead.website || lead.domain;
+  if (!raw) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  return /^https?:\/\//i.test(value) ? value : `https://${value.replace(/^\/+/, "")}`;
+}
+
+/**
+ * "City, State" — or whichever half the sheet actually has. The State column
+ * is blank for Delhi and the other union territories, so a lead that only
+ * knows its city still reads properly rather than as "Delhi, ".
+ */
+function location(lead) {
+  return [lead.city, lead.state].filter(Boolean).join(", ") || null;
+}
+
 function databaseTable(leads) {
   return `
     <div class="db-table">
       <div class="db-head">
-        <span></span><span>Company</span><span>Contacts</span><span>Industry</span>
-        <span>Size</span><span>Revenue</span><span>Owner</span><span></span>
+        <span></span>
+        <span>Company</span>
+        <span>Contacts</span>
+        <span>LinkedIn</span>
+        <span>Location</span>
+        <span>Size</span>
+        <span>Revenue</span>
+        <span>Owner</span>
+        <span class="db-head-end">Claim</span>
       </div>
       ${leads
-        .map(
-          (lead) => `
+        .map((lead) => {
+          const url = companyUrl(lead);
+          const contacts = Number(lead.contact_count) || 0;
+
+          return `
         <div class="db-row" data-lead="${lead.id}">
           <button class="db-toggle" data-expand="${lead.id}" aria-label="Show contacts">▸</button>
 
           <div class="db-company">
-            <span class="company-name">${esc(lead.company)}</span>
             ${
-              lead.domain || lead.website
-                ? `<span class="company-meta">${esc(lead.domain || lead.website)}</span>`
-                : ""
+              url
+                ? `<a class="company-name company-link" href="${esc(url)}"
+                      target="_blank" rel="noopener">${esc(lead.company)}</a>`
+                : `<span class="company-name">${esc(lead.company)}</span>`
             }
+            <span class="company-meta">
+              ${lead.founded ? `Founded ${esc(lead.founded)}` : "Founded year not on file"}
+            </span>
           </div>
 
           <div class="db-cell">
             ${
-              Number(lead.contact_count) > 0
+              contacts > 0
                 ? `<button class="contact-btn" data-expand="${lead.id}">
-                     ${lead.contact_count} contact${Number(lead.contact_count) === 1 ? "" : "s"}
+                     ${contacts} contact${contacts === 1 ? "" : "s"}
                    </button>`
                 : `<span class="muted">None on file</span>`
             }
           </div>
 
-          <div class="db-cell">${esc(lead.industry || "—")}</div>
+          <div class="db-cell">
+            ${
+              lead.linkedin
+                ? `<a class="db-link" href="${esc(lead.linkedin)}"
+                      target="_blank" rel="noopener">Company page</a>`
+                : `<span class="muted">—</span>`
+            }
+          </div>
+
+          <div class="db-cell" title="${esc(location(lead) || "")}">
+            ${location(lead) ? esc(location(lead)) : `<span class="muted">—</span>`}
+          </div>
+
           <div class="db-cell">${esc(lead.employees || "—")}</div>
           <div class="db-cell">${esc(lead.revenue || "—")}</div>
 
@@ -515,8 +581,8 @@ function databaseTable(leads) {
             }
           </div>
         </div>
-        <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`
-        )
+        <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
+        })
         .join("")}
     </div>`;
 }
@@ -531,9 +597,8 @@ function freshCard(lead) {
         <div class="mylead-heading">
           <div class="company-name">${esc(lead.company)}</div>
           <div class="mylead-meta">
-            ${lead.fresh_count} new signal${lead.fresh_count === 1 ? "" : "s"}${
-    lead.industry ? ` · ${esc(lead.industry)}` : ""
-  }
+            ${lead.fresh_count} new signal${lead.fresh_count === 1 ? "" : "s"} in the last
+            ${state.freshWindowDays || 3} days
           </div>
         </div>
         ${tierBadge(lead.tier, lead.tier_note)}
@@ -629,6 +694,167 @@ function outreachCard(lead) {
 }
 
 /* ── Newspaper ───────────────────────────────────────────────────────────── */
+
+/**
+ * The Newspaper is an archive rather than a feed, so it's browsed the way an
+ * archive is: pick a year, then a month, then a day, and read what was filed
+ * that day. Everything below works off the list already in memory — the drill
+ * -down never goes back to the server.
+ */
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** The day a lead was dropped into the Newspaper, or null if it can't be read. */
+function releasedOn(lead) {
+  const iso = lead.newspaper_date || lead.last_signal_at;
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d) ? null : d;
+}
+
+/**
+ * leads -> Map(year -> { count, months: Map(month -> { count, days: Map(day -> leads) }) })
+ * Insertion order is the order the server sent, which is newest first.
+ */
+function newspaperTree(leads) {
+  const years = new Map();
+  const undated = [];
+
+  for (const lead of leads) {
+    const d = releasedOn(lead);
+    if (!d) { undated.push(lead); continue; }
+
+    const [y, m, day] = [d.getFullYear(), d.getMonth(), d.getDate()];
+
+    if (!years.has(y)) years.set(y, { count: 0, months: new Map() });
+    const year = years.get(y);
+    year.count++;
+
+    if (!year.months.has(m)) year.months.set(m, { count: 0, days: new Map() });
+    const month = year.months.get(m);
+    month.count++;
+
+    if (!month.days.has(day)) month.days.set(day, []);
+    month.days.get(day).push(lead);
+  }
+
+  return { years, undated };
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** One clickable square in the year / month / day picker. */
+function npTile(level, value, label, sub) {
+  return `
+    <button class="np-tile" data-np="${level}" data-value="${value}">
+      <span class="np-tile-label">${esc(label)}</span>
+      <span class="np-tile-sub">${esc(sub)}</span>
+    </button>`;
+}
+
+/** Where you are, and a way back out of it. */
+function npCrumbs() {
+  const { year, month, day } = state.np;
+  const crumbs = [`<button class="np-crumb" data-np="reset" data-value="">All dates</button>`];
+
+  if (year != null)
+    crumbs.push(`<button class="np-crumb" data-np="year" data-value="${year}">${year}</button>`);
+  if (month != null)
+    crumbs.push(
+      `<button class="np-crumb" data-np="month" data-value="${month}">${MONTH_NAMES[month]}</button>`
+    );
+  if (day != null) crumbs.push(`<span class="np-crumb is-here">${day} ${MONTH_NAMES[month]}</span>`);
+
+  return `<nav class="np-crumbs">${crumbs.join(`<span class="np-crumb-sep">›</span>`)}</nav>`;
+}
+
+/** The whole tab: breadcrumbs plus whichever level is currently open. */
+function newspaperView(leads) {
+  state.npLeads = leads;
+  return `<div id="np-root">${newspaperLevel(leads)}</div>`;
+}
+
+function newspaperLevel(leads) {
+  const { years, undated } = newspaperTree(leads);
+  const { year, month, day } = state.np;
+
+  // A year that no longer has anything in it — everything got picked up while
+  // the page was open. Fall back to the top rather than showing a dead end.
+  if (year != null && !years.has(year)) {
+    return npCrumbs() + `<div class="np-empty">Nothing is left under this date. Pick another.</div>`;
+  }
+
+  if (year == null) {
+    const tiles = [...years.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([y, node]) => npTile("year", y, y, plural(node.count, "lead")))
+      .join("");
+
+    return `
+      ${npCrumbs()}
+      <p class="np-hint">Pick a year, then a month, then a day to read what was released.</p>
+      <div class="np-grid">${tiles}</div>
+      ${
+        undated.length
+          ? `<p class="np-hint">${plural(undated.length, "lead")} carry no release date and sit outside this list.</p>`
+          : ""
+      }`;
+  }
+
+  const months = years.get(year).months;
+
+  if (month == null) {
+    const tiles = [...months.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([m, node]) => npTile("month", m, MONTH_NAMES[m], plural(node.count, "lead")))
+      .join("");
+
+    return `${npCrumbs()}<div class="np-grid">${tiles}</div>`;
+  }
+
+  if (!months.has(month)) {
+    return npCrumbs() + `<div class="np-empty">Nothing is left in this month. Pick another.</div>`;
+  }
+
+  const days = months.get(month).days;
+
+  if (day == null) {
+    const tiles = [...days.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([d, items]) =>
+        npTile("day", d, `${d} ${MONTH_NAMES[month].slice(0, 3)}`, plural(items.length, "lead"))
+      )
+      .join("");
+
+    return `${npCrumbs()}<div class="np-grid np-grid-days">${tiles}</div>`;
+  }
+
+  const items = days.get(day) || [];
+
+  if (!items.length) {
+    return (
+      npCrumbs() +
+      `<div class="np-empty">Everything released on this date has been picked up.</div>`
+    );
+  }
+
+  return `
+    ${npCrumbs()}
+    <p class="np-hint">
+      ${plural(items.length, "lead")} released on ${day} ${MONTH_NAMES[month]} ${year}.
+    </p>
+    <div class="mylead-grid">${items.map(newspaperCard).join("")}</div>`;
+}
+
+/** Re-draw just the Newspaper body — the drill-down needs no new data. */
+function renderNewspaper() {
+  const root = $("#np-root");
+  if (!root) return;
+  root.innerHTML = newspaperLevel(state.npLeads || []);
+}
 
 /** The parking lot: Fresh claims whose 10 days ran out. Anyone can take them. */
 function newspaperCard(lead) {
@@ -825,6 +1051,22 @@ function emptyState() {
 // ── Card interactions ──────────────────────────────────────────────────────
 
 async function onCardClick(e) {
+  // Newspaper date navigation. Handled here rather than with its own listener
+  // because #content is rebuilt on every render and per-render listeners stack.
+  const nav = e.target.closest("[data-np]");
+  if (nav) {
+    e.stopPropagation();
+    const value = Number(nav.dataset.value);
+
+    if (nav.dataset.np === "year") state.np = { year: value, month: null, day: null };
+    else if (nav.dataset.np === "month") state.np = { ...state.np, month: value, day: null };
+    else if (nav.dataset.np === "day") state.np = { ...state.np, day: value };
+    else state.np = { year: null, month: null, day: null };   // "All dates"
+
+    renderNewspaper();
+    return;
+  }
+
   // Expanding a company into its people — All Leads only.
   const expander = e.target.closest("[data-expand]");
   if (expander) {
@@ -851,7 +1093,10 @@ async function onCardClick(e) {
     try {
       const { contacts } = await api(`/api/leads/${id}/contacts`);
       box.innerHTML = contacts.length
-        ? `<div class="contact-head"><span>Name</span><span>Position</span><span>Email</span><span>Mobile</span><span></span></div>` +
+        ? `<div class="contact-head">
+             <span>Name</span><span>Position</span><span>Email</span>
+             <span>Mobile</span><span>Second mobile</span><span>LinkedIn</span>
+           </div>` +
           contacts
             .map(
               (c) => `<div class="contact-row">
@@ -859,10 +1104,11 @@ async function onCardClick(e) {
                 <span>${esc(c.role || "—")}</span>
                 <span>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—"}</span>
                 <span>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "—"}</span>
+                <span>${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "—"}</span>
                 <span>${
                   c.linkedin
-                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`
-                    : ""
+                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">Profile</a>`
+                    : "—"
                 }</span>
               </div>`
             )
@@ -923,6 +1169,8 @@ async function onCardClick(e) {
 /** The firmographics panel — everything the CSV knew about the company. */
 function companyInfoCard(lead) {
   const rows = [
+    ["Founded", lead.founded],
+    ["Location", location(lead)],
     ["Industry", lead.industry],
     ["Employees", lead.employees],
     ["Revenue", lead.revenue],
@@ -1160,6 +1408,8 @@ async function loadContacts(lead) {
         ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
         ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
         ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+        ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
+        ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
       </p>
       <button class="chip" data-use="${i}">Use this contact</button>
     </div>`
