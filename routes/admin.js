@@ -287,7 +287,33 @@ router.patch("/users/:id", async (req, res, next) => {
     if (!sets.length) return res.json({ ok: true });
 
     await db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ${bind(user.id)}`, args);
-    res.json({ ok: true });
+
+    // Deactivating someone frees whatever they were sitting on. Their leads
+    // stay in pool='all' with no owner, which is exactly what puts them back
+    // in All Leads — and, if the news inside them is still recent, right back
+    // in Fresh Leads too. Closed leads are left alone; that outreach already
+    // happened and isn't undone by removing the person.
+    let released = 0;
+    if (req.body.active === false) {
+      const freed = await db.all(
+        `UPDATE leads
+            SET owner_id = NULL, claimed_at = NULL, claim_source = NULL,
+                deadline_at = NULL, updated_at = now()
+          WHERE owner_id = $1 AND closed_at IS NULL
+          RETURNING id`,
+        [user.id]
+      );
+      released = freed.length;
+      if (released) {
+        await db.run(
+          `INSERT INTO activity (lead_id, user_id, kind, body)
+           SELECT id, $2, 'claim', $3 FROM unnest($1::bigint[]) AS id`,
+          [freed.map((l) => l.id), req.user.id, `Released — ${user.display_name} was removed from the team`]
+        );
+      }
+    }
+
+    res.json({ ok: true, released });
   } catch (err) {
     next(err);
   }

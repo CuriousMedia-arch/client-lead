@@ -185,7 +185,9 @@ a { color: var(--teal); }
 .stat-admin {
   border-color: var(--teal);
   background: color-mix(in srgb, var(--teal) 7%, var(--surface));
+  cursor: pointer;
 }
+.stat-admin:hover { box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,.08)); }
 
 .stat-admin .stat-value { color: var(--teal-dark, var(--teal)); }
 
@@ -624,6 +626,47 @@ a { color: var(--teal); }
 .drawer-close:hover { background: var(--surface-sunk); color: var(--ink); }
 
 .drawer-body { padding: 20px 22px 48px; }
+
+/* ── Unclaimed leads modal (admin only) ─────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 24, 28, .45);
+  z-index: 100;
+  animation: fadeIn .15s ease;
+}
+
+.modal-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(640px, 92vw);
+  max-height: 82vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  z-index: 101;
+  animation: slideIn .2s ease;
+}
+
+.modal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.modal-row:hover { background: var(--surface-sunk); }
+.modal-row:last-child { border-bottom: none; }
+.modal-row-main { min-width: 0; }
+.modal-row-main strong { display: block; font-size: 14px; }
+.modal-row-main span { font-size: 12px; color: var(--ink-soft); }
+.modal-empty { padding: 40px 22px; text-align: center; color: var(--ink-soft); font-size: 13.5px; }
 
 .block { margin-bottom: 26px; }
 .block h3 {

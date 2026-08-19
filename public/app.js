@@ -286,7 +286,11 @@ function wireEvents() {
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
+    if (e.key === "Escape" && !$("#unclaimed-modal").hidden) closeUnclaimedModal();
   });
+
+  $("#stat-admin-unclaimed").addEventListener("click", openUnclaimedModal);
+  $("#unclaimed-backdrop").addEventListener("click", closeUnclaimedModal);
 }
 
 function toggleSet(set, value, chip) {
@@ -1236,6 +1240,75 @@ async function openDrawer(id) {
   wireDrawer(lead);
 }
 
+/* ── Unclaimed Fresh Leads modal (admin only) ────────────────────────────── */
+
+function closeUnclaimedModal() {
+  $("#unclaimed-modal").hidden = true;
+  $("#unclaimed-backdrop").hidden = true;
+}
+
+async function openUnclaimedModal() {
+  if (!state.user || state.user.role !== "admin") return;
+
+  const modal = $("#unclaimed-modal");
+  modal.hidden = false;
+  $("#unclaimed-backdrop").hidden = false;
+  modal.innerHTML = `
+    <div class="drawer-head">
+      <h2>Unclaimed Fresh Leads</h2>
+      <button class="drawer-close" id="unclaimed-close">&times;</button>
+    </div>
+    <div class="empty"><p>Loading…</p></div>`;
+  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+
+  let leads, windowDays;
+  try {
+    ({ leads, windowDays } = await api("/api/admin/unclaimed"));
+  } catch (err) {
+    modal.innerHTML = `
+      <div class="drawer-head">
+        <h2>Unclaimed Fresh Leads</h2>
+        <button class="drawer-close" id="unclaimed-close">&times;</button>
+      </div>
+      <div class="empty"><h2>Couldn't load this</h2><p>${esc(err.message)}</p></div>`;
+    $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+    return;
+  }
+
+  modal.innerHTML = `
+    <div class="drawer-head">
+      <h2>Unclaimed Fresh Leads</h2>
+      <button class="drawer-close" id="unclaimed-close">&times;</button>
+    </div>
+    ${
+      leads.length
+        ? leads
+            .map(
+              (l) => `
+        <div class="modal-row" data-open="${l.id}">
+          <div class="modal-row-main">
+            <strong>${esc(l.company)}</strong>
+            <span>
+              ${l.fresh_count} signal${l.fresh_count === 1 ? "" : "s"} in the last ${windowDays} days
+              ${l.top_title ? ` · ${esc(String(l.top_title).slice(0, 70))}` : ""}
+            </span>
+          </div>
+          <span class="muted">${esc(timeAgo(l.last_signal_at) || "")}</span>
+        </div>`
+            )
+            .join("")
+        : `<div class="modal-empty">Nothing sitting unclaimed right now — the team is keeping up.</div>`
+    }`;
+
+  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+  modal.querySelectorAll("[data-open]").forEach((row) =>
+    row.addEventListener("click", () => {
+      closeUnclaimedModal();
+      openDrawer(row.dataset.open);
+    })
+  );
+}
+
 function drawerHtml(lead) {
   const teamOptions = [`<option value="">Unclaimed</option>`]
     .concat(
@@ -1876,13 +1949,20 @@ function wireAdmin() {
       return guard(() => api(`/api/admin/sites/${btn.dataset.siteDel}`, { method: "DELETE" }));
     }
 
-    if (btn.dataset.userToggle)
-      return guard(() =>
-        api(`/api/admin/users/${btn.dataset.userToggle}`, {
+    if (btn.dataset.userToggle) {
+      const activating = btn.dataset.active === "1";
+      return guard(async () => {
+        const r = await api(`/api/admin/users/${btn.dataset.userToggle}`, {
           method: "PATCH",
-          body: { active: btn.dataset.active === "1" },
-        })
-      );
+          body: { active: activating },
+        });
+        if (!activating && r.released) {
+          toast(`Deactivated — ${r.released} lead${r.released === 1 ? "" : "s"} released back to the pool`);
+        } else {
+          toast(activating ? "Reactivated" : "Deactivated");
+        }
+      });
+    }
   });
 }
 
