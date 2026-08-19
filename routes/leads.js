@@ -35,19 +35,23 @@ async function queryLeads(params, user) {
   const bind = (v) => `$${args.push(v)}`;
 
   if (tab === "fresh") {
-    where.push("l.pool = 'all'");
-    where.push("l.owner_id IS NULL");
+    // Unclaimed on the FRESH track specifically. Whether someone claimed this
+    // company from All Leads is irrelevant here — that's a different claim.
+    where.push("l.fresh_owner_id IS NULL");
+    where.push("l.in_newspaper = false");
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days')`
     );
   } else if (tab === "mine") {
-    where.push(`l.owner_id = ${bind(user.id)}`);
+    // Owned on either track — the two lists get split apart client-side.
+    where.push(`(l.owner_id = ${bind(user.id)} OR l.fresh_owner_id = ${bind(user.id)})`);
   } else if (tab === "newspaper") {
-    where.push("l.pool = 'newspaper'");
-  } else {
-    where.push("l.pool = 'all'");
+    where.push("l.in_newspaper = true");
   }
+  // "all" has no filter: every company on the watchlist, regardless of
+  // whether it also happens to be claimed, fresh, or sitting in the
+  // Newspaper on its Fresh track — those are independent of the database.
 
   const types = list(params.types);
   if (types.length) {
@@ -78,7 +82,8 @@ async function queryLeads(params, user) {
   }
 
   const sortMap = {
-    urgent: "l.deadline_at ASC NULLS LAST, LOWER(c.name) ASC",
+    urgent:
+      "LEAST(COALESCE(l.deadline_at, 'infinity'), COALESCE(l.fresh_deadline_at, 'infinity')) ASC, LOWER(c.name) ASC",
     recent: "l.last_signal_at DESC NULLS LAST, LOWER(c.name) ASC",
     company: "LOWER(c.name) ASC",
     added: "c.created_at DESC, LOWER(c.name) ASC",
@@ -94,16 +99,20 @@ async function queryLeads(params, user) {
   const leads = await db.all(
     `SELECT l.id, l.status, l.owner_id, l.pool,
             l.claimed_at, l.claim_source, l.deadline_at, l.closed_at,
+            l.fresh_owner_id, l.fresh_claimed_at, l.fresh_deadline_at, l.fresh_closed_at,
+            l.in_newspaper,
             l.contact_name, l.contact_role, l.contact_email, l.contact_phone,
             l.last_contacted_at, l.next_followup_at, l.last_signal_at,
             c.name AS company, c.id AS company_id,
             c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
             c.founded, c.city, c.state, c.created_at AS added_at,
-            -- The day this landed in the Newspaper. Rows released before the
-            -- column existed fall back to their last news, then to updated_at,
-            -- so nothing turns up in an "Undated" bucket.
-            COALESCE(l.released_at, l.last_signal_at, l.updated_at) AS newspaper_date,
+            -- The day the FRESH claim landed in the Newspaper — independent
+            -- of anything happening on the All Leads claim for this company.
+            -- Rows released before the column existed fall back to their
+            -- last news, then to updated_at, so nothing turns up "Undated".
+            COALESCE(l.fresh_released_at, l.last_signal_at, l.updated_at) AS newspaper_date,
             u.display_name AS owner_name,
+            fu.display_name AS fresh_owner_name,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
                AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days') AS fresh_count,
@@ -111,7 +120,8 @@ async function queryLeads(params, user) {
               WHERE lower(cc.company) = lower(c.name)) AS contact_count
        FROM leads l
        JOIN companies c ON c.id = l.company_id
-       LEFT JOIN users u ON u.id = l.owner_id
+       LEFT JOIN users u  ON u.id = l.owner_id
+       LEFT JOIN users fu ON fu.id = l.fresh_owner_id
       ${where.length ? "WHERE " + where.join("\n        AND ") : ""}
       ORDER BY ${orderBy}
       LIMIT 400`,
@@ -130,8 +140,11 @@ async function queryLeads(params, user) {
   if (tab !== "all") await attachSignals(leads, tab === "fresh" ? FRESH_DAYS : null);
 
   for (const lead of leads) {
-    lead.countdown = lifecycle.countdown(lead);
-    lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
+    // Two independent clocks — claiming one track never starts the other's.
+    lead.countdown = lifecycle.countdown(lead.deadline_at, lead.closed_at);
+    lead.claim_window = lead.owner_id ? lifecycle.windowFor("all") : null;
+    lead.fresh_countdown = lifecycle.countdown(lead.fresh_deadline_at, lead.fresh_closed_at);
+    lead.fresh_claim_window = lead.fresh_owner_id ? lifecycle.windowFor("fresh") : null;
   }
 
   return leads;
@@ -242,10 +255,12 @@ router.get("/:id", async (req, res, next) => {
     const lead = await db.one(
       `SELECT l.*, c.name AS company, c.keywords,
               c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
-              c.founded, c.city, c.state, c.created_at AS added_at, u.display_name AS owner_name
+              c.founded, c.city, c.state, c.created_at AS added_at,
+              u.display_name AS owner_name, fu.display_name AS fresh_owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
-         LEFT JOIN users u ON u.id = l.owner_id
+         LEFT JOIN users u  ON u.id = l.owner_id
+         LEFT JOIN users fu ON fu.id = l.fresh_owner_id
         WHERE l.id = $1`,
       [req.params.id]
     );
@@ -277,8 +292,10 @@ router.get("/:id", async (req, res, next) => {
     lead.signals = signals;
     lead.activity = activity;
     lead.contacts = contacts;
-    lead.countdown = lifecycle.countdown(lead);
-    lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
+    lead.countdown = lifecycle.countdown(lead.deadline_at, lead.closed_at);
+    lead.claim_window = lead.owner_id ? lifecycle.windowFor("all") : null;
+    lead.fresh_countdown = lifecycle.countdown(lead.fresh_deadline_at, lead.fresh_closed_at);
+    lead.fresh_claim_window = lead.fresh_owner_id ? lifecycle.windowFor("fresh") : null;
 
     const best = signals
       .slice()
@@ -346,43 +363,60 @@ router.patch("/:id", async (req, res, next) => {
       await logActivity(lead.id, req.user.id, "status", `Moved from ${lead.status} to ${b.status}`);
     }
 
-    updated.countdown = lifecycle.countdown(updated);
+    updated.countdown = lifecycle.countdown(updated.deadline_at, updated.closed_at);
+    updated.fresh_countdown = lifecycle.countdown(updated.fresh_deadline_at, updated.fresh_closed_at);
     res.json({ lead: updated });
   } catch (err) {
     next(err);
   }
 });
 
-/** Claim. `source` decides the deadline: 10 days from Fresh, 30 from All.
- *  Once someone owns a lead nobody else can take it over — only that owner
- *  (by releasing or closing it) or the deadline sweep frees it back up. */
+/**
+ * Claim, on one track. `source` decides the deadline (10 days from Fresh,
+ * 30 from All) AND which track gets touched — claiming from All Leads never
+ * grants the Fresh Lead on the same company, and claiming from Fresh Leads
+ * never grants the All Leads relationship. They're checked and written
+ * independently. Once someone owns a track, nobody else can take it over on
+ * that track — only that owner (by releasing or closing it) or the deadline
+ * sweep frees it back up. The other track is unaffected either way. */
 router.post("/:id/claim", async (req, res, next) => {
   try {
     const lead = await db.one(
-      `SELECT l.*, u.display_name AS owner_name
-         FROM leads l LEFT JOIN users u ON u.id = l.owner_id
+      `SELECT l.*, u.display_name AS owner_name, fu.display_name AS fresh_owner_name
+         FROM leads l
+         LEFT JOIN users u  ON u.id = l.owner_id
+         LEFT JOIN users fu ON fu.id = l.fresh_owner_id
         WHERE l.id = $1`,
       [req.params.id]
     );
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
+    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
+    const ownerId = source === "fresh" ? lead.fresh_owner_id : lead.owner_id;
+    const ownerName = source === "fresh" ? lead.fresh_owner_name : lead.owner_name;
+
     if (req.body && req.body.release) {
-      if (lead.owner_id && lead.owner_id !== req.user.id) {
+      if (ownerId && ownerId !== req.user.id) {
         return res.status(403).json({ error: "Only the owner can release this lead." });
       }
-      const released = await lifecycle.release(lead.id);
-      await logActivity(lead.id, req.user.id, "claim", "Released back to the pool");
-      released.countdown = null;
+      const released = await lifecycle.release(lead.id, source);
+      await logActivity(
+        lead.id,
+        req.user.id,
+        "claim",
+        `Released ${source === "fresh" ? "Fresh Leads" : "All Leads"} claim back to the pool`
+      );
+      if (source === "fresh") released.fresh_countdown = null;
+      else released.countdown = null;
       return res.json({ lead: released });
     }
 
-    if (lead.owner_id && lead.owner_id !== req.user.id) {
+    if (ownerId && ownerId !== req.user.id) {
       return res
         .status(409)
-        .json({ error: `Already claimed by ${lead.owner_name || "someone else"} — it's locked to them.` });
+        .json({ error: `Already claimed by ${ownerName || "someone else"} — it's locked to them.` });
     }
 
-    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
     const claimed = await lifecycle.claim(lead.id, req.user.id, source);
 
     await logActivity(
@@ -394,32 +428,39 @@ router.post("/:id/claim", async (req, res, next) => {
       )} days to close`
     );
 
-    claimed.countdown = lifecycle.countdown(claimed);
+    if (source === "fresh") claimed.fresh_countdown = lifecycle.countdown(claimed.fresh_deadline_at, claimed.fresh_closed_at);
+    else claimed.countdown = lifecycle.countdown(claimed.deadline_at, claimed.closed_at);
+
     res.json({ lead: claimed });
   } catch (err) {
     next(err);
   }
 });
 
-/** Close stops the clock. Reopen restarts it. */
+/** Close stops one track's clock. Reopen restarts that same track.
+ *  `source` says which track — defaults to "all" for callers (like the
+ *  drawer) that only ever manage the All Leads claim. */
 router.post("/:id/close", async (req, res, next) => {
   try {
     const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
+    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
     const reopening = Boolean(req.body && req.body.reopen);
     const updated = reopening
-      ? await lifecycle.reopen(lead.id, lead.claim_source || "all")
-      : await lifecycle.close(lead.id);
+      ? await lifecycle.reopen(lead.id, source)
+      : await lifecycle.close(lead.id, source);
 
     await logActivity(
       lead.id,
       req.user.id,
       "status",
-      reopening ? "Reopened — clock restarted" : "Marked closed"
+      `${reopening ? "Reopened" : "Marked closed"} — ${source === "fresh" ? "Fresh Leads" : "All Leads"} claim`
     );
 
-    updated.countdown = lifecycle.countdown(updated);
+    if (source === "fresh") updated.fresh_countdown = lifecycle.countdown(updated.fresh_deadline_at, updated.fresh_closed_at);
+    else updated.countdown = lifecycle.countdown(updated.deadline_at, updated.closed_at);
+
     res.json({ lead: updated });
   } catch (err) {
     next(err);
@@ -466,7 +507,8 @@ router.post("/:id/activity", async (req, res, next) => {
       ),
     ]);
 
-    fresh.countdown = lifecycle.countdown(fresh);
+    fresh.countdown = lifecycle.countdown(fresh.deadline_at, fresh.closed_at);
+    fresh.fresh_countdown = lifecycle.countdown(fresh.fresh_deadline_at, fresh.fresh_closed_at);
     res.json({ lead: fresh, activity });
   } catch (err) {
     next(err);

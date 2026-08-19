@@ -100,6 +100,9 @@ const state = {
   user: null,
   team: [],
   tab: "all",
+  // Which sub-list "My Outreach" is showing — claims from All Leads or from
+  // Fresh Leads. They're separate commitments, so they never mix in one list.
+  mineView: "all",
   search: "",
   types: new Set(),
   statuses: new Set(),
@@ -356,7 +359,10 @@ const PAGE_COPY = {
     "Fresh Leads",
     "News from the last 3 days only. Claim one and you have 10 days.",
   ],
-  mine: ["My Outreach", "What you're working, and how long is left on each."],
+  mine: [
+    "My Outreach",
+    "What you're working, and how long is left on each. All Leads and Fresh Leads claims are separate — claiming one never claims the other.",
+  ],
   newspaper: [
     "Newspaper",
     "Fresh Leads that ran out of time, filed by the date they were released. Anyone can pick these up.",
@@ -467,7 +473,7 @@ async function renderContent(opts = {}) {
     ? newspaperView(leads)
     : state.tab === "fresh"
     ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
-    : `<div class="mylead-grid">${leads.map(outreachCard).join("")}</div>`;
+    : myOutreachView(leads);
 
   content.innerHTML = actionBar() + filterBar() + body;
 
@@ -589,7 +595,7 @@ function databaseTable(leads) {
           <div class="row-actions">
             ${
               lead.owner_id === state.user.id
-                ? `<button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
+                ? `<button class="btn btn-sm" data-act="release" data-source="all" data-id="${lead.id}">Release</button>`
                 : lead.owner_id
                 ? `<span class="muted locked-tag" title="Locked to ${esc(
                     lead.owner_name || "its owner"
@@ -625,9 +631,9 @@ function freshCard(lead) {
 
       <div class="mylead-actions">
         ${
-          lead.owner_id === state.user.id
-            ? `<span class="muted">Yours — see My Outreach</span>
-               <button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
+          lead.fresh_owner_id === state.user.id
+            ? `<span class="muted">Yours — see My Outreach → From Fresh Leads</span>
+               <button class="btn btn-sm" data-act="release" data-source="fresh" data-id="${lead.id}">Release</button>`
             : `<span class="muted">10 days to close once claimed</span>
                <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
                  Claim
@@ -639,8 +645,44 @@ function freshCard(lead) {
 
 /* ── My Outreach ─────────────────────────────────────────────────────────── */
 
-function outreachCard(lead) {
-  const closed = Boolean(lead.closed_at);
+/**
+ * "My Outreach" now holds two independent lists — what you claimed from All
+ * Leads (the contact-database relationship) and what you claimed from Fresh
+ * Leads (a specific news signal). A company can sit in one, the other, or
+ * both, and closing/releasing one never touches the other. `source` says
+ * which track this particular card is showing.
+ */
+function myOutreachView(leads) {
+  const allClaims = leads.filter((l) => l.owner_id === state.user.id);
+  const freshClaims = leads.filter((l) => l.fresh_owner_id === state.user.id);
+  const view = state.mineView === "fresh" ? "fresh" : "all";
+  const list = view === "fresh" ? freshClaims : allClaims;
+
+  return `
+    <div class="mine-subtabs">
+      <button class="chip ${view === "all" ? "is-on" : ""}" data-mineview="all">
+        From All Leads <span class="pill">${allClaims.length}</span>
+      </button>
+      <button class="chip ${view === "fresh" ? "is-on" : ""}" data-mineview="fresh">
+        From Fresh Leads <span class="pill">${freshClaims.length}</span>
+      </button>
+    </div>
+    ${
+      list.length
+        ? `<div class="mylead-grid">${list.map((l) => outreachCard(l, view)).join("")}</div>`
+        : `<div class="empty"><h2>Nothing here yet</h2>
+             <p>You haven't claimed anything from ${
+               view === "fresh" ? "Fresh Leads" : "All Leads"
+             } right now.</p></div>`
+    }`;
+}
+
+function outreachCard(lead, source) {
+  const fresh = source === "fresh";
+  const closed = Boolean(fresh ? lead.fresh_closed_at : lead.closed_at);
+  const countdown = fresh ? lead.fresh_countdown : lead.countdown;
+  const claimWindow = fresh ? lead.fresh_claim_window : lead.claim_window;
+  const closedAt = fresh ? lead.fresh_closed_at : lead.closed_at;
 
   return `
     <div class="mylead-card ${closed ? "is-closed" : ""}" data-lead="${lead.id}">
@@ -650,15 +692,13 @@ function outreachCard(lead) {
           <div class="mylead-meta">
             ${
               closed
-                ? `Closed ${esc(shortDate(lead.closed_at))}`
-                : `Claimed from ${lead.claim_source === "fresh" ? "Fresh Leads" : "All Leads"} · ${
-                    lead.claim_window
-                  } day window`
+                ? `Closed ${esc(shortDate(closedAt))}`
+                : `Claimed from ${fresh ? "Fresh Leads" : "All Leads"} · ${claimWindow} day window`
             }
           </div>
         </div>
         <div class="mylead-corner">
-          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
+          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(countdown)}
           ${tierBadge(lead.tier, lead.tier_note)}
         </div>
       </div>
@@ -700,10 +740,10 @@ function outreachCard(lead) {
       <div class="mylead-actions">
         ${
           closed
-            ? `<button class="btn btn-ghost btn-sm" data-act="reopen" data-id="${lead.id}">Reopen</button>`
-            : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+            ? `<button class="btn btn-ghost btn-sm" data-act="reopen" data-source="${source}" data-id="${lead.id}">Reopen</button>`
+            : `<button class="btn btn-sm btn-primary" data-act="close" data-source="${source}" data-id="${lead.id}">Mark closed</button>`
         }
-        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-id="${lead.id}">Release</button>
+        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-source="${source}" data-id="${lead.id}">Release</button>
       </div>
     </div>`;
 }
@@ -1081,6 +1121,15 @@ function emptyState() {
 // ── Card interactions ──────────────────────────────────────────────────────
 
 async function onCardClick(e) {
+  // My Outreach sub-tab toggle (From All Leads / From Fresh Leads).
+  const mineToggle = e.target.closest("[data-mineview]");
+  if (mineToggle) {
+    e.stopPropagation();
+    state.mineView = mineToggle.dataset.mineview === "fresh" ? "fresh" : "all";
+    renderContent();
+    return;
+  }
+
   // Newspaper date navigation. Handled here rather than with its own listener
   // because #content is rebuilt on every render and per-render listeners stack.
   const nav = e.target.closest("[data-np]");
@@ -1186,6 +1235,11 @@ async function onCardClick(e) {
     }
     return;
   }
+
+  // The stage dropdown updates inline via the delegated change listener
+  // below — clicking or picking from it must never also open the drawer
+  // sitting underneath it.
+  if (e.target.closest(".stage-block")) return;
 
   // Rows in All Leads expand rather than open a drawer; everywhere else the
   // card opens the detail panel.
@@ -1346,15 +1400,27 @@ function drawerHtml(lead) {
   <div class="drawer-body">
 
     ${
+      // This clock and its buttons are the All Leads claim only — the same
+      // company's Fresh Leads claim (if any) has its own owner and clock,
+      // shown in My Outreach → From Fresh Leads, and isn't touched here.
       lead.owner_id
         ? `<div class="drawer-clock">
              ${lead.closed_at ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
              ${
                lead.closed_at
-                 ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-id="${lead.id}">Reopen</button>`
-                 : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+                 ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-source="all" data-id="${lead.id}">Reopen</button>`
+                 : `<button class="btn btn-sm btn-primary" data-act="close" data-source="all" data-id="${lead.id}">Mark closed</button>`
              }
            </div>`
+        : ""
+    }
+    ${
+      lead.fresh_owner_id
+        ? `<p class="muted" style="margin:-4px 0 12px">
+             Also claimed on Fresh Leads by ${
+               lead.fresh_owner_id === state.user.id ? "you" : esc(lead.fresh_owner_name || "someone else")
+             } — separate claim, separate clock.
+           </p>`
         : ""
     }
 

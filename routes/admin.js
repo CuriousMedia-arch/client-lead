@@ -288,14 +288,15 @@ router.patch("/users/:id", async (req, res, next) => {
 
     await db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ${bind(user.id)}`, args);
 
-    // Deactivating someone frees whatever they were sitting on. Their leads
-    // stay in pool='all' with no owner, which is exactly what puts them back
-    // in All Leads — and, if the news inside them is still recent, right back
-    // in Fresh Leads too. Closed leads are left alone; that outreach already
-    // happened and isn't undone by removing the person.
+    // Deactivating someone frees whatever they were sitting on, on BOTH
+    // tracks independently. Their All Leads claims go back to All Leads with
+    // no owner. Their Fresh Leads claims go straight back to Fresh Leads too
+    // (not the Newspaper — that's only for a deadline actually running out).
+    // Closed claims are left alone on whichever track they were closed on;
+    // that outreach already happened and isn't undone by removing the person.
     let released = 0;
     if (req.body.active === false) {
-      const freed = await db.all(
+      const freedAll = await db.all(
         `UPDATE leads
             SET owner_id = NULL, claimed_at = NULL, claim_source = NULL,
                 deadline_at = NULL, updated_at = now()
@@ -303,12 +304,21 @@ router.patch("/users/:id", async (req, res, next) => {
           RETURNING id`,
         [user.id]
       );
-      released = freed.length;
+      const freedFresh = await db.all(
+        `UPDATE leads
+            SET fresh_owner_id = NULL, fresh_claimed_at = NULL, fresh_deadline_at = NULL,
+                updated_at = now()
+          WHERE fresh_owner_id = $1 AND fresh_closed_at IS NULL
+          RETURNING id`,
+        [user.id]
+      );
+      const freedIds = [...freedAll.map((l) => l.id), ...freedFresh.map((l) => l.id)];
+      released = freedIds.length;
       if (released) {
         await db.run(
           `INSERT INTO activity (lead_id, user_id, kind, body)
            SELECT id, $2, 'claim', $3 FROM unnest($1::bigint[]) AS id`,
-          [freed.map((l) => l.id), req.user.id, `Released — ${user.display_name} was removed from the team`]
+          [freedIds, req.user.id, `Released — ${user.display_name} was removed from the team`]
         );
       }
     }
@@ -449,8 +459,8 @@ router.get("/unclaimed", async (req, res, next) => {
               (SELECT s.title FROM signals s WHERE s.lead_id = l.id
                 ORDER BY COALESCE(s.published, s.created_at) DESC LIMIT 1) AS top_title
          FROM leads l JOIN companies c ON c.id = l.company_id
-        WHERE l.owner_id IS NULL
-          AND l.pool = 'all'
+        WHERE l.fresh_owner_id IS NULL
+          AND l.in_newspaper = false
           AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                        AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval)
         ORDER BY l.last_signal_at DESC NULLS LAST`,

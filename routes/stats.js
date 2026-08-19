@@ -19,22 +19,27 @@ router.get("/", async (req, res, next) => {
     const [row, lastRun] = await Promise.all([
       db.one(
         `SELECT
-           (SELECT COUNT(*) FROM leads WHERE pool = 'all')                     AS total_leads,
+           (SELECT COUNT(*) FROM leads)                                        AS total_leads,
+           -- Unclaimed on the FRESH track specifically — an All Leads claim
+           -- on the same company doesn't count against this.
            (SELECT COUNT(*) FROM leads l
-             WHERE l.pool = 'all'
+             WHERE l.fresh_owner_id IS NULL AND l.in_newspaper = false
                AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                             AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
                                                                                AS fresh,
-           (SELECT COUNT(*) FROM leads WHERE owner_id = $1)                    AS mine,
-           (SELECT COUNT(*) FROM leads WHERE pool = 'newspaper')               AS newspaper,
+           (SELECT COUNT(*) FROM leads WHERE owner_id = $1 OR fresh_owner_id = $1)
+                                                                               AS mine,
+           (SELECT COUNT(*) FROM leads WHERE in_newspaper = true)              AS newspaper,
            (SELECT COUNT(*) FROM leads
-             WHERE owner_id = $1 AND closed_at IS NULL
-               AND deadline_at IS NOT NULL
-               AND deadline_at < now() + interval '3 days')                    AS due_soon,
-           (SELECT COUNT(*) FROM leads WHERE owner_id = $1 AND closed_at IS NOT NULL)
-                                                                               AS closed_by_me,
+             WHERE (owner_id = $1 AND closed_at IS NULL AND deadline_at IS NOT NULL
+                    AND deadline_at < now() + interval '3 days')
+                OR (fresh_owner_id = $1 AND fresh_closed_at IS NULL AND fresh_deadline_at IS NOT NULL
+                    AND fresh_deadline_at < now() + interval '3 days'))        AS due_soon,
+           (SELECT COUNT(*) FROM leads
+             WHERE (owner_id = $1 AND closed_at IS NOT NULL)
+                OR (fresh_owner_id = $1 AND fresh_closed_at IS NOT NULL))      AS closed_by_me,
            (SELECT COUNT(*) FROM leads l
-             WHERE l.pool = 'all' AND l.owner_id IS NULL
+             WHERE l.fresh_owner_id IS NULL AND l.in_newspaper = false
                AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                             AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
                                                                                AS unclaimed_fresh,

@@ -683,6 +683,11 @@ a { color: var(--teal); }
 
 .log-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 
+/* My Outreach — From All Leads / From Fresh Leads. Two separate claims,
+   two separate lists; this is just the toggle between them. */
+.mine-subtabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.mine-subtabs .chip .pill { margin-left: 6px; }
+
 .timeline { display: flex; flex-direction: column; }
 
 .tl-item {
