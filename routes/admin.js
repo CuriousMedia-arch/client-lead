@@ -94,60 +94,6 @@ router.delete("/companies/:id", async (req, res, next) => {
   }
 });
 
-// --- discoveries ---------------------------------------------------------------
-
-/**
- * Companies the discovery sweep found on its own (origin='discovered',
- * approval='pending'). They already show up in Fresh Leads; approving one
- * just adds it to the daily watchlist scan, rejecting hides it for good.
- */
-router.get("/discoveries", async (req, res, next) => {
-  try {
-    const companies = await db.all(
-      `SELECT c.id, c.name,
-              (SELECT COUNT(*)::int FROM signals s WHERE s.lead_id = l.id) AS signal_count,
-              (SELECT s.title FROM signals s WHERE s.lead_id = l.id
-                ORDER BY COALESCE(s.published, s.created_at) DESC LIMIT 1) AS top_title,
-              (SELECT s.score FROM signals s WHERE s.lead_id = l.id
-                ORDER BY s.score DESC LIMIT 1) AS top_score
-         FROM companies c LEFT JOIN leads l ON l.company_id = c.id
-        WHERE c.origin = 'discovered' AND c.approval = 'pending'
-        ORDER BY c.created_at DESC`
-    );
-    res.json({ companies });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/discoveries/:id/approve", async (req, res, next) => {
-  try {
-    const row = await db.one(
-      `UPDATE companies SET approval = 'approved', active = true
-        WHERE id = $1 AND approval = 'pending' RETURNING id`,
-      [req.params.id]
-    );
-    if (!row) return res.status(404).json({ error: "That discovery is no longer pending." });
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/discoveries/:id/reject", async (req, res, next) => {
-  try {
-    const row = await db.one(
-      `UPDATE companies SET approval = 'rejected', active = false
-        WHERE id = $1 AND approval = 'pending' RETURNING id`,
-      [req.params.id]
-    );
-    if (!row) return res.status(404).json({ error: "That discovery is no longer pending." });
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
 // --- sources -----------------------------------------------------------------
 
 router.get("/sites", async (req, res, next) => {
@@ -287,43 +233,7 @@ router.patch("/users/:id", async (req, res, next) => {
     if (!sets.length) return res.json({ ok: true });
 
     await db.run(`UPDATE users SET ${sets.join(", ")} WHERE id = ${bind(user.id)}`, args);
-
-    // Deactivating someone frees whatever they were sitting on, on BOTH
-    // tracks independently. Their All Leads claims go back to All Leads with
-    // no owner. Their Fresh Leads claims go straight back to Fresh Leads too
-    // (not the Newspaper — that's only for a deadline actually running out).
-    // Closed claims are left alone on whichever track they were closed on;
-    // that outreach already happened and isn't undone by removing the person.
-    let released = 0;
-    if (req.body.active === false) {
-      const freedAll = await db.all(
-        `UPDATE leads
-            SET owner_id = NULL, claimed_at = NULL, claim_source = NULL,
-                deadline_at = NULL, updated_at = now()
-          WHERE owner_id = $1 AND closed_at IS NULL
-          RETURNING id`,
-        [user.id]
-      );
-      const freedFresh = await db.all(
-        `UPDATE leads
-            SET fresh_owner_id = NULL, fresh_claimed_at = NULL, fresh_deadline_at = NULL,
-                updated_at = now()
-          WHERE fresh_owner_id = $1 AND fresh_closed_at IS NULL
-          RETURNING id`,
-        [user.id]
-      );
-      const freedIds = [...freedAll.map((l) => l.id), ...freedFresh.map((l) => l.id)];
-      released = freedIds.length;
-      if (released) {
-        await db.run(
-          `INSERT INTO activity (lead_id, user_id, kind, body)
-           SELECT id, $2, 'claim', $3 FROM unnest($1::bigint[]) AS id`,
-          [freedIds, req.user.id, `Released — ${user.display_name} was removed from the team`]
-        );
-      }
-    }
-
-    res.json({ ok: true, released });
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -354,6 +264,9 @@ router.post("/import", async (req, res, next) => {
       });
     }
 
+    // Import only ever adds. It never deletes a company, because a partial or
+    // wrong-tab export would otherwise wipe most of the list. Removing a
+    // company is a deliberate act, done one at a time from Admin.
     let companiesAdded = 0;
     let contactsAdded = 0;
 
@@ -364,10 +277,8 @@ router.post("/import", async (req, res, next) => {
         const { rows } = await q(
           `INSERT INTO companies
              (name, keywords, active, origin, approval,
-              domain, website, linkedin, employees, revenue, industry, founded,
-              city, state)
-           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8, $9,
-                   $10, $11)
+              domain, website, linkedin, employees, revenue, industry, year_founded, specialities)
+           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8, $9, $10)
            ON CONFLICT (lower(name)) DO UPDATE
               SET keywords  = $2::jsonb,
                   domain    = COALESCE(EXCLUDED.domain,    companies.domain),
@@ -376,16 +287,15 @@ router.post("/import", async (req, res, next) => {
                   employees = COALESCE(EXCLUDED.employees, companies.employees),
                   revenue   = COALESCE(EXCLUDED.revenue,   companies.revenue),
                   industry  = COALESCE(EXCLUDED.industry,  companies.industry),
-                  founded   = COALESCE(EXCLUDED.founded,   companies.founded),
-                  city      = COALESCE(EXCLUDED.city,      companies.city),
-                  state     = COALESCE(EXCLUDED.state,     companies.state),
+                  year_founded = COALESCE(EXCLUDED.year_founded, companies.year_founded),
+                  specialities = COALESCE(EXCLUDED.specialities, companies.specialities),
                   active    = CASE WHEN companies.approval = 'rejected'
                                    THEN companies.active ELSE true END,
                   approval  = CASE WHEN companies.approval = 'rejected'
                                    THEN 'rejected' ELSE 'approved' END
            RETURNING id, (xmax = 0) AS inserted`,
           [c.name, JSON.stringify(c.keywords), c.domain, c.website, c.linkedin,
-           c.employees, c.revenue, c.industry, c.founded, c.city, c.state]
+           c.employees, c.revenue, c.industry, c.year_founded, c.specialities]
         );
         if (rows[0].inserted) companiesAdded++;
       }
@@ -397,25 +307,30 @@ router.post("/import", async (req, res, next) => {
       for (const p of contacts) {
         const { rows } = await q(
           `INSERT INTO company_contacts
-             (company, name, role, email, phone, phone_type, phone2, phone2_type,
-              linkedin, notes, seniority, department, city, is_primary)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             (company, name, role, email, email_alt, phone, phone_alt, phone_type,
+              phone_alt_type, linkedin, notes, seniority, department, city, country,
+              state, is_primary)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            ON CONFLICT (lower(company), lower(name)) DO UPDATE
-              SET role        = COALESCE(EXCLUDED.role,        company_contacts.role),
-                  email       = COALESCE(EXCLUDED.email,       company_contacts.email),
-                  phone       = COALESCE(EXCLUDED.phone,       company_contacts.phone),
-                  phone_type  = COALESCE(EXCLUDED.phone_type,  company_contacts.phone_type),
-                  phone2      = COALESCE(EXCLUDED.phone2,      company_contacts.phone2),
-                  phone2_type = COALESCE(EXCLUDED.phone2_type, company_contacts.phone2_type),
-                  linkedin    = COALESCE(EXCLUDED.linkedin,    company_contacts.linkedin),
-                  notes       = COALESCE(EXCLUDED.notes,       company_contacts.notes),
-                  seniority   = COALESCE(EXCLUDED.seniority,   company_contacts.seniority),
-                  department  = COALESCE(EXCLUDED.department,  company_contacts.department),
-                  city        = COALESCE(EXCLUDED.city,        company_contacts.city),
-                  is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
+              SET role       = COALESCE(EXCLUDED.role,       company_contacts.role),
+                  email      = COALESCE(EXCLUDED.email,      company_contacts.email),
+                  phone      = COALESCE(EXCLUDED.phone,      company_contacts.phone),
+                  phone_alt  = COALESCE(EXCLUDED.phone_alt,  company_contacts.phone_alt),
+                  email_alt  = COALESCE(EXCLUDED.email_alt,  company_contacts.email_alt),
+                  phone_alt_type = COALESCE(EXCLUDED.phone_alt_type, company_contacts.phone_alt_type),
+                  country    = COALESCE(EXCLUDED.country,    company_contacts.country),
+                  state      = COALESCE(EXCLUDED.state,      company_contacts.state),
+                  phone_type = COALESCE(EXCLUDED.phone_type, company_contacts.phone_type),
+                  linkedin   = COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
+                  notes      = COALESCE(EXCLUDED.notes,      company_contacts.notes),
+                  seniority  = COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
+                  department = COALESCE(EXCLUDED.department, company_contacts.department),
+                  city       = COALESCE(EXCLUDED.city,       company_contacts.city),
+                  is_primary = company_contacts.is_primary OR EXCLUDED.is_primary
            RETURNING (xmax = 0) AS inserted`,
-          [p.company, p.name, p.role, p.email, p.phone, p.phone_type, p.phone2, p.phone2_type,
-           p.linkedin, p.notes, p.seniority, p.department, p.city, p.is_primary]
+          [p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_alt,
+           p.phone_type, p.phone_alt_type, p.linkedin, p.notes, p.seniority,
+           p.department, p.city, p.country, p.state, p.is_primary]
         );
         if (rows[0].inserted) contactsAdded++;
       }
@@ -459,8 +374,8 @@ router.get("/unclaimed", async (req, res, next) => {
               (SELECT s.title FROM signals s WHERE s.lead_id = l.id
                 ORDER BY COALESCE(s.published, s.created_at) DESC LIMIT 1) AS top_title
          FROM leads l JOIN companies c ON c.id = l.company_id
-        WHERE l.fresh_owner_id IS NULL
-          AND l.in_newspaper = false
+        WHERE l.owner_id IS NULL
+          AND l.pool = 'all'
           AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                        AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval)
         ORDER BY l.last_signal_at DESC NULLS LAST`,
