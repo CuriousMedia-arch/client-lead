@@ -543,9 +543,11 @@ const PEOPLE_COLUMNS = [
   ["name", "Name"],
   ["company", "Company"],
   ["role", "Position"],
-  ["email", "Email"],
-  ["phone", "Phone"],
   ["owner", "Owner"],
+  ["email", "Work email"],
+  ["email_alt", "Additional email"],
+  ["phone", "Phone 1"],
+  ["phone2", "Phone 2"],
   ["seniority", "Seniority"],
   ["department", "Department"],
   ["country", "Country"],
@@ -732,6 +734,42 @@ async function renderMyPeople(opts = {}) {
 
   content.innerHTML = actionBar() + subtabs + body;
   wireListActions();
+  for (const c of contacts) loadContactLog(c.id);
+}
+
+const stageLabel = (v) => (STATUSES.find((x) => x[0] === (v || "new")) || ["new", "New"])[1];
+
+const KIND_LABEL = { call: "Call", email: "Email", linkedin: "LinkedIn", meeting: "Meeting", note: "Note" };
+
+/** Paint one contact's history into its card. */
+async function loadContactLog(id) {
+  const box = $(`#log-${id}`);
+  if (!box) return;
+
+  let activity = [];
+  try {
+    ({ activity } = await api(`/api/contacts/people/${id}/activity`));
+  } catch {
+    box.innerHTML = "";
+    return;
+  }
+
+  box.innerHTML = activity.length
+    ? activity
+        .slice(0, 6)
+        .map(
+          (a) => `
+        <div class="log-item">
+          <div class="log-meta">
+            <span class="log-kind">${esc(KIND_LABEL[a.kind] || a.kind)}</span>
+            <span>${esc(timeAgo(a.created_at))} · ${esc(a.user_name || "Someone")}</span>
+          </div>
+          <p>${esc(a.body)}</p>
+          ${a.stage ? `<span class="log-stage">Moved to ${esc(stageLabel(a.stage))}</span>` : ""}
+        </div>`
+        )
+        .join("")
+    : `<p class="muted">Nothing logged yet. Add the first update below.</p>`;
 }
 
 function myPersonCard(c) {
@@ -758,6 +796,34 @@ function myPersonCard(c) {
         ${c.phone ? `<div><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ""}
         ${c.phone2 ? `<div><a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a></div>` : ""}
         ${!c.email && !c.phone ? `<div class="signal-none">No email or mobile on file.</div>` : ""}
+      </div>
+
+      <div class="progress-block">
+        <div class="progress-head">
+          <span class="filter-label">Progress</span>
+          <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>
+        </div>
+
+        <div class="progress-log" id="log-${c.id}"></div>
+
+        <div class="progress-form">
+          <textarea id="note-${c.id}" rows="2"
+            placeholder="What did you discuss? e.g. Called — asked for the deck, wants pricing by Friday"></textarea>
+          <div class="progress-controls">
+            <select class="filter-select" id="kind-${c.id}">
+              <option value="call">Call</option>
+              <option value="email">Email</option>
+              <option value="linkedin">LinkedIn</option>
+              <option value="meeting">Meeting</option>
+              <option value="note">Note</option>
+            </select>
+            <select class="filter-select" id="stage-${c.id}">
+              <option value="">Stage unchanged</option>
+              ${STATUSES.map(([v, l]) => `<option value="${v}">Move to ${esc(l)}</option>`).join("")}
+            </select>
+            <button class="btn btn-sm btn-primary" data-log-for="${c.id}">Log it</button>
+          </div>
+        </div>
       </div>
 
       <div class="mylead-actions">
@@ -1366,6 +1432,32 @@ function emptyState() {
 // ── Card interactions ──────────────────────────────────────────────────────
 
 async function onCardClick(e) {
+  // Logging what was discussed with a claimed contact.
+  const logBtn = e.target.closest("[data-log-for]");
+  if (logBtn) {
+    e.stopPropagation();
+    const id = logBtn.dataset.logFor;
+    const body = $(`#note-${id}`).value.trim();
+    if (!body) return toast("Write what was discussed first.", true);
+
+    try {
+      await api(`/api/contacts/people/${id}/activity`, {
+        method: "POST",
+        body: {
+          body,
+          kind: $(`#kind-${id}`).value,
+          stage: $(`#stage-${id}`).value || undefined,
+        },
+      });
+      $(`#note-${id}`).value = "";
+      toast("Progress logged");
+      renderContent();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+
   // Admin-only row editor.
   const editBtn = e.target.closest("[data-edit-contact]");
   if (editBtn) {

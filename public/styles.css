@@ -1715,14 +1715,14 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   border-radius: var(--radius);
 }
 
-.people-table { min-width: 1720px; }
+.people-table { min-width: 2180px; }
 
 .people-head, .people-row {
   display: grid;
   grid-template-columns:
-    38px 180px 175px 185px 215px 150px 170px
-    115px 135px 105px 120px 115px 125px 130px
-    170px 108px;
+    38px 180px 175px 185px 165px 210px 195px
+    140px 140px 115px 135px 105px 120px 115px
+    125px 130px 170px 108px;
   align-items: center;
   gap: 14px;
   padding: 11px 16px;
@@ -1872,3 +1872,69 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   gap: 10px;
   align-items: flex-start;
 }
+
+/* ── Progress log on a claimed contact ───────────────────────────────────── */
+
+.progress-block {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.progress-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+.stage-chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--cold-tint);
+  color: var(--ink-soft);
+}
+.stage-working, .stage-contacted { background: var(--teal-tint);  color: var(--teal-dark); }
+.stage-replied, .stage-qualified { background: var(--amber-tint); color: var(--amber-ink); }
+.stage-won                       { background: var(--green-tint); color: #26663B; }
+.stage-lost                      { background: var(--coral-tint); color: var(--coral); }
+
+.progress-log { display: flex; flex-direction: column; gap: 9px; max-height: 210px; overflow-y: auto; }
+
+.log-item { border-left: 2px solid var(--line); padding-left: 10px; }
+.log-item p { margin: 3px 0 0; font-size: 12.5px; line-height: 1.45; }
+.log-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+.log-kind { font-weight: 600; color: var(--teal); text-transform: uppercase; letter-spacing: .04em; }
+.log-stage {
+  display: inline-block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--amber-ink);
+}
+
+.progress-form { display: flex; flex-direction: column; gap: 8px; }
+.progress-form textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  font-size: 13px;
+  font-family: var(--body);
+  background: var(--surface-sunk);
+  color: var(--ink);
+  resize: vertical;
+}
+.progress-form textarea:focus { background: #fff; }
+.progress-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.progress-controls .filter-select { flex: 1; min-width: 120px; }

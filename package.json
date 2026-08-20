@@ -7,7 +7,8 @@
     "start": "node server.js",
     "setup": "node db/seed.js",
     "scrape": "node services/runOnce.js",
-    "discover": "node services/discoverOnce.js"
+    "discover": "node services/discoverOnce.js",
+    "demo:newspaper": "node scripts/demoNewspaper.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

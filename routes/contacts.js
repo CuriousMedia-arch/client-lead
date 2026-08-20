@@ -250,6 +250,78 @@ router.post("/:id/close", async (req, res, next) => {
   }
 });
 
+/* ── Progress log ───────────────────────────────────────────────────────────
+ *
+ * What was said, when, and by whom. Only the owner writes to it (or an admin),
+ * because a log anyone can edit stops being a record of what happened.
+ */
+
+const KINDS = ["note", "call", "email", "linkedin", "meeting"];
+const STAGES = ["new", "working", "contacted", "replied", "qualified", "won", "lost"];
+
+router.get("/people/:id/activity", async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT a.id, a.kind, a.body, a.stage, a.created_at, u.display_name AS user_name
+         FROM contact_activity a LEFT JOIN users u ON u.id = a.user_id
+        WHERE a.contact_id = $1
+        ORDER BY a.created_at DESC`,
+      [req.params.id]
+    );
+    res.json({ activity: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/people/:id/activity", async (req, res, next) => {
+  try {
+    const contact = await db.one(
+      "SELECT owner_id, status FROM company_contacts WHERE id = $1",
+      [req.params.id]
+    );
+    if (!contact) return res.status(404).json({ error: "That contact no longer exists." });
+
+    if (contact.owner_id !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Only the owner can log progress on this contact." });
+    }
+
+    const body = String((req.body && req.body.body) || "").trim();
+    if (!body) return res.status(400).json({ error: "Write what was discussed before saving." });
+
+    const kind = KINDS.includes(req.body && req.body.kind) ? req.body.kind : "note";
+    const stage = STAGES.includes(req.body && req.body.stage) ? req.body.stage : null;
+
+    await db.run(
+      "INSERT INTO contact_activity (contact_id, user_id, kind, body, stage) VALUES ($1,$2,$3,$4,$5)",
+      [req.params.id, req.user.id, kind, body, stage]
+    );
+
+    // Logging a real conversation moves the contact along, so the stage on the
+    // card matches the last thing that actually happened.
+    if (stage) {
+      await db.run("UPDATE company_contacts SET status = $1 WHERE id = $2", [stage, req.params.id]);
+    } else if (kind !== "note" && contact.status === "new") {
+      await db.run("UPDATE company_contacts SET status = 'contacted' WHERE id = $1", [req.params.id]);
+    }
+
+    const [activity, fresh] = await Promise.all([
+      db.all(
+        `SELECT a.id, a.kind, a.body, a.stage, a.created_at, u.display_name AS user_name
+           FROM contact_activity a LEFT JOIN users u ON u.id = a.user_id
+          WHERE a.contact_id = $1 ORDER BY a.created_at DESC`,
+        [req.params.id]
+      ),
+      db.one("SELECT * FROM company_contacts WHERE id = $1", [req.params.id]),
+    ]);
+
+    fresh.countdown = contactCountdown(fresh);
+    res.json({ activity, contact: fresh });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /**
  * Editing a row is admin-only. Everyone else reads the database; only an admin
  * corrects it, so a typo fixed in one place stays fixed for the whole team.
