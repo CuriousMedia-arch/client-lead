@@ -35,17 +35,19 @@ async function queryLeads(params, user) {
   const bind = (v) => `$${args.push(v)}`;
 
   if (tab === "fresh") {
-    where.push("l.pool = 'all'");
+    where.push("l.in_newspaper = false");
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days')`
     );
   } else if (tab === "mine") {
-    where.push(`l.owner_id = ${bind(user.id)}`);
+    // My Outreach → From Fresh Leads only ever shows the Fresh-track claim;
+    // the All Leads half lives on company_contacts, not here.
+    where.push(`l.fresh_owner_id = ${bind(user.id)}`);
   } else if (tab === "newspaper") {
-    where.push("l.pool = 'newspaper'");
+    where.push("l.in_newspaper = true");
   } else {
-    where.push("l.pool = 'all'");
+    where.push("l.in_newspaper = false");
   }
 
   const types = list(params.types);
@@ -88,8 +90,10 @@ async function queryLeads(params, user) {
     (tab === "mine" ? sortMap.urgent : tab === "newspaper" ? sortMap.released : sortMap.company);
 
   const leads = await db.all(
-    `SELECT l.id, l.status, l.owner_id, l.pool,
+    `SELECT l.id, l.status, l.owner_id, l.in_newspaper,
             l.claimed_at, l.claim_source, l.deadline_at, l.closed_at,
+            l.fresh_owner_id, l.fresh_claimed_at, l.fresh_deadline_at,
+            l.fresh_closed_at, l.fresh_released_at,
             l.contact_name, l.contact_role, l.contact_email, l.contact_phone,
             l.last_contacted_at, l.next_followup_at, l.last_signal_at,
             c.name AS company, c.id AS company_id,
@@ -97,6 +101,7 @@ async function queryLeads(params, user) {
             c.year_founded, c.created_at AS added_at,
             l.released_at,
             u.display_name AS owner_name,
+            uf.display_name AS fresh_owner_name,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
             (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
                AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days') AS fresh_count,
@@ -108,6 +113,7 @@ async function queryLeads(params, user) {
        FROM leads l
        JOIN companies c ON c.id = l.company_id
        LEFT JOIN users u ON u.id = l.owner_id
+       LEFT JOIN users uf ON uf.id = l.fresh_owner_id
       ${where.length ? "WHERE " + where.join("\n        AND ") : ""}
       ORDER BY ${orderBy}
       LIMIT 400`,
@@ -123,6 +129,8 @@ async function queryLeads(params, user) {
   for (const lead of leads) {
     lead.countdown = lifecycle.countdown(lead);
     lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
+    lead.fresh_countdown = lifecycle.freshCountdown(lead);
+    lead.fresh_claim_window = lead.fresh_owner_id ? lifecycle.windowFor("fresh") : null;
   }
 
   return leads;
@@ -227,10 +235,12 @@ router.get("/:id", async (req, res, next) => {
     const lead = await db.one(
       `SELECT l.*, c.name AS company, c.keywords,
               c.domain, c.website, c.linkedin, c.industry, c.employees, c.revenue,
-              c.year_founded, c.created_at AS added_at, u.display_name AS owner_name
+              c.year_founded, c.created_at AS added_at,
+              u.display_name AS owner_name, uf.display_name AS fresh_owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          LEFT JOIN users u ON u.id = l.owner_id
+         LEFT JOIN users uf ON uf.id = l.fresh_owner_id
         WHERE l.id = $1`,
       [req.params.id]
     );
@@ -265,6 +275,8 @@ router.get("/:id", async (req, res, next) => {
     lead.contacts = contacts;
     lead.countdown = lifecycle.countdown(lead);
     lead.claim_window = lead.claim_source ? lifecycle.windowFor(lead.claim_source) : null;
+    lead.fresh_countdown = lifecycle.freshCountdown(lead);
+    lead.fresh_claim_window = lead.fresh_owner_id ? lifecycle.windowFor("fresh") : null;
 
     const best = signals
       .slice()
@@ -346,9 +358,11 @@ router.post("/:id/claim", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     if (req.body && req.body.release) {
-      const released = await lifecycle.release(lead.id);
+      const releaseSource = req.body.source === "fresh" ? "fresh" : "all";
+      const released = await lifecycle.release(lead.id, releaseSource);
       await logActivity(lead.id, req.user.id, "claim", "Released back to the pool");
-      released.countdown = null;
+      released.countdown = lifecycle.countdown(released);
+      released.fresh_countdown = lifecycle.freshCountdown(released);
       return res.json({ lead: released });
     }
 
@@ -365,6 +379,7 @@ router.post("/:id/claim", async (req, res, next) => {
     );
 
     claimed.countdown = lifecycle.countdown(claimed);
+    claimed.fresh_countdown = lifecycle.freshCountdown(claimed);
     res.json({ lead: claimed });
   } catch (err) {
     next(err);
@@ -377,10 +392,11 @@ router.post("/:id/close", async (req, res, next) => {
     const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
+    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
     const reopening = Boolean(req.body && req.body.reopen);
     const updated = reopening
-      ? await lifecycle.reopen(lead.id, lead.claim_source || "all")
-      : await lifecycle.close(lead.id);
+      ? await lifecycle.reopen(lead.id, source)
+      : await lifecycle.close(lead.id, source);
 
     await logActivity(
       lead.id,
@@ -390,6 +406,7 @@ router.post("/:id/close", async (req, res, next) => {
     );
 
     updated.countdown = lifecycle.countdown(updated);
+    updated.fresh_countdown = lifecycle.freshCountdown(updated);
     res.json({ lead: updated });
   } catch (err) {
     next(err);

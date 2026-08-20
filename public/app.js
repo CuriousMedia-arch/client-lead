@@ -711,9 +711,24 @@ async function renderPeople(opts = {}) {
 async function renderMyPeople(opts = {}) {
   const content = $("#content");
 
+  // Fetch both halves, so each sub-tab can show its own count and neither
+  // can hide claims behind a tab nobody thought to click.
   let contacts = [];
+  let freshCount = 0;
   try {
-    ({ contacts } = await api("/api/contacts/people?mine=1&sort=urgent"));
+    const [people, leadRes] = await Promise.all([
+      api("/api/contacts/people?mine=1&sort=urgent"),
+      api("/api/leads?tab=mine").catch(() => ({ leads: [] })),
+    ]);
+    contacts = people.contacts;
+    freshCount = (leadRes.leads || []).filter((l) => l.fresh_owner_id === state.user.id).length;
+
+    // Land on the half that actually has something. Defaulting to All Leads
+    // when every claim is a Fresh one shows an empty page over a count of 2.
+    if (!contacts.length && freshCount > 0 && !state.mineViewChosen) {
+      state.mineView = "fresh";
+      return renderContent(opts);
+    }
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load your contacts</h2><p>${esc(err.message)}</p></div>`;
     return;
@@ -721,15 +736,21 @@ async function renderMyPeople(opts = {}) {
 
   const subtabs = `
     <div class="mine-subtabs">
-      <button class="chip is-on" data-mineview="all">From All Leads <span class="pill">${contacts.length}</span></button>
-      <button class="chip" data-mineview="fresh">From Fresh Leads</button>
+      <button class="chip is-on" data-mineview="all">
+        From All Leads <span class="pill">${contacts.length}</span>
+      </button>
+      <button class="chip" data-mineview="fresh">
+        From Fresh Leads <span class="pill">${freshCount}</span>
+      </button>
     </div>`;
 
   const body = contacts.length
     ? `<div class="mylead-grid">${contacts.map(myPersonCard).join("")}</div>`
     : `<div class="empty">
          <h2>No people claimed yet</h2>
-         <p>Claim someone in All Leads and they appear here with a 30-day countdown.</p>
+         <p>Claim someone in All Leads and they appear here with a 30-day countdown.${
+           freshCount ? ` You have ${freshCount} claimed from Fresh Leads — see the tab above.` : ""
+         }</p>
        </div>`;
 
   content.innerHTML = actionBar() + subtabs + body;
@@ -1490,6 +1511,7 @@ async function onCardClick(e) {
   if (mineToggle) {
     e.stopPropagation();
     state.mineView = mineToggle.dataset.mineview === "fresh" ? "fresh" : "all";
+    state.mineViewChosen = true;   // respect an explicit choice over the smart default
     renderContent();
     return;
   }
@@ -1575,7 +1597,10 @@ async function onCardClick(e) {
       if (act === "close" || act === "reopen") {
         await api(`/api/leads/${id}/close`, {
           method: "POST",
-          body: { reopen: act === "reopen" },
+          body: {
+            reopen: act === "reopen",
+            source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
+          },
         });
         toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
       } else {
