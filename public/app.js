@@ -869,27 +869,20 @@ function personRow(c) {
 
       ${cell("role", esc(c.role))}
 
-      <span class="col-email stacked">
-        ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
-        ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
-        ${!c.email && !c.email_alt ? "—" : ""}
-      </span>
-
-      <span class="col-phone stacked">
-        ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
-        ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
-        ${!c.phone && !c.phone2 ? "—" : ""}
-      </span>
-
       <span class="col-owner">
         ${
           c.owner_id
             ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(
                 c.owner_name
-              )}</span>${c.countdown ? countdownChip(c.countdown) : ""}`
+              )}</span>`
             : `<span class="muted">Unclaimed</span>`
         }
       </span>
+
+      ${cell("email", c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
+      ${cell("email_alt", c.email_alt ? `<a href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : "")}
+      ${cell("phone", c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
+      ${cell("phone2", c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
 
       ${cell("seniority", esc(c.seniority))}
       ${cell("department", esc(c.department))}
