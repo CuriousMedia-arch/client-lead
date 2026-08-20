@@ -383,10 +383,10 @@ function actionBar() {
           <span class="scan-dot"></span>
           ${
             run && run.finished_at
-              ? `Last refresh ${esc(timeAgo(run.finished_at))} · refreshes every ${
+              ? `Last sync ${esc(timeAgo(run.finished_at))} · syncs every ${
                   state.freshWindowDays || 3
                 } days`
-              : "Not refreshed yet"
+              : "Not synced yet"
           }
         </p>
       </div>
@@ -400,7 +400,7 @@ function actionBar() {
                    : ""
                }
                <button class="btn btn-primary" id="ab-scan" ${state.scanning ? "disabled" : ""}>
-                 ${state.scanning ? "Refreshing…" : "Refresh now"}
+                 ${state.scanning ? "Syncing…" : "Sync"}
                </button>
              </div>`
           : ""
@@ -1334,7 +1334,7 @@ function wireListActions() {
       renderContent();
       try {
         await api("/api/admin/run", { method: "POST" });
-        toast("Refreshing — this takes a few minutes");
+        toast("Syncing — this takes a few minutes");
         pollRun();
       } catch (err) {
         state.scanning = false;
@@ -1370,7 +1370,7 @@ function pollRun() {
         clearInterval(state.runPoll);
         state.scanning = false;
         state.lastRun = run.last;
-        toast("Refresh finished");
+        toast("Sync finished");
         refresh();
       }
     } catch {
@@ -2079,6 +2079,20 @@ async function renderAdmin() {
         : ""
     }
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>Newspaper samples</h3>
+      <p class="hint">
+        The Newspaper only fills once a Fresh Lead misses its 10-day deadline, so it
+        starts empty. Add clearly-marked samples across 2025 and 2026 to try the
+        year → month → day view, then remove them when you're done.
+      </p>
+      <div class="inline-form">
+        <button class="btn" id="demo-add">Add sample releases</button>
+        <button class="btn btn-danger" id="demo-clear">Remove samples</button>
+      </div>
+      <div id="demo-result"></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <h3>AI enrichment</h3>
       <p class="hint">
         Gemini writes the summary, the company-specific pitch, and finds companies for
@@ -2306,6 +2320,26 @@ function wireAdmin() {
   root.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
+
+    if (btn.id === "demo-add" || btn.id === "demo-clear") {
+      const clearing = btn.id === "demo-clear";
+      const out = $("#demo-result");
+      out.innerHTML = `<p class="hint" style="margin-top:10px">Working…</p>`;
+      try {
+        const r = await api("/api/admin/demo-newspaper", {
+          method: "POST",
+          body: { clear: clearing },
+        });
+        out.innerHTML = `<p class="hint" style="margin-top:10px">
+          <strong style="color:var(--teal)">Done.</strong>
+          ${clearing ? `${r.cleared} sample compan${r.cleared === 1 ? "y" : "ies"} removed.`
+                     : `${r.added} sample releases added — open the Newspaper tab.`}</p>`;
+        loadStats();
+      } catch (err) {
+        out.innerHTML = `<p class="hint" style="margin-top:10px"><strong>${esc(err.message)}</strong></p>`;
+      }
+      return;
+    }
 
     if (btn.id === "gemini-check") {
       const out = $("#gemini-result");

@@ -19,25 +19,41 @@ router.get("/", async (req, res, next) => {
     const [row, lastRun] = await Promise.all([
       db.one(
         `SELECT
-           (SELECT COUNT(*) FROM leads WHERE pool = 'all')                     AS total_leads,
+           (SELECT COUNT(*) FROM leads)                                        AS total_leads,
+           -- Unclaimed on the FRESH track specifically — an All Leads claim
+           -- on the same company doesn't count against this.
            (SELECT COUNT(*) FROM leads l
-             WHERE l.pool = 'all'
+             WHERE l.fresh_owner_id IS NULL AND l.in_newspaper = false
                AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                             AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
                                                                                AS fresh,
-           (SELECT COUNT(*) FROM leads WHERE owner_id = $1)                    AS mine,
-           (SELECT COUNT(*) FROM leads WHERE pool = 'newspaper')               AS newspaper,
-           (SELECT COUNT(*) FROM leads
-             WHERE owner_id = $1 AND closed_at IS NULL
-               AND deadline_at IS NOT NULL
-               AND deadline_at < now() + interval '3 days')                    AS due_soon,
-           (SELECT COUNT(*) FROM leads WHERE owner_id = $1 AND closed_at IS NOT NULL)
+           -- My Outreach has two halves and the count must match them exactly:
+           -- people claimed in All Leads, plus companies claimed in Fresh Leads.
+           -- It used to count leads.owner_id, a company-level All Leads claim
+           -- that no longer has a view to appear in — hence a count of 3 over
+           -- an empty page.
+           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1)
+            + (SELECT COUNT(*) FROM leads WHERE fresh_owner_id = $1))          AS mine,
+           (SELECT COUNT(*) FROM leads WHERE in_newspaper = true)              AS newspaper,
+           ((SELECT COUNT(*) FROM company_contacts
+              WHERE owner_id = $1 AND closed_at IS NULL AND deadline_at IS NOT NULL
+                AND deadline_at < now() + interval '3 days')
+            + (SELECT COUNT(*) FROM leads
+                WHERE fresh_owner_id = $1 AND fresh_closed_at IS NULL
+                  AND fresh_deadline_at IS NOT NULL
+                  AND fresh_deadline_at < now() + interval '3 days'))          AS due_soon,
+           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1 AND closed_at IS NOT NULL)
+            + (SELECT COUNT(*) FROM leads WHERE fresh_owner_id = $1 AND fresh_closed_at IS NOT NULL))
                                                                                AS closed_by_me,
+           (SELECT COUNT(*) FROM leads l
+             WHERE l.fresh_owner_id IS NULL AND l.in_newspaper = false
+               AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
+                            AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
+                                                                               AS unclaimed_fresh,
            (SELECT COUNT(*) FROM signals)                                      AS total_signals,
            (SELECT COUNT(*) FROM companies WHERE active)                       AS total_companies,
            (SELECT COUNT(*) FROM sites WHERE active)                           AS total_sites,
-           (SELECT COUNT(*) FROM company_contacts)                             AS total_contacts,
-           (SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1)          AS my_contacts`,
+           (SELECT COUNT(*) FROM company_contacts)                             AS total_contacts`,
         [req.user.id, days]
       ),
       db.one("SELECT * FROM runs WHERE status <> 'running' ORDER BY id DESC LIMIT 1"),
@@ -47,14 +63,14 @@ router.get("/", async (req, res, next) => {
       stats: {
         fresh: row.fresh,
         dueSoon: row.due_soon,
-        mine: Number(row.mine) + Number(row.my_contacts),
+        mine: row.mine,
         closedByMe: row.closed_by_me,
+        unclaimedFresh: row.unclaimed_fresh,
       },
       totals: {
-        leads: row.total_contacts,
-        companies_tracked: row.total_leads,
+        leads: row.total_leads,
         fresh: row.fresh,
-        mine: Number(row.mine) + Number(row.my_contacts),
+        mine: row.mine,
         newspaper: row.newspaper,
         signals: row.total_signals,
         companies: row.total_companies,
