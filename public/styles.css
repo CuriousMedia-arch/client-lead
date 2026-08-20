@@ -171,12 +171,25 @@ a { color: var(--teal); }
   padding: 0 28px;
 }
 
+.stats:has(.stat-admin:not([hidden])) {
+  grid-template-columns: repeat(5, 1fr);
+}
+
 .stat {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px 16px;
 }
+
+.stat-admin {
+  border-color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 7%, var(--surface));
+  cursor: pointer;
+}
+.stat-admin:hover { box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,.08)); }
+
+.stat-admin .stat-value { color: var(--teal-dark, var(--teal)); }
 
 .stat-label {
   font-family: var(--mono);
@@ -614,6 +627,47 @@ a { color: var(--teal); }
 
 .drawer-body { padding: 20px 22px 48px; }
 
+/* ── Unclaimed leads modal (admin only) ─────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 24, 28, .45);
+  z-index: 100;
+  animation: fadeIn .15s ease;
+}
+
+.modal-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(640px, 92vw);
+  max-height: 82vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  z-index: 101;
+  animation: slideIn .2s ease;
+}
+
+.modal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.modal-row:hover { background: var(--surface-sunk); }
+.modal-row:last-child { border-bottom: none; }
+.modal-row-main { min-width: 0; }
+.modal-row-main strong { display: block; font-size: 14px; }
+.modal-row-main span { font-size: 12px; color: var(--ink-soft); }
+.modal-empty { padding: 40px 22px; text-align: center; color: var(--ink-soft); font-size: 13.5px; }
+
 .block { margin-bottom: 26px; }
 .block h3 {
   font-family: var(--mono);
@@ -628,6 +682,11 @@ a { color: var(--teal); }
 /* ── Timeline ────────────────────────────────────────────────────────────── */
 
 .log-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+
+/* My Outreach — From All Leads / From Fresh Leads. Two separate claims,
+   two separate lists; this is just the toggle between them. */
+.mine-subtabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.mine-subtabs .chip .pill { margin-left: 6px; }
 
 .timeline { display: flex; flex-direction: column; }
 
@@ -828,7 +887,7 @@ table.mini tr:last-child td { border-bottom: none; }
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .stats { grid-template-columns: repeat(2, 1fr); }
+  .stats, .stats:has(.stat-admin:not([hidden])) { grid-template-columns: repeat(2, 1fr); }
   .grid-2 { grid-template-columns: 1fr; }
 }
 
@@ -1396,13 +1455,34 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   overflow: hidden;
 }
 
+/*
+ * One grid definition, used by the header and every row, so a heading and the
+ * cells beneath it always sit in the same track. Every track is explicit —
+ * an `auto` track sizes itself to its own content, which is what pulled the
+ * last column out from under its heading.
+ */
 .db-head, .db-row {
   display: grid;
-  grid-template-columns: 34px minmax(150px, 1.3fr) 105px minmax(105px, 1fr) 95px 110px 120px auto;
+  grid-template-columns:
+    32px                  /* expander    */
+    minmax(160px, 1.6fr)  /* company     */
+    104px                 /* contacts    */
+    minmax(88px, .8fr)    /* linkedin    */
+    minmax(110px, 1.1fr)  /* location    */
+    minmax(78px, .65fr)   /* size        */
+    minmax(92px, .8fr)    /* revenue     */
+    minmax(100px, .95fr)  /* owner       */
+    92px;                 /* claim       */
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
 }
+
+/* Both grids place their last cell against the right edge, together. */
+.db-head-end, .db-row > .row-actions { justify-self: end; }
+
+/* Without this a long value widens its track and drags the rest out of line. */
+.db-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .db-head {
   background: var(--surface-sunk);
@@ -1429,18 +1509,57 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .db-toggle:hover { background: var(--line); color: var(--ink); }
 
 .db-company { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.db-cell { font-size: 13px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; }
+.db-cell {
+  font-size: 13px;
+  color: var(--ink-soft);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .muted { color: var(--ink-faint); font-size: 12.5px; }
+
+/* The company name is the way to its website. */
+.company-link { color: inherit; text-decoration: none; }
+.company-link:hover { color: var(--teal-dark); text-decoration: underline; }
+
+/* The founded year, under the name where the domain used to be. */
+.db-company .company-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.db-link { color: var(--teal); text-decoration: none; }
+.db-link:hover { text-decoration: underline; }
+.li-link { display: inline-flex; align-items: center; gap: 5px; }
+.li-icon { flex: none; }
+.locked-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 
 .db-contacts { background: var(--surface-sunk); border-bottom: 1px solid var(--line); }
 
 .contact-head, .contact-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(130px, 1.2fr) minmax(150px, 1.3fr) 130px 80px;
+  grid-template-columns:
+    minmax(120px, 1.1fr)   /* name          */
+    minmax(130px, 1.2fr)   /* position      */
+    minmax(150px, 1.4fr)   /* email         */
+    125px                  /* mobile        */
+    125px                  /* second mobile */
+    72px;                  /* linkedin      */
   gap: 12px;
   padding: 9px 16px 9px 50px;
   font-size: 12.5px;
   align-items: center;
+}
+.contact-head > span, .contact-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .contact-head {
   font-family: var(--mono);
@@ -1453,17 +1572,108 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .contact-row a { color: var(--teal); text-decoration: none; }
 .contact-row a:hover { text-decoration: underline; }
 
-/* ── Signals grouped by day ──────────────────────────────────────────────── */
+/* ── Newspaper: browsing the archive by date ─────────────────────────────── */
 
-.sig-day { display: flex; flex-direction: column; gap: 8px; }
-.sig-day + .sig-day { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
-.sig-day-label {
+.np-crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.np-crumb {
+  border: none;
+  background: transparent;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .03em;
+  color: var(--teal-dark);
+  cursor: pointer;
+}
+.np-crumb:hover { background: var(--teal-tint); }
+
+/* The level you're on isn't a link back to itself. */
+.np-crumb.is-here {
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+  padding: 3px 6px;
+}
+.np-crumb-sep { color: var(--ink-faint); font-size: 11px; }
+
+.np-hint {
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  margin: 0 0 14px;
+}
+
+.np-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+/* Days are short labels, so they pack tighter than years and months. */
+.np-grid-days { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+
+.np-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .12s, background .12s, transform .12s;
+}
+.np-tile:hover {
+  border-color: var(--teal);
+  background: var(--teal-tint);
+  transform: translateY(-1px);
+}
+
+.np-tile-label {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.np-tile-sub { font-size: 11.5px; color: var(--ink-faint); }
+
+.np-empty {
+  padding: 22px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* ── Signals grouped by type ─────────────────────────────────────────────── */
+
+.sig-group { display: flex; flex-direction: column; gap: 8px; }
+.sig-group + .sig-group { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sig-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
   font-family: var(--mono);
   font-size: 10.5px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: .05em;
-  color: var(--ink-faint);
+  letter-spacing: .04em;
+  padding: 4px 10px;
+  border-radius: 999px;
 }
+.sig-group-count { opacity: .7; }
 .mylead-signal-row { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 
 @media (max-width: 1000px) {
@@ -1494,8 +1704,6 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .contact-btn:hover { background: var(--teal-tint); border-color: var(--teal); }
 .contact-btn.is-open { background: var(--teal); border-color: var(--teal); color: #fff; }
 
-
-
 /* ── All Leads: the people table ─────────────────────────────────────────── */
 
 /* The sheet has more columns than fit a screen, so this scrolls sideways
@@ -1507,14 +1715,14 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   border-radius: var(--radius);
 }
 
-.people-table { min-width: 2100px; }
+.people-table { min-width: 1720px; }
 
 .people-head, .people-row {
   display: grid;
   grid-template-columns:
-    180px 170px 180px 200px 140px 190px 140px
-    110px 130px 100px 120px 110px 150px 120px
-    130px 130px 160px 180px 170px 110px;
+    38px 180px 175px 185px 215px 150px 170px
+    115px 135px 105px 120px 115px 125px 130px
+    170px 108px;
   align-items: center;
   gap: 14px;
   padding: 11px 16px;
@@ -1552,7 +1760,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .people-row a { color: var(--teal); text-decoration: none; }
 .people-row a:hover { text-decoration: underline; }
 
-/* Name and company are the two anchors — heavier, and the only links out. */
+/* Name and company are the anchors — heavier, and the only links out. */
 .people-row .col-name,
 .people-row .col-company {
   display: flex;
@@ -1576,14 +1784,91 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .people-row .col-owner { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .people-row .col-actions { justify-self: end; }
 
-.section-head {
-  font-family: var(--display);
-  font-size: 15px;
-  font-weight: 700;
-  margin: 22px 0 12px;
+/* A second email or phone sits under the first instead of taking a column. */
+.people-row .stacked {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
+  white-space: normal;
+  min-width: 0;
 }
-.section-head:first-child { margin-top: 0; }
-.section-head .pill { background: var(--teal-tint); color: var(--teal-dark); border-radius: 999px; padding: 2px 8px; opacity: 1; }
+.people-row .stacked > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.people-row .stacked > a.alt { color: var(--ink-faint); font-size: 11.5px; }
+.people-row .stacked > a.alt:hover { color: var(--teal); }
+
+/* Company LinkedIn reads as the company name behind the LinkedIn mark. */
+.li-link { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.li-mark {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  fill: #0A66C2;
+}
+.li-link span { overflow: hidden; text-overflow: ellipsis; }
+
+/* Claim never scrolls out of reach: it's pinned to the right edge, with the
+   row's own background behind it so text doesn't show through. */
+.people-head .col-actions,
+.people-row .col-actions {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  justify-self: stretch;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding-left: 12px;
+  margin-right: -16px;
+  padding-right: 16px;
+  background: var(--surface);
+  box-shadow: -8px 0 8px -8px rgba(20, 24, 28, .18);
+}
+.people-head .col-actions { background: var(--surface-sunk); z-index: 3; }
+.people-row:hover .col-actions { background: var(--surface-sunk); }
+
+/* Admin-only row editor trigger. */
+.icon-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  line-height: 0;
+  color: var(--ink-faint);
+}
+.icon-btn:hover { background: var(--line); color: var(--teal); }
+.pencil { width: 14px; height: 14px; fill: currentColor; }
+
+/* A claimed row belongs to its owner: visible to all, actionable by one. */
+.people-row.is-locked { background: repeating-linear-gradient(
+    -45deg, transparent, transparent 9px, rgba(20,24,28,.02) 9px, rgba(20,24,28,.02) 18px); }
+.people-row.is-locked .col-name > a,
+.people-row.is-locked .col-company > a { color: var(--ink-soft); }
+
+.lock-note {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.editor-danger {
+  margin-top: 26px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}

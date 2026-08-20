@@ -1,27 +1,90 @@
 /**
- * /api/contacts — the people table behind All Leads.
+ * /api/contacts - the people directory.
  *
- * All Leads is one row per person, mirroring the source sheet, and a PERSON is
- * what gets claimed. Two reps can work two people at the same company without
- * treading on each other. A person claim carries the same 30-day clock a
- * company claim from All Leads used to; miss it and the person returns to the
- * pool rather than going to the Newspaper (that's only for Fresh Leads).
+ * Lives in the same Supabase database as everything else now, so this is a
+ * plain SQL table rather than a REST call.
  */
 const express = require("express");
 const db = require("../db");
-const { requireAuth } = require("../lib/auth");
+const { requireAuth, requireAdmin } = require("../lib/auth");
 
 const router = express.Router();
 router.use(requireAuth);
 
-const DAYS = Number(process.env.CLAIM_DAYS_ALL || 30);
+// GET /api/contacts?company=Meesho
+router.get("/", async (req, res, next) => {
+  try {
+    const company = String(req.query.company || "").trim();
+    if (!company) return res.status(400).json({ error: "Which company?" });
+
+    const contacts = await db.all(
+      `SELECT id, name, role, email, phone, phone2, linkedin, notes, is_primary
+         FROM company_contacts
+        WHERE lower(company) = lower($1)
+        ORDER BY is_primary DESC, name ASC`,
+      [company]
+    );
+
+    res.json({ configured: true, contacts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/contacts  { company, name, role, email, phone }
+router.post("/", async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const company = String(b.company || "").trim();
+    const name = String(b.name || "").trim();
+    if (!company || !name)
+      return res.status(400).json({ error: "A company and a name are the minimum." });
+
+    const clean = (v) => (String(v || "").trim() || null);
+
+    const contact = await db.one(
+      `INSERT INTO company_contacts (company, name, role, email, phone, is_primary)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (lower(company), lower(name)) DO UPDATE
+          SET role       = COALESCE(EXCLUDED.role, company_contacts.role),
+              email      = COALESCE(EXCLUDED.email, company_contacts.email),
+              phone      = COALESCE(EXCLUDED.phone, company_contacts.phone),
+              is_primary = EXCLUDED.is_primary
+       RETURNING id, name, role, email, phone, phone2, linkedin, notes, is_primary`,
+      [company, name, clean(b.role), clean(b.email), clean(b.phone), Boolean(b.is_primary)]
+    );
+
+    res.json({ contact });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/contacts/:id
+router.delete("/:id", async (req, res, next) => {
+  try {
+    await db.run("DELETE FROM company_contacts WHERE id = $1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── All Leads: the people table ────────────────────────────────────────────
+//
+// All Leads is one row per person now, so a CONTACT is what gets claimed
+// there — same 30-day window an All Leads company claim carried. Two reps can
+// work two people at one company without treading on each other. An expired
+// person claim returns to the pool; only Fresh Leads claims go to the
+// Newspaper, and those live on the lead, untouched by any of this.
+
+const CLAIM_DAYS = Number(process.env.CLAIM_DAYS_ALL || 30);
 
 /** Release every person claim whose clock has run out. */
-async function sweepExpired() {
+function sweepExpiredContacts() {
   return db.run(
     `UPDATE company_contacts
-        SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
-            status = 'new'
+        SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL, status = 'new'
       WHERE owner_id IS NOT NULL
         AND closed_at IS NULL
         AND deadline_at IS NOT NULL
@@ -29,7 +92,7 @@ async function sweepExpired() {
   );
 }
 
-function countdown(row) {
+function contactCountdown(row) {
   if (!row || !row.deadline_at || row.closed_at) return null;
 
   const msLeft = new Date(row.deadline_at).getTime() - Date.now();
@@ -45,33 +108,31 @@ function countdown(row) {
   };
 }
 
-const SELECT = `
+const PEOPLE_SELECT = `
   SELECT cc.*,
-         c.website        AS company_website,
-         c.domain         AS company_domain,
-         c.linkedin       AS company_linkedin,
-         c.year_founded   AS company_year_founded,
-         c.employees      AS company_employees,
-         c.revenue        AS company_revenue,
-         c.industry       AS company_industry,
-         c.specialities   AS company_specialities,
-         u.display_name   AS owner_name
+         c.website      AS company_website,
+         c.domain       AS company_domain,
+         c.linkedin     AS company_linkedin,
+         c.founded      AS company_founded,
+         c.employees    AS company_employees,
+         c.revenue      AS company_revenue,
+         c.industry     AS company_industry,
+         c.specialities AS company_specialities,
+         u.display_name AS owner_name
     FROM company_contacts cc
     LEFT JOIN companies c ON lower(c.name) = lower(cc.company)
     LEFT JOIN users u ON u.id = cc.owner_id`;
 
-/** GET /api/contacts?q=&mine=1 — every person, in sheet order. */
-router.get("/", async (req, res, next) => {
+/** GET /api/contacts/people?q=&mine=1&sort= */
+router.get("/people", async (req, res, next) => {
   try {
-    await sweepExpired();
+    await sweepExpiredContacts();
 
     const where = [];
     const args = [];
     const bind = (v) => `$${args.push(v)}`;
 
     if (req.query.mine === "1") where.push(`cc.owner_id = ${bind(req.user.id)}`);
-    if (req.query.company) where.push(`lower(cc.company) = lower(${bind(req.query.company)})`);
-
     if (req.query.q) {
       const q = bind(`%${String(req.query.q).toLowerCase()}%`);
       where.push(
@@ -84,15 +145,15 @@ router.get("/", async (req, res, next) => {
       company: "LOWER(cc.company) ASC, cc.is_primary DESC, LOWER(cc.name) ASC",
       urgent: "cc.deadline_at ASC NULLS LAST, LOWER(cc.name) ASC",
     };
-    const orderBy = sortMap[req.query.sort] || sortMap.company;
 
     const contacts = await db.all(
-      `${SELECT} ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${orderBy} LIMIT 1000`,
+      `${PEOPLE_SELECT} ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       ORDER BY ${sortMap[req.query.sort] || sortMap.company} LIMIT 1000`,
       args
     );
 
-    for (const c of contacts) c.countdown = countdown(c);
-    res.json({ contacts, claimDays: DAYS });
+    for (const c of contacts) c.countdown = contactCountdown(c);
+    res.json({ contacts, claimDays: CLAIM_DAYS });
   } catch (err) {
     next(err);
   }
@@ -102,6 +163,28 @@ router.get("/", async (req, res, next) => {
 router.post("/:id/claim", async (req, res, next) => {
   try {
     const releasing = Boolean(req.body && req.body.release);
+
+    // A claim locks the person. Nobody but the owner can touch it — no silent
+    // take-overs — except an admin, who can always hand a lead back so it
+    // doesn't get stranded when someone leaves or goes on holiday.
+    const current = await db.one("SELECT owner_id FROM company_contacts WHERE id = $1", [
+      req.params.id,
+    ]);
+    if (!current) return res.status(404).json({ error: "That contact no longer exists." });
+
+    const isAdmin = req.user.role === "admin";
+    const isOwner = current.owner_id === req.user.id;
+
+    // Check the release case first: refusing it as "already claimed" would be
+    // technically true but answers a question nobody asked.
+    if (releasing && !isOwner && !isAdmin) {
+      return res.status(403).json({ error: "Only the owner can release this contact." });
+    }
+    if (!releasing && current.owner_id && !isOwner && !isAdmin) {
+      return res.status(409).json({
+        error: "Someone else is already working this contact.",
+      });
+    }
 
     const row = releasing
       ? await db.one(
@@ -117,22 +200,31 @@ router.post("/:id/claim", async (req, res, next) => {
                   closed_at = NULL,
                   status = CASE WHEN status = 'new' THEN 'working' ELSE status END
             WHERE id = $3 RETURNING *`,
-          [req.user.id, DAYS, req.params.id]
+          [req.user.id, CLAIM_DAYS, req.params.id]
         );
 
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
 
-    row.countdown = countdown(row);
+    row.countdown = contactCountdown(row);
     res.json({ contact: row });
   } catch (err) {
     next(err);
   }
 });
 
-/** Mark done — the only thing that stops the clock. */
+/** Close stops the clock; reopen restarts it. */
 router.post("/:id/close", async (req, res, next) => {
   try {
     const reopening = Boolean(req.body && req.body.reopen);
+
+    const current = await db.one("SELECT owner_id FROM company_contacts WHERE id = $1", [
+      req.params.id,
+    ]);
+    if (!current) return res.status(404).json({ error: "That contact no longer exists." });
+
+    if (current.owner_id !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Only the owner can close this contact." });
+    }
 
     const row = reopening
       ? await db.one(
@@ -140,7 +232,7 @@ router.post("/:id/close", async (req, res, next) => {
               SET closed_at = NULL, claimed_at = now(),
                   deadline_at = now() + ($1 || ' days')::interval
             WHERE id = $2 RETURNING *`,
-          [DAYS, req.params.id]
+          [CLAIM_DAYS, req.params.id]
         )
       : await db.one(
           `UPDATE company_contacts
@@ -151,30 +243,65 @@ router.post("/:id/close", async (req, res, next) => {
 
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
 
-    row.countdown = countdown(row);
+    row.countdown = contactCountdown(row);
     res.json({ contact: row });
   } catch (err) {
     next(err);
   }
 });
 
-router.patch("/:id", async (req, res, next) => {
+/**
+ * Editing a row is admin-only. Everyone else reads the database; only an admin
+ * corrects it, so a typo fixed in one place stays fixed for the whole team.
+ */
+const EDITABLE = [
+  "name", "role", "email", "email_alt", "phone", "phone2",
+  "linkedin", "seniority", "department", "city", "country", "state", "company",
+];
+
+router.patch("/people/:id", requireAdmin, async (req, res, next) => {
   try {
-    const status = String((req.body && req.body.status) || "").trim();
-    if (!status) return res.status(400).json({ error: "Nothing to update." });
+    const sets = [];
+    const args = [];
+    const bind = (v) => `$${args.push(v)}`;
+
+    for (const field of EDITABLE) {
+      if (req.body[field] === undefined) continue;
+      const value = String(req.body[field] || "").trim() || null;
+      if (field === "name" && !value) {
+        return res.status(400).json({ error: "A contact needs a name." });
+      }
+      sets.push(`${field} = ${bind(value)}`);
+    }
+
+    if (!sets.length) return res.status(400).json({ error: "Nothing to change." });
 
     const row = await db.one(
-      "UPDATE company_contacts SET status = $1 WHERE id = $2 RETURNING *",
-      [status, req.params.id]
+      `UPDATE company_contacts SET ${sets.join(", ")} WHERE id = ${bind(req.params.id)} RETURNING *`,
+      args
     );
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
 
-    row.countdown = countdown(row);
+    row.countdown = contactCountdown(row);
     res.json({ contact: row });
+  } catch (err) {
+    // The unique index means two people at one company can't share a name.
+    if (err.code === "23505") {
+      return res.status(409).json({ error: "That company already has someone with this name." });
+    }
+    next(err);
+  }
+});
+
+router.delete("/people/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const removed = await db.run("DELETE FROM company_contacts WHERE id = $1", [req.params.id]);
+    if (!removed) return res.status(404).json({ error: "That contact no longer exists." });
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
 });
 
 module.exports = router;
-module.exports.sweepExpired = sweepExpired;
+module.exports.sweepExpiredContacts = sweepExpiredContacts;

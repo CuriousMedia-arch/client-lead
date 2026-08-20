@@ -89,11 +89,20 @@ const KIND_ICON = {
   claim: "\u2691",
 };
 
+/** Small inline LinkedIn glyph, used wherever a link points at a LinkedIn page. */
+const LI_ICON =
+  `<svg class="li-icon" width="14" height="14" viewBox="0 0 448 448" aria-hidden="true">` +
+  `<path fill="currentColor" d="M100 55a45 45 0 1 1-90 0 45 45 0 0 1 90 0ZM8 149h84v261H8V149Zm146 0h81v36h1c11-21 39-43 81-43 87 0 103 57 103 132v136h-84V291c0-32-1-74-45-74-46 0-53 36-53 72v121h-84V149Z"/>` +
+  `</svg>`;
+
 /** Everything the page keeps in memory between renders. */
 const state = {
   user: null,
   team: [],
   tab: "all",
+  // Which sub-list "My Outreach" is showing — claims from All Leads or from
+  // Fresh Leads. They're separate commitments, so they never mix in one list.
+  mineView: "all",
   search: "",
   types: new Set(),
   statuses: new Set(),
@@ -105,6 +114,10 @@ const state = {
   runPoll: null,
   lastRun: null,
   freshWindowDays: 3,
+  // Where the Newspaper drill-down currently is. null at a level means that
+  // level hasn't been chosen yet, so that's the picker being shown.
+  np: { year: null, month: null, day: null },
+  npLeads: [],
 };
 
 // Mirrors lib/triggers.js — the agency's own playbook.
@@ -194,6 +207,7 @@ async function enterApp(user) {
   $("#me-name").textContent = user.name;
   $("#me-role").textContent = user.role === "admin" ? "Admin" : "Team";
   $("#tab-admin").hidden = user.role !== "admin";
+  $("#stat-admin-unclaimed").hidden = user.role !== "admin";
 
   // Fire the roster alongside the dashboard rather than before it - on a
   // remote database each sequential request is a fresh round trip of latency.
@@ -235,6 +249,9 @@ function wireEvents() {
   $("#tabs").addEventListener("click", (e) => {
     const btn = e.target.closest(".tab");
     if (!btn) return;
+    // Opening the Newspaper starts at the year list rather than wherever the
+    // last visit left off, so the tab always looks the same when you arrive.
+    if (btn.dataset.tab !== state.tab) state.np = { year: null, month: null, day: null };
     state.tab = btn.dataset.tab;
     $$(".tab").forEach((t) => t.classList.toggle("is-active", t === btn));
     refresh();
@@ -270,9 +287,14 @@ function wireEvents() {
   $("#content").addEventListener("click", onCardClick);
 
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
+  $("#contact-editor-backdrop").addEventListener("click", closeContactEditor);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
+    if (e.key === "Escape" && !$("#unclaimed-modal").hidden) closeUnclaimedModal();
   });
+
+  $("#stat-admin-unclaimed").addEventListener("click", openUnclaimedModal);
+  $("#unclaimed-backdrop").addEventListener("click", closeUnclaimedModal);
 }
 
 function toggleSet(set, value, chip) {
@@ -333,10 +355,19 @@ function currentQuery() {
 // The tab name already says what the list is, so All Leads carries no subtitle.
 // The other two do, because what they hold isn't obvious from the name alone.
 const PAGE_COPY = {
-  all: ["All Leads", "Every contact in your database. Claim a person and you have 30 days to close it."],
-  fresh: ["Fresh Leads", "News about companies in your database. Claim one and you have 10 days."],
-  mine: ["My Outreach", "What you're working, and how long is left on each."],
-  newspaper: ["Newspaper", "Fresh Leads that ran out of time. Anyone can pick these up."],
+  all: ["All Leads", "Your contact database. Claim one and you have 30 days to close it."],
+  fresh: [
+    "Fresh Leads",
+    "News from the last 3 days only. Claim one and you have 10 days.",
+  ],
+  mine: [
+    "My Outreach",
+    "What you're working, and how long is left on each. All Leads and Fresh Leads claims are separate — claiming one never claims the other.",
+  ],
+  newspaper: [
+    "Newspaper",
+    "Fresh Leads that ran out of time, filed by the date they were released. Anyone can pick these up.",
+  ],
 };
 
 function actionBar() {
@@ -407,23 +438,30 @@ function filterBar() {
           : ""
       }
 
-      <span class="filter-label">Sort</span>
-      <select class="filter-select" id="f-sort">
-        ${state.tab === "mine" ? `<option value="urgent">Deadline soonest</option>` : ""}
-        <option value="company">Company name (A–Z)</option>
-        ${state.tab === "all" ? `<option value="name">Person name (A–Z)</option>` : ""}
-        ${state.tab !== "all" ? `<option value="recent">Newest signal first</option>` : ""}
-        ${state.tab !== "all" ? `<option value="added">Recently added</option>` : ""}
-      </select>
+      ${
+        // The Newspaper has its own ordering — year, then month, then day — so
+        // a second sort control there would only fight with it.
+        state.tab === "newspaper"
+          ? ""
+          : `<span class="filter-label">Sort</span>
+             <select class="filter-select" id="f-sort">
+               ${state.tab === "mine" ? `<option value="urgent">Deadline soonest</option>` : ""}
+               <option value="company">Company name (A–Z)</option>
+               <option value="recent">Newest signal first</option>
+               <option value="added">Recently added</option>
+             </select>`
+      }
     </div>`;
 }
 
 async function renderContent(opts = {}) {
   const content = $("#content");
   if (state.tab === "admin") return renderAdmin();
-
-  // All Leads is the people table; everything else is company-level.
-  if (state.tab === "all") return renderDatabase(opts);
+  // All Leads is the people table now — one row per contact, not per company.
+  if (state.tab === "all") return renderPeople(opts);
+  // Claims made in All Leads are on people, so that half of My Outreach is a
+  // people list. The Fresh half stays company-level.
+  if (state.tab === "mine" && state.mineView !== "fresh") return renderMyPeople(opts);
 
   let leads;
   try {
@@ -436,18 +474,16 @@ async function renderContent(opts = {}) {
   const body = !leads.length
     ? emptyState().outerHTML
     : state.tab === "newspaper"
-    ? `<div class="mylead-grid">${leads.map(newspaperCard).join("")}</div>`
+    ? newspaperView(leads)
     : state.tab === "fresh"
     ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
-    : `<div class="mylead-grid">${leads.map(outreachCard).join("")}</div>`;
+    : myOutreachView(leads);
 
-  const people = state.tab === "mine" ? await myContacts() : "";
-
-  content.innerHTML = actionBar() + filterBar() + people + body;
+  content.innerHTML = actionBar() + filterBar() + body;
 
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
-  $("#f-sort").value = state.sort;
+  if ($("#f-sort")) $("#f-sort").value = state.sort;
 
   if (opts.keepFocus) {
     const el = $("#" + opts.keepFocus);
@@ -457,41 +493,183 @@ async function renderContent(opts = {}) {
   wireListActions();
 }
 
-/* ── All Leads: the people table ─────────────────────────────────────────── */
+/* ── All Leads: the database ─────────────────────────────────────────────── */
 
 /**
- * Every column from the source sheet, in the sheet's own order, one row per
- * person. It scrolls sideways rather than hiding columns, because this view is
- * the database — someone looking here wants the whole record.
- *
- * Two things are folded in rather than given their own column: the person's
- * LinkedIn (their name links to it) and the company website (the company name
- * links to it, with the founding year underneath).
+ * A record of the contact sheet, one row per company, expandable into its
+ * people. No signals, no pitch — that lives in Fresh Leads and Outreach.
  */
-const DB_COLUMNS = [
+/**
+ * The sheet writes the website with a scheme sometimes and without one others,
+ * and the domain column never has one. An href without a scheme is read as a
+ * relative path, so normalise before it goes into the link.
+ */
+function companyUrl(lead) {
+  const raw = lead.website || lead.domain;
+  if (!raw) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  return /^https?:\/\//i.test(value) ? value : `https://${value.replace(/^\/+/, "")}`;
+}
+
+/**
+ * "City, State" — or whichever half the sheet actually has. The State column
+ * is blank for Delhi and the other union territories, so a lead that only
+ * knows its city still reads properly rather than as "Delhi, ".
+ *
+ * Named companyLocation, not location: a top-level `function location` becomes
+ * a property of window and collides with window.location, which breaks the
+ * whole file and the two location.reload() calls in it.
+ */
+function companyLocation(lead) {
+  return [lead.city, lead.state].filter(Boolean).join(", ") || null;
+}
+
+/**
+ * All Leads: every column from the source sheet, in the sheet's own order, one
+ * row per person. It scrolls sideways rather than hiding columns — this view
+ * IS the database, and someone looking here wants the whole record.
+ *
+ * Two columns are folded into others rather than shown twice: the person's
+ * LinkedIn (their name links to it) and the company website (the company name
+ * links to it, founding year underneath).
+ */
+// A second email or phone stacks under the first rather than earning its own
+// column, and the company domain is gone because the company name already
+// links to the site. Claim is pinned to the right edge so it never scrolls
+// out of reach.
+const PEOPLE_COLUMNS = [
+  ["edit", ""],
   ["name", "Name"],
   ["company", "Company"],
   ["role", "Position"],
-  ["email", "Work email"],
-  ["phone", "Phone 1"],
-  ["email_alt", "Additional email"],
-  ["phone_alt", "Phone 2"],
+  ["email", "Email"],
+  ["phone", "Phone"],
+  ["owner", "Owner"],
   ["seniority", "Seniority"],
   ["department", "Department"],
   ["country", "Country"],
   ["state", "State"],
   ["city", "City"],
-  ["company_domain", "Company domain"],
   ["company_employees", "Employees"],
   ["company_revenue", "Revenue"],
-  ["company_linkedin", "Company LinkedIn"],
-  ["company_industry", "Industry"],
-  ["company_specialities", "Specialities"],
-  ["owner", "Owner"],
+  ["company_linkedin", "LinkedIn"],
   ["actions", ""],
 ];
 
-async function renderDatabase(opts = {}) {
+/* ── Admin row editor ────────────────────────────────────────────────────── */
+
+const EDIT_FIELDS = [
+  ["name", "Name"],
+  ["role", "Position"],
+  ["company", "Company"],
+  ["email", "Work email"],
+  ["email_alt", "Additional email"],
+  ["phone", "Phone 1"],
+  ["phone2", "Phone 2"],
+  ["linkedin", "LinkedIn URL"],
+  ["seniority", "Seniority"],
+  ["department", "Department"],
+  ["city", "City"],
+  ["state", "State"],
+  ["country", "Country"],
+];
+
+function closeContactEditor() {
+  $("#contact-editor").hidden = true;
+  $("#contact-editor-backdrop").hidden = true;
+}
+
+/**
+ * Everyone reads the database; only an admin corrects it. A typo fixed here
+ * stays fixed for the whole team, rather than each person keeping their own
+ * private copy of the truth.
+ */
+async function openContactEditor(id) {
+  let contact;
+  try {
+    const { contacts } = await api("/api/contacts/people");
+    contact = contacts.find((c) => String(c.id) === String(id));
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  if (!contact) return toast("That contact no longer exists.", true);
+
+  const panel = $("#contact-editor");
+  $("#contact-editor-backdrop").hidden = false;
+  panel.hidden = false;
+
+  panel.innerHTML = `
+    <div class="drawer-head">
+      <h2>Edit contact</h2>
+      <button class="drawer-close" id="editor-close">&times;</button>
+    </div>
+    <div class="drawer-body">
+      <div class="grid-2">
+        ${EDIT_FIELDS.map(
+          ([key, label]) => `
+          <label class="field">
+            <span>${esc(label)}</span>
+            <input id="edit-${key}" value="${esc(contact[key] || "")}" />
+          </label>`
+        ).join("")}
+      </div>
+
+      <button class="btn btn-primary btn-block" id="editor-save">Save changes</button>
+
+      <div class="editor-danger">
+        <p class="hint">
+          Deleting removes this person from the database. The company and its
+          other contacts stay. This can't be undone.
+        </p>
+        <button class="btn btn-danger btn-sm" id="editor-delete">Delete contact</button>
+      </div>
+    </div>`;
+
+  $("#editor-close").addEventListener("click", closeContactEditor);
+
+  $("#editor-save").addEventListener("click", async () => {
+    const body = {};
+    for (const [key] of EDIT_FIELDS) body[key] = $(`#edit-${key}`).value;
+
+    try {
+      await api(`/api/contacts/people/${id}`, { method: "PATCH", body });
+      toast("Contact updated");
+      closeContactEditor();
+      renderContent();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#editor-delete").addEventListener("click", async () => {
+    if (!window.confirm(`Delete ${contact.name}? This can't be undone.`)) return;
+    try {
+      await api(`/api/contacts/people/${id}`, { method: "DELETE" });
+      toast("Contact deleted");
+      closeContactEditor();
+      renderContent();
+      loadStats();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+}
+
+function pencil() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" class="pencil">
+      <path d="M4 16.5V20h3.5l9.9-9.9-3.5-3.5L4 16.5zM19.7 6.3a1 1 0 000-1.4l-2.6-2.6a1 1 0 00-1.4 0l-1.8 1.8 3.5 3.5 2.3-1.3z"/>
+    </svg>`;
+}
+
+/** The LinkedIn glyph, so the cell can read as "in  Company". */
+function linkedinMark() {
+  return `<svg class="li-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.98 3.5a2.5 2.5 0 11-.02 5 2.5 2.5 0 01.02-5zM3 9h4v12H3zM10 9h3.8v1.7h.05c.53-.95 1.83-1.95 3.77-1.95 4.03 0 4.78 2.5 4.78 5.76V21h-4v-5.6c0-1.34-.03-3.06-1.9-3.06-1.9 0-2.2 1.45-2.2 2.96V21h-4z"/>
+    </svg>`;
+}
+
+async function renderPeople(opts = {}) {
   const content = $("#content");
 
   let contacts;
@@ -499,7 +677,7 @@ async function renderDatabase(opts = {}) {
     const p = new URLSearchParams();
     if (state.search) p.set("q", state.search);
     p.set("sort", state.sort === "name" ? "name" : "company");
-    ({ contacts } = await api(`/api/contacts?${p}`));
+    ({ contacts } = await api(`/api/contacts/people?${p}`));
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load contacts</h2><p>${esc(err.message)}</p></div>`;
     return;
@@ -509,7 +687,7 @@ async function renderDatabase(opts = {}) {
     ? `<div class="db-scroll">
          <div class="people-table">
            <div class="people-head">
-             ${DB_COLUMNS.map(([k, label]) => `<span class="col-${k}">${esc(label)}</span>`).join("")}
+             ${PEOPLE_COLUMNS.map(([k, label]) => `<span class="col-${k}">${esc(label)}</span>`).join("")}
            </div>
            ${contacts.map(personRow).join("")}
          </div>
@@ -517,7 +695,7 @@ async function renderDatabase(opts = {}) {
     : emptyState().outerHTML;
 
   content.innerHTML = actionBar() + filterBar() + body;
-  $("#f-sort").value = state.sort;
+  if ($("#f-sort")) $("#f-sort").value = state.sort;
 
   if (opts.keepFocus) {
     const el = $("#" + opts.keepFocus);
@@ -527,7 +705,79 @@ async function renderDatabase(opts = {}) {
   wireListActions();
 }
 
+/** My Outreach → From All Leads: the people this user is working. */
+async function renderMyPeople(opts = {}) {
+  const content = $("#content");
+
+  let contacts = [];
+  try {
+    ({ contacts } = await api("/api/contacts/people?mine=1&sort=urgent"));
+  } catch (err) {
+    content.innerHTML = `<div class="empty"><h2>Couldn't load your contacts</h2><p>${esc(err.message)}</p></div>`;
+    return;
+  }
+
+  const subtabs = `
+    <div class="mine-subtabs">
+      <button class="chip is-on" data-mineview="all">From All Leads <span class="pill">${contacts.length}</span></button>
+      <button class="chip" data-mineview="fresh">From Fresh Leads</button>
+    </div>`;
+
+  const body = contacts.length
+    ? `<div class="mylead-grid">${contacts.map(myPersonCard).join("")}</div>`
+    : `<div class="empty">
+         <h2>No people claimed yet</h2>
+         <p>Claim someone in All Leads and they appear here with a 30-day countdown.</p>
+       </div>`;
+
+  content.innerHTML = actionBar() + subtabs + body;
+  wireListActions();
+}
+
+function myPersonCard(c) {
+  const closed = Boolean(c.closed_at);
+
+  return `
+    <div class="mylead-card ${closed ? "is-closed" : ""}">
+      <div class="mylead-top">
+        <div class="mylead-heading">
+          <div class="company-name">
+            ${c.linkedin
+              ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+              : esc(c.name)}
+          </div>
+          <div class="mylead-meta">${esc(c.role || "—")} · ${esc(c.company)}</div>
+        </div>
+        <div class="mylead-corner">
+          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(c.countdown)}
+        </div>
+      </div>
+
+      <div class="mylead-signals">
+        ${c.email ? `<div><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ""}
+        ${c.phone ? `<div><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ""}
+        ${c.phone2 ? `<div><a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a></div>` : ""}
+        ${!c.email && !c.phone ? `<div class="signal-none">No email or mobile on file.</div>` : ""}
+      </div>
+
+      <div class="mylead-actions">
+        ${
+          closed
+            ? `<button class="btn btn-ghost btn-sm" data-contact-act="reopen" data-id="${c.id}">Reopen</button>`
+            : `<button class="btn btn-sm btn-primary" data-contact-act="close" data-id="${c.id}">Mark closed</button>`
+        }
+        <button class="btn btn-ghost btn-sm release-trigger" data-contact-act="release" data-id="${c.id}">Release</button>
+      </div>
+    </div>`;
+}
+
 function personRow(c) {
+  const isAdmin = state.user.role === "admin";
+  const isOwner = c.owner_id === state.user.id;
+  // Claiming locks the row: only the owner works it, and only an admin can
+  // intervene. Everyone else still sees the record, just can't act on it.
+  const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
+
   const link = (href, text) =>
     href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
 
@@ -535,33 +785,35 @@ function personRow(c) {
     `<span class="col-${key}">${value == null || value === "" ? "—" : value}</span>`;
 
   return `
-    <div class="people-row" data-contact="${c.id}">
-      <span class="col-name">
-        ${link(c.linkedin, c.name)}
-        ${c.is_primary ? `<span class="poc-flag">Primary</span>` : ""}
+    <div class="people-row ${locked ? "is-locked" : ""}" data-contact="${c.id}">
+      <span class="col-edit">
+        ${
+          state.user.role === "admin"
+            ? `<button class="icon-btn" data-edit-contact="${c.id}" title="Edit this row">${pencil()}</button>`
+            : ""
+        }
       </span>
+
+      <span class="col-name">${link(c.linkedin, c.name)}</span>
 
       <span class="col-company">
         ${link(c.company_website || (c.company_domain ? `https://${c.company_domain}` : null), c.company)}
-        ${c.company_year_founded ? `<span class="col-sub">Founded ${esc(c.company_year_founded)}</span>` : ""}
+        ${c.company_founded ? `<span class="col-sub">Founded ${esc(c.company_founded)}</span>` : ""}
       </span>
 
       ${cell("role", esc(c.role))}
-      ${cell("email", c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
-      ${cell("phone", c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
-      ${cell("email_alt", c.email_alt ? `<a href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : "")}
-      ${cell("phone_alt", c.phone_alt ? `<a href="tel:${esc(c.phone_alt)}">${esc(c.phone_alt)}</a>` : "")}
-      ${cell("seniority", esc(c.seniority))}
-      ${cell("department", esc(c.department))}
-      ${cell("country", esc(c.country))}
-      ${cell("state", esc(c.state))}
-      ${cell("city", esc(c.city))}
-      ${cell("company_domain", esc(c.company_domain))}
-      ${cell("company_employees", esc(c.company_employees))}
-      ${cell("company_revenue", esc(c.company_revenue))}
-      ${cell("company_linkedin", c.company_linkedin ? link(c.company_linkedin, "Company page") : "")}
-      ${cell("company_industry", esc(c.company_industry))}
-      ${cell("company_specialities", esc(c.company_specialities))}
+
+      <span class="col-email stacked">
+        ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
+        ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
+        ${!c.email && !c.email_alt ? "—" : ""}
+      </span>
+
+      <span class="col-phone stacked">
+        ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+        ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
+        ${!c.phone && !c.phone2 ? "—" : ""}
+      </span>
 
       <span class="col-owner">
         ${
@@ -573,68 +825,34 @@ function personRow(c) {
         }
       </span>
 
+      ${cell("seniority", esc(c.seniority))}
+      ${cell("department", esc(c.department))}
+      ${cell("country", esc(c.country))}
+      ${cell("state", esc(c.state))}
+      ${cell("city", esc(c.city))}
+      ${cell("company_employees", esc(c.company_employees))}
+      ${cell("company_revenue", esc(c.company_revenue))}
+      ${cell(
+        "company_linkedin",
+        c.company_linkedin
+          ? `<a class="li-link" href="${esc(c.company_linkedin)}" target="_blank" rel="noopener">${linkedinMark()}${esc(
+              c.company
+            )}</a>`
+          : ""
+      )}
+
       <span class="col-actions">
         ${
-          c.owner_id === state.user.id
+          isOwner
             ? `<button class="btn btn-sm" data-contact-act="release" data-id="${c.id}">Release</button>`
-            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">${
-                c.owner_id ? "Take over" : "Claim"
-              }</button>`
+            : locked
+            ? `<span class="lock-note" title="Claimed by ${esc(c.owner_name || "someone else")}">Locked</span>`
+            : c.owner_id
+            ? `<button class="btn btn-sm" data-contact-act="release" data-id="${c.id}">Release</button>`
+            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
         }
       </span>
     </div>`;
-}
-
-/** Claimed people, shown above claimed companies in My Outreach. */
-async function myContacts() {
-  let contacts = [];
-  try {
-    ({ contacts } = await api("/api/contacts?mine=1&sort=urgent"));
-  } catch {
-    return "";
-  }
-  if (!contacts.length) return "";
-
-  return `
-    <h2 class="section-head">People you're working <span class="pill">${contacts.length}</span></h2>
-    <div class="mylead-grid">
-      ${contacts
-        .map(
-          (c) => `
-        <div class="mylead-card ${c.closed_at ? "is-closed" : ""}">
-          <div class="mylead-top">
-            <div class="mylead-heading">
-              <div class="company-name">
-                ${c.linkedin ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : esc(c.name)}
-              </div>
-              <div class="mylead-meta">${esc(c.role || "—")} · ${esc(c.company)}</div>
-            </div>
-            <div class="mylead-corner">
-              ${c.closed_at ? `<span class="clock clock-done">Closed</span>` : countdownChip(c.countdown)}
-            </div>
-          </div>
-
-          <div class="mylead-signals">
-            ${c.email ? `<div><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ""}
-            ${c.phone ? `<div><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ""}
-            ${c.phone_alt ? `<div><a href="tel:${esc(c.phone_alt)}">${esc(c.phone_alt)}</a></div>` : ""}
-            ${!c.email && !c.phone ? `<div class="signal-none">No email or mobile on file.</div>` : ""}
-          </div>
-
-          <div class="mylead-actions">
-            ${
-              c.closed_at
-                ? `<button class="btn btn-ghost btn-sm" data-contact-act="reopen" data-id="${c.id}">Reopen</button>`
-                : `<button class="btn btn-sm btn-primary" data-contact-act="close" data-id="${c.id}">Mark closed</button>`
-            }
-            <button class="btn btn-ghost btn-sm release-trigger" data-contact-act="release" data-id="${c.id}">Release</button>
-          </div>
-        </div>`
-        )
-        .join("")}
-    </div>
-
-    <h2 class="section-head">Companies you're working</h2>`;
 }
 
 /* ── Fresh Leads ─────────────────────────────────────────────────────────── */
@@ -647,26 +865,23 @@ function freshCard(lead) {
         <div class="mylead-heading">
           <div class="company-name">${esc(lead.company)}</div>
           <div class="mylead-meta">
-            ${lead.fresh_count} new signal${lead.fresh_count === 1 ? "" : "s"}${
-    lead.industry ? ` · ${esc(lead.industry)}` : ""
-  }
+            ${lead.fresh_count} new signal${lead.fresh_count === 1 ? "" : "s"} in the last
+            ${state.freshWindowDays || 3} days
           </div>
         </div>
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      ${signalsByDate(lead.signals)}
+      ${signalsByType(lead.signals, null, true)}
 
       <div class="mylead-actions">
         ${
-          lead.owner_id === state.user.id
-            ? `<span class="muted">Yours — see My Outreach</span>
-               <button class="btn btn-sm" data-act="release" data-id="${lead.id}">Release</button>`
-            : `<span class="muted">${
-                lead.owner_id ? `With ${esc(lead.owner_name)}` : "10 days to close once claimed"
-              }</span>
+          lead.fresh_owner_id === state.user.id
+            ? `<span class="muted">Yours — see My Outreach → From Fresh Leads</span>
+               <button class="btn btn-sm" data-act="release" data-source="fresh" data-id="${lead.id}">Release</button>`
+            : `<span class="muted">10 days to close once claimed</span>
                <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
-                 ${lead.owner_id ? "Take over" : "Claim"}
+                 Claim
                </button>`
         }
       </div>
@@ -675,8 +890,44 @@ function freshCard(lead) {
 
 /* ── My Outreach ─────────────────────────────────────────────────────────── */
 
-function outreachCard(lead) {
-  const closed = Boolean(lead.closed_at);
+/**
+ * "My Outreach" now holds two independent lists — what you claimed from All
+ * Leads (the contact-database relationship) and what you claimed from Fresh
+ * Leads (a specific news signal). A company can sit in one, the other, or
+ * both, and closing/releasing one never touches the other. `source` says
+ * which track this particular card is showing.
+ */
+function myOutreachView(leads) {
+  const allClaims = leads.filter((l) => l.owner_id === state.user.id);
+  const freshClaims = leads.filter((l) => l.fresh_owner_id === state.user.id);
+  const view = state.mineView === "fresh" ? "fresh" : "all";
+  const list = view === "fresh" ? freshClaims : allClaims;
+
+  return `
+    <div class="mine-subtabs">
+      <button class="chip ${view === "all" ? "is-on" : ""}" data-mineview="all">
+        From All Leads <span class="pill">${allClaims.length}</span>
+      </button>
+      <button class="chip ${view === "fresh" ? "is-on" : ""}" data-mineview="fresh">
+        From Fresh Leads <span class="pill">${freshClaims.length}</span>
+      </button>
+    </div>
+    ${
+      list.length
+        ? `<div class="mylead-grid">${list.map((l) => outreachCard(l, view)).join("")}</div>`
+        : `<div class="empty"><h2>Nothing here yet</h2>
+             <p>You haven't claimed anything from ${
+               view === "fresh" ? "Fresh Leads" : "All Leads"
+             } right now.</p></div>`
+    }`;
+}
+
+function outreachCard(lead, source) {
+  const fresh = source === "fresh";
+  const closed = Boolean(fresh ? lead.fresh_closed_at : lead.closed_at);
+  const countdown = fresh ? lead.fresh_countdown : lead.countdown;
+  const claimWindow = fresh ? lead.fresh_claim_window : lead.claim_window;
+  const closedAt = fresh ? lead.fresh_closed_at : lead.closed_at;
 
   return `
     <div class="mylead-card ${closed ? "is-closed" : ""}" data-lead="${lead.id}">
@@ -686,20 +937,18 @@ function outreachCard(lead) {
           <div class="mylead-meta">
             ${
               closed
-                ? `Closed ${esc(shortDate(lead.closed_at))}`
-                : `Claimed from ${lead.claim_source === "fresh" ? "Fresh Leads" : "All Leads"} · ${
-                    lead.claim_window
-                  } day window`
+                ? `Closed ${esc(shortDate(closedAt))}`
+                : `Claimed from ${fresh ? "Fresh Leads" : "All Leads"} · ${claimWindow} day window`
             }
           </div>
         </div>
         <div class="mylead-corner">
-          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
+          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(countdown)}
           ${tierBadge(lead.tier, lead.tier_note)}
         </div>
       </div>
 
-      ${signalsByDate(lead.signals, 3)}
+      ${signalsByType(lead.signals, 3, true)}
 
       ${
         lead.next_action
@@ -736,15 +985,176 @@ function outreachCard(lead) {
       <div class="mylead-actions">
         ${
           closed
-            ? `<button class="btn btn-ghost btn-sm" data-act="reopen" data-id="${lead.id}">Reopen</button>`
-            : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+            ? `<button class="btn btn-ghost btn-sm" data-act="reopen" data-source="${source}" data-id="${lead.id}">Reopen</button>`
+            : `<button class="btn btn-sm btn-primary" data-act="close" data-source="${source}" data-id="${lead.id}">Mark closed</button>`
         }
-        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-id="${lead.id}">Release</button>
+        <button class="btn btn-ghost btn-sm release-trigger" data-act="release" data-source="${source}" data-id="${lead.id}">Release</button>
       </div>
     </div>`;
 }
 
 /* ── Newspaper ───────────────────────────────────────────────────────────── */
+
+/**
+ * The Newspaper is an archive rather than a feed, so it's browsed the way an
+ * archive is: pick a year, then a month, then a day, and read what was filed
+ * that day. Everything below works off the list already in memory — the drill
+ * -down never goes back to the server.
+ */
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** The day a lead was dropped into the Newspaper, or null if it can't be read. */
+function releasedOn(lead) {
+  const iso = lead.newspaper_date || lead.last_signal_at;
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d) ? null : d;
+}
+
+/**
+ * leads -> Map(year -> { count, months: Map(month -> { count, days: Map(day -> leads) }) })
+ * Insertion order is the order the server sent, which is newest first.
+ */
+function newspaperTree(leads) {
+  const years = new Map();
+  const undated = [];
+
+  for (const lead of leads) {
+    const d = releasedOn(lead);
+    if (!d) { undated.push(lead); continue; }
+
+    const [y, m, day] = [d.getFullYear(), d.getMonth(), d.getDate()];
+
+    if (!years.has(y)) years.set(y, { count: 0, months: new Map() });
+    const year = years.get(y);
+    year.count++;
+
+    if (!year.months.has(m)) year.months.set(m, { count: 0, days: new Map() });
+    const month = year.months.get(m);
+    month.count++;
+
+    if (!month.days.has(day)) month.days.set(day, []);
+    month.days.get(day).push(lead);
+  }
+
+  return { years, undated };
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** One clickable square in the year / month / day picker. */
+function npTile(level, value, label, sub) {
+  return `
+    <button class="np-tile" data-np="${level}" data-value="${value}">
+      <span class="np-tile-label">${esc(label)}</span>
+      <span class="np-tile-sub">${esc(sub)}</span>
+    </button>`;
+}
+
+/** Where you are, and a way back out of it. */
+function npCrumbs() {
+  const { year, month, day } = state.np;
+  const crumbs = [`<button class="np-crumb" data-np="reset" data-value="">All dates</button>`];
+
+  if (year != null)
+    crumbs.push(`<button class="np-crumb" data-np="year" data-value="${year}">${year}</button>`);
+  if (month != null)
+    crumbs.push(
+      `<button class="np-crumb" data-np="month" data-value="${month}">${MONTH_NAMES[month]}</button>`
+    );
+  if (day != null) crumbs.push(`<span class="np-crumb is-here">${day} ${MONTH_NAMES[month]}</span>`);
+
+  return `<nav class="np-crumbs">${crumbs.join(`<span class="np-crumb-sep">›</span>`)}</nav>`;
+}
+
+/** The whole tab: breadcrumbs plus whichever level is currently open. */
+function newspaperView(leads) {
+  state.npLeads = leads;
+  return `<div id="np-root">${newspaperLevel(leads)}</div>`;
+}
+
+function newspaperLevel(leads) {
+  const { years, undated } = newspaperTree(leads);
+  const { year, month, day } = state.np;
+
+  // A year that no longer has anything in it — everything got picked up while
+  // the page was open. Fall back to the top rather than showing a dead end.
+  if (year != null && !years.has(year)) {
+    return npCrumbs() + `<div class="np-empty">Nothing is left under this date. Pick another.</div>`;
+  }
+
+  if (year == null) {
+    const tiles = [...years.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([y, node]) => npTile("year", y, y, plural(node.count, "lead")))
+      .join("");
+
+    return `
+      ${npCrumbs()}
+      <p class="np-hint">Pick a year, then a month, then a day to read what was released.</p>
+      <div class="np-grid">${tiles}</div>
+      ${
+        undated.length
+          ? `<p class="np-hint">${plural(undated.length, "lead")} carry no release date and sit outside this list.</p>`
+          : ""
+      }`;
+  }
+
+  const months = years.get(year).months;
+
+  if (month == null) {
+    const tiles = [...months.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([m, node]) => npTile("month", m, MONTH_NAMES[m], plural(node.count, "lead")))
+      .join("");
+
+    return `${npCrumbs()}<div class="np-grid">${tiles}</div>`;
+  }
+
+  if (!months.has(month)) {
+    return npCrumbs() + `<div class="np-empty">Nothing is left in this month. Pick another.</div>`;
+  }
+
+  const days = months.get(month).days;
+
+  if (day == null) {
+    const tiles = [...days.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([d, items]) =>
+        npTile("day", d, `${d} ${MONTH_NAMES[month].slice(0, 3)}`, plural(items.length, "lead"))
+      )
+      .join("");
+
+    return `${npCrumbs()}<div class="np-grid np-grid-days">${tiles}</div>`;
+  }
+
+  const items = days.get(day) || [];
+
+  if (!items.length) {
+    return (
+      npCrumbs() +
+      `<div class="np-empty">Everything released on this date has been picked up.</div>`
+    );
+  }
+
+  return `
+    ${npCrumbs()}
+    <p class="np-hint">
+      ${plural(items.length, "lead")} released on ${day} ${MONTH_NAMES[month]} ${year}.
+    </p>
+    <div class="mylead-grid">${items.map(newspaperCard).join("")}</div>`;
+}
+
+/** Re-draw just the Newspaper body — the drill-down needs no new data. */
+function renderNewspaper() {
+  const root = $("#np-root");
+  if (!root) return;
+  root.innerHTML = newspaperLevel(state.npLeads || []);
+}
 
 /** The parking lot: Fresh claims whose 10 days ran out. Anyone can take them. */
 function newspaperCard(lead) {
@@ -760,7 +1170,7 @@ function newspaperCard(lead) {
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
-      ${signalsByDate(lead.signals, 3)}
+      ${signalsByType(lead.signals, 3)}
 
       <div class="mylead-actions">
         <span class="muted">Went unworked past its deadline</span>
@@ -771,39 +1181,46 @@ function newspaperCard(lead) {
     </div>`;
 }
 
-/* ── Signals, grouped by the day they ran ────────────────────────────────── */
+/* ── Signals, grouped by type (Funding, Leadership, …) ───────────────────── */
 
-function signalsByDate(signals, limit) {
+// Order the groups the same way the playbook orders priority: hottest first.
+const TYPE_ORDER = ["capital", "brand_launch", "retail_expansion", "leadership", "crisis", "none"];
+
+function signalsByType(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);
   if (!list.length) {
     return `<div class="mylead-signals"><div class="signal-none">No news in the window.</div></div>`;
   }
 
-  const byDay = new Map();
+  const groups = new Map();
   for (const s of list) {
-    const key = shortDate(s.published || s.created_at);
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key).push(s);
+    const key = segId(s.signal_type);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
   }
+
+  const ordered = [...groups.entries()].sort(
+    (a, b) => TYPE_ORDER.indexOf(a[0]) - TYPE_ORDER.indexOf(b[0])
+  );
 
   return `
     <div class="mylead-signals">
-      ${[...byDay.entries()]
+      ${ordered
         .map(
-          ([day, items]) => `
-        <div class="sig-day">
-          <div class="sig-day-label">${esc(day)}</div>
+          ([type, items]) => `
+        <div class="sig-group">
+          <div class="sig-group-label type-${esc(type)}">${esc(typeLabel(type))}
+            <span class="sig-group-count">${items.length}</span>
+          </div>
           ${items
             .map(
               (s) => `
             <div class="mylead-signal-row">
-              <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(
-                typeLabel(s.signal_type)
-              )}</span>
               <a class="mylead-signal-title" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(
                 s.title || "Untitled"
               )}</a>
-              ${s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
+              <span class="mylead-signal-date">${esc(shortDate(s.published || s.created_at))}</span>
+              ${!hideSummary && s.summary ? `<p class="sig-sub">${esc(s.summary)}</p>` : ""}
             </div>`
             )
             .join("")}
@@ -830,7 +1247,6 @@ function wireListActions() {
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
-
       try {
         const csv = await file.text();
         const r = await api("/api/admin/import", { method: "POST", body: { csv } });
@@ -912,6 +1328,14 @@ function shortDate(iso) {
   return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 }
 
+/** ISO timestamp/date -> "YYYY-MM-DD", the only format <input type="date"> accepts. */
+function dateOnly(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toISOString().slice(0, 10);
+}
+
 function emptyState() {
   const div = document.createElement("div");
   div.className = "empty";
@@ -919,7 +1343,7 @@ function emptyState() {
   const copy = {
     all: [
       "Nothing in your database yet",
-      "Import your contact sheet from this tab. Every person in it becomes a row here, claimable on its own.",
+      "Import your contact sheet from this tab and every company in it becomes a lead, with its people attached.",
     ],
     fresh: [
       "No news in the last few days",
@@ -942,6 +1366,65 @@ function emptyState() {
 // ── Card interactions ──────────────────────────────────────────────────────
 
 async function onCardClick(e) {
+  // Admin-only row editor.
+  const editBtn = e.target.closest("[data-edit-contact]");
+  if (editBtn) {
+    e.stopPropagation();
+    return openContactEditor(editBtn.dataset.editContact);
+  }
+
+  // Claiming a PERSON — All Leads rows and the people half of My Outreach.
+  const personBtn = e.target.closest("[data-contact-act]");
+  if (personBtn) {
+    e.stopPropagation();
+    const act = personBtn.dataset.contactAct;
+    try {
+      if (act === "close" || act === "reopen") {
+        await api(`/api/contacts/${personBtn.dataset.id}/close`, {
+          method: "POST",
+          body: { reopen: act === "reopen" },
+        });
+        toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
+      } else {
+        await api(`/api/contacts/${personBtn.dataset.id}/claim`, {
+          method: "POST",
+          body: { release: act === "release" },
+        });
+        toast(act === "release" ? "Released" : "Claimed — 30 days to close");
+      }
+      renderContent();
+      loadStats();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+
+  // My Outreach sub-tab toggle (From All Leads / From Fresh Leads).
+  const mineToggle = e.target.closest("[data-mineview]");
+  if (mineToggle) {
+    e.stopPropagation();
+    state.mineView = mineToggle.dataset.mineview === "fresh" ? "fresh" : "all";
+    renderContent();
+    return;
+  }
+
+  // Newspaper date navigation. Handled here rather than with its own listener
+  // because #content is rebuilt on every render and per-render listeners stack.
+  const nav = e.target.closest("[data-np]");
+  if (nav) {
+    e.stopPropagation();
+    const value = Number(nav.dataset.value);
+
+    if (nav.dataset.np === "year") state.np = { year: value, month: null, day: null };
+    else if (nav.dataset.np === "month") state.np = { ...state.np, month: value, day: null };
+    else if (nav.dataset.np === "day") state.np = { ...state.np, day: value };
+    else state.np = { year: null, month: null, day: null };   // "All dates"
+
+    renderNewspaper();
+    return;
+  }
+
   // Expanding a company into its people — All Leads only.
   const expander = e.target.closest("[data-expand]");
   if (expander) {
@@ -968,7 +1451,10 @@ async function onCardClick(e) {
     try {
       const { contacts } = await api(`/api/leads/${id}/contacts`);
       box.innerHTML = contacts.length
-        ? `<div class="contact-head"><span>Name</span><span>Position</span><span>Email</span><span>Mobile</span><span></span></div>` +
+        ? `<div class="contact-head">
+             <span>Name</span><span>Position</span><span>Email</span>
+             <span>Mobile</span><span>Second mobile</span><span>LinkedIn</span>
+           </div>` +
           contacts
             .map(
               (c) => `<div class="contact-row">
@@ -976,10 +1462,11 @@ async function onCardClick(e) {
                 <span>${esc(c.role || "—")}</span>
                 <span>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—"}</span>
                 <span>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "—"}</span>
+                <span>${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "—"}</span>
                 <span>${
                   c.linkedin
-                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">LinkedIn</a>`
-                    : ""
+                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">Profile</a>`
+                    : "—"
                 }</span>
               </div>`
             )
@@ -987,32 +1474,6 @@ async function onCardClick(e) {
         : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
     } catch (err) {
       box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
-    }
-    return;
-  }
-
-  const personBtn = e.target.closest("[data-contact-act]");
-  if (personBtn) {
-    e.stopPropagation();
-    const act = personBtn.dataset.contactAct;
-    try {
-      if (act === "close" || act === "reopen") {
-        await api(`/api/contacts/${personBtn.dataset.id}/close`, {
-          method: "POST",
-          body: { reopen: act === "reopen" },
-        });
-        toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
-      } else {
-        await api(`/api/contacts/${personBtn.dataset.id}/claim`, {
-          method: "POST",
-          body: { release: act === "release" },
-        });
-        toast(act === "release" ? "Released" : "Claimed — 30 days to close");
-      }
-      renderContent();
-      loadStats();
-    } catch (err) {
-      toast(err.message, true);
     }
     return;
   }
@@ -1054,6 +1515,11 @@ async function onCardClick(e) {
     return;
   }
 
+  // The stage dropdown updates inline via the delegated change listener
+  // below — clicking or picking from it must never also open the drawer
+  // sitting underneath it.
+  if (e.target.closest(".stage-block")) return;
+
   // Rows in All Leads expand rather than open a drawer; everywhere else the
   // card opens the detail panel.
   if (state.tab === "all") return;
@@ -1066,6 +1532,8 @@ async function onCardClick(e) {
 /** The firmographics panel — everything the CSV knew about the company. */
 function companyInfoCard(lead) {
   const rows = [
+    ["Founded", lead.founded],
+    ["Location", companyLocation(lead)],
     ["Industry", lead.industry],
     ["Employees", lead.employees],
     ["Revenue", lead.revenue],
@@ -1113,6 +1581,75 @@ async function openDrawer(id) {
   wireDrawer(lead);
 }
 
+/* ── Unclaimed Fresh Leads modal (admin only) ────────────────────────────── */
+
+function closeUnclaimedModal() {
+  $("#unclaimed-modal").hidden = true;
+  $("#unclaimed-backdrop").hidden = true;
+}
+
+async function openUnclaimedModal() {
+  if (!state.user || state.user.role !== "admin") return;
+
+  const modal = $("#unclaimed-modal");
+  modal.hidden = false;
+  $("#unclaimed-backdrop").hidden = false;
+  modal.innerHTML = `
+    <div class="drawer-head">
+      <h2>Unclaimed Fresh Leads</h2>
+      <button class="drawer-close" id="unclaimed-close">&times;</button>
+    </div>
+    <div class="empty"><p>Loading…</p></div>`;
+  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+
+  let leads, windowDays;
+  try {
+    ({ leads, windowDays } = await api("/api/admin/unclaimed"));
+  } catch (err) {
+    modal.innerHTML = `
+      <div class="drawer-head">
+        <h2>Unclaimed Fresh Leads</h2>
+        <button class="drawer-close" id="unclaimed-close">&times;</button>
+      </div>
+      <div class="empty"><h2>Couldn't load this</h2><p>${esc(err.message)}</p></div>`;
+    $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+    return;
+  }
+
+  modal.innerHTML = `
+    <div class="drawer-head">
+      <h2>Unclaimed Fresh Leads</h2>
+      <button class="drawer-close" id="unclaimed-close">&times;</button>
+    </div>
+    ${
+      leads.length
+        ? leads
+            .map(
+              (l) => `
+        <div class="modal-row" data-open="${l.id}">
+          <div class="modal-row-main">
+            <strong>${esc(l.company)}</strong>
+            <span>
+              ${l.fresh_count} signal${l.fresh_count === 1 ? "" : "s"} in the last ${windowDays} days
+              ${l.top_title ? ` · ${esc(String(l.top_title).slice(0, 70))}` : ""}
+            </span>
+          </div>
+          <span class="muted">${esc(timeAgo(l.last_signal_at) || "")}</span>
+        </div>`
+            )
+            .join("")
+        : `<div class="modal-empty">Nothing sitting unclaimed right now — the team is keeping up.</div>`
+    }`;
+
+  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+  modal.querySelectorAll("[data-open]").forEach((row) =>
+    row.addEventListener("click", () => {
+      closeUnclaimedModal();
+      openDrawer(row.dataset.open);
+    })
+  );
+}
+
 function drawerHtml(lead) {
   const teamOptions = [`<option value="">Unclaimed</option>`]
     .concat(
@@ -1142,15 +1679,27 @@ function drawerHtml(lead) {
   <div class="drawer-body">
 
     ${
+      // This clock and its buttons are the All Leads claim only — the same
+      // company's Fresh Leads claim (if any) has its own owner and clock,
+      // shown in My Outreach → From Fresh Leads, and isn't touched here.
       lead.owner_id
         ? `<div class="drawer-clock">
              ${lead.closed_at ? `<span class="clock clock-done">Closed</span>` : countdownChip(lead.countdown)}
              ${
                lead.closed_at
-                 ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-id="${lead.id}">Reopen</button>`
-                 : `<button class="btn btn-sm btn-primary" data-act="close" data-id="${lead.id}">Mark closed</button>`
+                 ? `<button class="btn btn-sm btn-ghost" data-act="reopen" data-source="all" data-id="${lead.id}">Reopen</button>`
+                 : `<button class="btn btn-sm btn-primary" data-act="close" data-source="all" data-id="${lead.id}">Mark closed</button>`
              }
            </div>`
+        : ""
+    }
+    ${
+      lead.fresh_owner_id
+        ? `<p class="muted" style="margin:-4px 0 12px">
+             Also claimed on Fresh Leads by ${
+               lead.fresh_owner_id === state.user.id ? "you" : esc(lead.fresh_owner_name || "someone else")
+             } — separate claim, separate clock.
+           </p>`
         : ""
     }
 
@@ -1238,7 +1787,6 @@ function drawerHtml(lead) {
                   (s) => `
           <div class="sig-card">
             <span class="type-tag type-${esc(segId(s.signal_type))}">${esc(typeLabel(s.signal_type))}</span>
-            <span class="score ${scoreClass(s.score)}" style="float:right">${s.score}<small>score</small></span>
             <p class="sig-title" style="margin-top:8px">
               <a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title || "Untitled article")}</a>
             </p>
@@ -1303,6 +1851,8 @@ async function loadContacts(lead) {
         ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
         ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
         ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+        ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
+        ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
       </p>
       <button class="chip" data-use="${i}">Use this contact</button>
     </div>`
@@ -1751,13 +2301,20 @@ function wireAdmin() {
       return guard(() => api(`/api/admin/sites/${btn.dataset.siteDel}`, { method: "DELETE" }));
     }
 
-    if (btn.dataset.userToggle)
-      return guard(() =>
-        api(`/api/admin/users/${btn.dataset.userToggle}`, {
+    if (btn.dataset.userToggle) {
+      const activating = btn.dataset.active === "1";
+      return guard(async () => {
+        const r = await api(`/api/admin/users/${btn.dataset.userToggle}`, {
           method: "PATCH",
-          body: { active: btn.dataset.active === "1" },
-        })
-      );
+          body: { active: activating },
+        });
+        if (!activating && r.released) {
+          toast(`Deactivated — ${r.released} lead${r.released === 1 ? "" : "s"} released back to the pool`);
+        } else {
+          toast(activating ? "Reactivated" : "Deactivated");
+        }
+      });
+    }
   });
 }
 
