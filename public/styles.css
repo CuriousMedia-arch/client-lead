@@ -2071,7 +2071,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 }
 .release-note-inline {
   display: inline-block;
-  background: var(--amber-tint);
+  background: #fff;
   color: var(--amber-ink);
   border-radius: var(--radius-sm);
   padding: 3px 7px;
