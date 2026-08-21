@@ -114,6 +114,8 @@ const state = {
   runPoll: null,
   lastRun: null,
   freshWindowDays: 3,
+  pageSize: 50,
+  hasMore: false,
   // Where the Newspaper drill-down currently is. null at a level means that
   // level hasn't been chosen yet, so that's the picker being shown.
   np: { year: null, month: null, day: null },
@@ -266,6 +268,7 @@ function wireEvents() {
     const v = e.target.value.trim();
     searchTimer = setTimeout(() => {
       state.search = v;
+      state.pageSize = 50;
       renderContent({ keepFocus: "f-search" });
     }, 280);
   });
@@ -461,7 +464,7 @@ async function renderContent(opts = {}) {
   if (state.tab === "all") return renderPeople(opts);
   // Claims made in All Leads are on people, so that half of My Outreach is a
   // people list. The Fresh half stays company-level.
-  if (state.tab === "mine" && state.mineView !== "fresh") return renderMyPeople(opts);
+  if (state.tab === "mine") return renderMyPeople(opts);
 
   let leads;
   try {
@@ -483,7 +486,7 @@ async function renderContent(opts = {}) {
 
   // Fresh Leads works the whole company, so it needs to show who already holds
   // which contact — and what they've said — or two people ring the same person.
-  if (state.tab === "fresh") for (const l of leads) loadFreshPeople(l.id);
+  if (state.tab === "fresh") loadFreshPeopleBatch(leads.map((l) => l.id));
 
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
@@ -556,7 +559,10 @@ async function renderPeople(opts = {}) {
     p.set("tab", "all");
     if (state.search) p.set("q", state.search);
     p.set("sort", state.sort === "added" ? "added" : "company");
-    ({ leads } = await api(`/api/leads?${p}`));
+    p.set("limit", String(state.pageSize));
+    const res = await api(`/api/leads?${p}`);
+    leads = res.leads;
+    state.hasMore = Boolean(res.hasMore);
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load leads</h2><p>${esc(err.message)}</p></div>`;
     return;
@@ -565,11 +571,16 @@ async function renderPeople(opts = {}) {
   const body = leads.length
     ? `<div class="db-table">
          <div class="db-head">
-           <span></span><span>Company</span><span>Contacts</span><span>Industry</span>
-           <span>Size</span><span>Revenue</span><span>Founded</span><span></span>
+           <span></span><span>Company</span><span>LinkedIn</span><span>Contacts</span>
+           <span>Industry</span><span>Size</span><span>Revenue</span><span>Founded</span>
          </div>
          ${leads.map(companyRow).join("")}
-       </div>`
+       </div>
+       ${
+         state.hasMore
+           ? `<button class="btn btn-block" id="load-more">Show more companies</button>`
+           : ""
+       }`
     : emptyState().outerHTML;
 
   content.innerHTML = actionBar() + filterBar() + body;
@@ -596,10 +607,13 @@ function companyRow(lead) {
             ? `<a class="company-name" href="${esc(site)}" target="_blank" rel="noopener">${esc(lead.company)}</a>`
             : `<span class="company-name">${esc(lead.company)}</span>`
         }
+      </div>
+
+      <div class="db-cell">
         ${
           lead.linkedin
-            ? `<a class="li-link" href="${esc(lead.linkedin)}" target="_blank" rel="noopener">${linkedinMark()}LinkedIn</a>`
-            : ""
+            ? `<a class="li-link" href="${esc(lead.linkedin)}" target="_blank" rel="noopener">${linkedinMark()}Profile</a>`
+            : `<span class="muted">—</span>`
         }
       </div>
 
@@ -617,7 +631,6 @@ function companyRow(lead) {
       <div class="db-cell">${esc(lead.employees || "—")}</div>
       <div class="db-cell">${esc(lead.revenue || "—")}</div>
       <div class="db-cell">${esc(lead.founded || "—")}</div>
-      <div class="db-cell"></div>
     </div>
     <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
 }
@@ -686,7 +699,6 @@ function pencil() {
 const EDIT_FIELDS = [
   ["name", "Name"],
   ["role", "Position"],
-  ["company", "Company"],
   ["email", "Work email"],
   ["email_alt", "Additional email"],
   ["phone", "Phone 1"],
@@ -697,6 +709,22 @@ const EDIT_FIELDS = [
   ["city", "City"],
   ["state", "State"],
   ["country", "Country"],
+];
+
+/**
+ * Company fields, edited from the same dialog. These belong to the company, so
+ * a correction here reaches every contact there — renaming the company moves
+ * its people with it rather than orphaning them.
+ */
+const COMPANY_EDIT_FIELDS = [
+  ["company", "Company name"],
+  ["company_website", "Website"],
+  ["company_linkedin", "Company LinkedIn"],
+  ["company_domain", "Domain"],
+  ["company_industry", "Industry"],
+  ["company_employees", "Employees"],
+  ["company_revenue", "Revenue"],
+  ["company_founded", "Year founded"],
 ];
 
 const FIELD_LABEL = Object.fromEntries(EDIT_FIELDS);
@@ -811,24 +839,44 @@ async function openContactEditor(id) {
         ).join("")}
       </div>
 
+      <h3 class="editor-section">Company</h3>
+      <div class="grid-2">
+        ${COMPANY_EDIT_FIELDS.map(
+          ([key, label]) => `
+          <label class="field">
+            <span>${esc(label)}</span>
+            <input id="edit-${key}" value="${esc(
+              key === "company" ? contact.company || "" : contact[key] || ""
+            )}" />
+          </label>`
+        ).join("")}
+      </div>
+
       <button class="btn btn-primary btn-block" id="editor-save">Save changes</button>
 
       ${historyPanel(history)}
 
-      <div class="editor-danger">
-        <p class="hint">
-          Deleting removes this person from the database. The company and its
-          other contacts stay. This can't be undone.
-        </p>
-        <button class="btn btn-danger btn-sm" id="editor-delete">Delete contact</button>
-      </div>
+      ${
+        state.user.role === "admin"
+          ? `<div class="editor-danger">
+               <p class="hint">
+                 Deleting removes this person from the database. The company and its
+                 other contacts stay. This can't be undone.
+               </p>
+               <button class="btn btn-danger btn-sm" id="editor-delete">Delete contact</button>
+             </div>`
+          : ""
+      }
     </div>`;
 
   $("#editor-close").addEventListener("click", closeContactEditor);
 
   $("#editor-save").addEventListener("click", async () => {
     const body = {};
-    for (const [key] of EDIT_FIELDS) body[key] = $(`#edit-${key}`).value;
+    for (const [key] of [...EDIT_FIELDS, ...COMPANY_EDIT_FIELDS]) {
+      const input = $(`#edit-${key}`);
+      if (input) body[key] = input.value;
+    }
 
     try {
       await api(`/api/contacts/people/${id}`, { method: "PATCH", body });
@@ -840,7 +888,8 @@ async function openContactEditor(id) {
     }
   });
 
-  $("#editor-delete").addEventListener("click", async () => {
+  const deleteBtn = $("#editor-delete");
+  if (deleteBtn) deleteBtn.addEventListener("click", async () => {
     if (!window.confirm(`Delete ${contact.name}? This can't be undone.`)) return;
     try {
       await api(`/api/contacts/people/${id}`, { method: "DELETE" });
@@ -860,6 +909,154 @@ function pencil() {
     </svg>`;
 }
 
+
+
+/* ── My Outreach ────────────────────────────────────────────────────────── */
+
+const stageLabel = (v) => (STATUSES.find((x) => x[0] === (v || "new")) || ["new", "New"])[1];
+
+const KIND_LABEL = { call: "Call", email: "Email", linkedin: "LinkedIn", meeting: "Meeting", note: "Note" };
+
+/**
+ * Both halves stacked: people claimed in All Leads, companies claimed in Fresh
+ * Leads. They were sub-tabs once, which let a count of 2 sit over an empty
+ * page because the claims were in the tab nobody clicked. Nothing hides now.
+ */
+async function renderMyPeople(opts = {}) {
+  const content = $("#content");
+
+  let contacts = [];
+  let freshLeads = [];
+  try {
+    const [people, leadRes] = await Promise.all([
+      api("/api/contacts/people?mine=1&sort=urgent"),
+      api("/api/leads?tab=mine&limit=100").catch(() => ({ leads: [] })),
+    ]);
+    contacts = people.contacts || [];
+    freshLeads = (leadRes.leads || []).filter((l) => l.fresh_owner_id === state.user.id);
+  } catch (err) {
+    content.innerHTML = `<div class="empty"><h2>Couldn't load your outreach</h2><p>${esc(err.message)}</p></div>`;
+    return;
+  }
+
+  content.innerHTML =
+    actionBar() +
+    (!contacts.length && !freshLeads.length
+      ? `<div class="empty">
+           <h2>You haven't claimed anything yet</h2>
+           <p>Claim a person in All Leads for 30 days, or a company in Fresh Leads for 10.</p>
+         </div>`
+      : `${
+          contacts.length
+            ? `<h2 class="section-head">People from All Leads <span class="pill">${contacts.length}</span></h2>
+               <div class="mylead-grid">${contacts.map(myPersonCard).join("")}</div>`
+            : ""
+        }${
+          freshLeads.length
+            ? `<h2 class="section-head">Companies from Fresh Leads <span class="pill">${freshLeads.length}</span></h2>
+               <div class="mylead-grid">${freshLeads.map((l) => outreachCard(l, "fresh")).join("")}</div>`
+            : ""
+        }`);
+
+  wireListActions();
+  for (const c of contacts) loadContactLog(c.id);
+}
+
+/** Paint one contact's history into its card. */
+async function loadContactLog(id) {
+  const box = $(`#log-${id}`);
+  if (!box) return;
+
+  let activity = [];
+  try {
+    ({ activity } = await api(`/api/contacts/people/${id}/activity`));
+  } catch {
+    box.innerHTML = "";
+    return;
+  }
+
+  box.innerHTML = activity.length
+    ? activity
+        .slice(0, 6)
+        .map(
+          (a) => `
+        <div class="log-item">
+          <div class="log-meta">
+            <span class="log-kind">${esc(KIND_LABEL[a.kind] || a.kind)}</span>
+            <span>${esc(timeAgo(a.created_at))} · ${esc(a.user_name || "Someone")}</span>
+          </div>
+          <p>${esc(a.body)}</p>
+          ${a.stage ? `<span class="log-stage">Moved to ${esc(stageLabel(a.stage))}</span>` : ""}
+        </div>`
+        )
+        .join("")
+    : `<p class="muted">Nothing logged yet. Add the first update below.</p>`;
+}
+
+function myPersonCard(c) {
+  const closed = Boolean(c.closed_at);
+
+  return `
+    <div class="mylead-card ${closed ? "is-closed" : ""}">
+      <div class="mylead-top">
+        <div class="mylead-heading">
+          <div class="company-name">
+            ${c.linkedin
+              ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+              : esc(c.name)}
+          </div>
+          <div class="mylead-meta">${esc(c.role || "—")} · ${esc(c.company)}</div>
+        </div>
+        <div class="mylead-corner">
+          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(c.countdown)}
+        </div>
+      </div>
+
+      <div class="mylead-signals">
+        ${c.email ? `<div><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ""}
+        ${c.phone ? `<div><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ""}
+        ${c.phone2 ? `<div><a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a></div>` : ""}
+        ${!c.email && !c.phone ? `<div class="signal-none">No email or mobile on file.</div>` : ""}
+      </div>
+
+      <div class="progress-block">
+        <div class="progress-head">
+          <span class="filter-label">Progress</span>
+          <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>
+        </div>
+
+        <div class="progress-log" id="log-${c.id}"></div>
+
+        <div class="progress-form">
+          <textarea id="note-${c.id}" rows="2"
+            placeholder="What did you discuss? e.g. Called — asked for the deck, wants pricing by Friday"></textarea>
+          <div class="progress-controls">
+            <select class="filter-select" id="kind-${c.id}">
+              <option value="call">Call</option>
+              <option value="email">Email</option>
+              <option value="linkedin">LinkedIn</option>
+              <option value="meeting">Meeting</option>
+              <option value="note">Note</option>
+            </select>
+            <select class="filter-select" id="stage-${c.id}">
+              <option value="">Stage unchanged</option>
+              ${STATUSES.map(([v, l]) => `<option value="${v}">Move to ${esc(l)}</option>`).join("")}
+            </select>
+            <button class="btn btn-sm btn-primary" data-log-for="${c.id}">Log it</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="mylead-actions">
+        ${
+          closed
+            ? `<button class="btn btn-ghost btn-sm" data-contact-act="reopen" data-id="${c.id}">Reopen</button>`
+            : `<button class="btn btn-sm btn-primary" data-contact-act="close" data-id="${c.id}">Mark closed</button>`
+        }
+        <button class="btn btn-ghost btn-sm release-trigger" data-release-contact="${c.id}">Release</button>
+      </div>
+    </div>`;
+}
 
 /* ── Fresh Leads ─────────────────────────────────────────────────────────── */
 
@@ -1271,6 +1468,16 @@ function wireListActions() {
       } catch (err) {
         toast(err.message, true);
       }
+    });
+  }
+
+  // Ask for a bigger page rather than paging blindly — the list keeps its
+  // place and nobody loses their scroll position.
+  const more = $("#load-more");
+  if (more) {
+    more.addEventListener("click", () => {
+      state.pageSize += 50;
+      renderContent();
     });
   }
 

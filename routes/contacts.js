@@ -363,10 +363,16 @@ router.post("/people/:id/activity", async (req, res, next) => {
  * Editing a row is admin-only. Everyone else reads the database; only an admin
  * corrects it, so a typo fixed in one place stays fixed for the whole team.
  */
+// Fields that live on the contact.
 const EDITABLE = [
   "name", "role", "email", "email_alt", "phone", "phone2",
-  "linkedin", "seniority", "department", "city", "country", "state", "company",
+  "linkedin", "seniority", "department", "city", "country", "state",
 ];
+
+// Fields that live on the company. Editing these from a contact updates the
+// company itself, so every contact there sees the correction — a website fixed
+// once is fixed for all ten people at that firm.
+const COMPANY_EDITABLE = ["website", "linkedin", "domain", "industry", "employees", "revenue", "founded"];
 
 router.patch("/people/:id", async (req, res, next) => {
   try {
@@ -388,13 +394,75 @@ router.patch("/people/:id", async (req, res, next) => {
       sets.push(`${field} = ${bind(value)}`);
     }
 
-    if (!sets.length) return res.status(400).json({ error: "Nothing to change." });
+    let row = before;
 
-    const row = await db.one(
-      `UPDATE company_contacts SET ${sets.join(", ")} WHERE id = ${bind(req.params.id)} RETURNING *`,
-      args
-    );
-    if (!row) return res.status(404).json({ error: "That contact no longer exists." });
+    if (sets.length) {
+      row = await db.one(
+        `UPDATE company_contacts SET ${sets.join(", ")} WHERE id = ${bind(req.params.id)} RETURNING *`,
+        args
+      );
+      if (!row) return res.status(404).json({ error: "That contact no longer exists." });
+    }
+
+    // --- company-level edits -------------------------------------------------
+    const company = await db.one("SELECT * FROM companies WHERE lower(name) = lower($1)", [
+      before.company,
+    ]);
+
+    if (company) {
+      const cSets = [];
+      const cArgs = [];
+      const cBind = (v) => `$${cArgs.push(v)}`;
+
+      for (const field of COMPANY_EDITABLE) {
+        const key = `company_${field}`;
+        if (req.body[key] === undefined) continue;
+        const value = String(req.body[key] || "").trim() || null;
+        if (String(company[field] ?? "") === String(value ?? "")) continue;
+        cSets.push(`${field} = ${cBind(value)}`);
+
+        await db.run(
+          `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [req.params.id, req.user.id, key, company[field], value]
+        );
+      }
+
+      if (cSets.length) {
+        await db.run(`UPDATE companies SET ${cSets.join(", ")} WHERE id = ${cBind(company.id)}`, cArgs);
+      }
+
+      // Renaming a company has to move its contacts with it, or they're
+      // orphaned from the company record and lose their firmographics.
+      const newName = req.body.company === undefined ? null : String(req.body.company || "").trim();
+      if (newName && newName.toLowerCase() !== company.name.toLowerCase()) {
+        const clash = await db.one(
+          "SELECT id FROM companies WHERE lower(name) = lower($1) AND id <> $2",
+          [newName, company.id]
+        );
+        if (clash) {
+          return res.status(409).json({ error: `${newName} already exists as a separate company.` });
+        }
+
+        await db.run("UPDATE companies SET name = $1 WHERE id = $2", [newName, company.id]);
+        await db.run("UPDATE company_contacts SET company = $1 WHERE lower(company) = lower($2)", [
+          newName,
+          company.name,
+        ]);
+
+        await db.run(
+          `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+           VALUES ($1,$2,'company',$3,$4)`,
+          [req.params.id, req.user.id, company.name, newName]
+        );
+
+        row = await db.one("SELECT * FROM company_contacts WHERE id = $1", [req.params.id]);
+      }
+    }
+
+    if (!sets.length && !Object.keys(req.body).some((k) => k.startsWith("company"))) {
+      return res.status(400).json({ error: "Nothing to change." });
+    }
 
     // One log entry per field that actually moved. Append-only: the history is
     // a record of what happened, not something to be tidied up later.

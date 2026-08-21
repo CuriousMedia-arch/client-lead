@@ -1463,16 +1463,17 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
  */
 .db-head, .db-row {
   display: grid;
+  /* Eight tracks for eight columns. A ninth left over from an earlier layout
+     silently pushed every value one column left of its heading. */
   grid-template-columns:
-    32px                  /* expander    */
-    minmax(160px, 1.6fr)  /* company     */
-    104px                 /* contacts    */
-    minmax(88px, .8fr)    /* linkedin    */
-    minmax(110px, 1.1fr)  /* location    */
-    minmax(78px, .65fr)   /* size        */
-    minmax(92px, .8fr)    /* revenue     */
-    minmax(100px, .95fr)  /* owner       */
-    92px;                 /* claim       */
+    32px                  /* expander */
+    minmax(160px, 1.6fr)  /* company   */
+    minmax(88px, .7fr)    /* linkedin  */
+    104px                 /* contacts  */
+    minmax(110px, 1.1fr)  /* industry  */
+    minmax(78px, .65fr)   /* size      */
+    minmax(92px, .85fr)   /* revenue   */
+    minmax(80px, .6fr);   /* founded   */
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
@@ -2059,4 +2060,16 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   text-transform: uppercase;
   letter-spacing: .04em;
   color: var(--ink-faint);
+}
+
+.editor-section {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  font-weight: 500;
+  margin: 22px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }

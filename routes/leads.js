@@ -48,6 +48,10 @@ async function queryLeads(params, user) {
     where.push(`(l.owner_id = ${bind(user.id)} OR l.fresh_owner_id = ${bind(user.id)})`);
   } else if (tab === "newspaper") {
     where.push("l.in_newspaper = true");
+  } else {
+    // All Leads is the real database. Sample rows exist only to demonstrate the
+    // Newspaper and have no place in it.
+    where.push("c.is_sample = false");
   }
   // "all" has no filter: every company on the watchlist, regardless of
   // whether it also happens to be claimed, fresh, or sitting in the
@@ -113,22 +117,23 @@ async function queryLeads(params, user) {
             COALESCE(l.fresh_released_at, l.last_signal_at, l.updated_at) AS newspaper_date,
             u.display_name AS owner_name,
             fu.display_name AS fresh_owner_name,
-            (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id) AS signal_count,
-            (SELECT COUNT(*) FROM signals s WHERE s.lead_id = l.id
-               AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days') AS fresh_count,
-            (SELECT COUNT(*) FROM company_contacts cc
-              WHERE lower(cc.company) = lower(c.name)) AS contact_count
+c.is_sample
        FROM leads l
        JOIN companies c ON c.id = l.company_id
        LEFT JOIN users u  ON u.id = l.owner_id
        LEFT JOIN users fu ON fu.id = l.fresh_owner_id
       ${where.length ? "WHERE " + where.join("\n        AND ") : ""}
       ORDER BY ${orderBy}
-      LIMIT 400`,
+      LIMIT ${bind(Math.min(Number(params.limit) || 50, 200))}
+      OFFSET ${bind(Math.max(Number(params.offset) || 0, 0))}`,
     args
   );
 
   if (!leads.length) return leads;
+
+  // Counts for the returned page only, in a single round trip. These used to be
+  // three correlated subqueries per row — 1,200 of them on a 400-row page.
+  await attachCounts(leads);
 
   // All Leads is a database view — no signals, no pitch. Everywhere else gets
   // the news that justifies the lead.
@@ -157,6 +162,49 @@ async function queryLeads(params, user) {
  * bind parameter because it sits inside an interval literal, and it keeps a
  * value straight off the query string out of the SQL.
  */
+/**
+ * Signal and contact counts for a page of leads.
+ *
+ * Two grouped queries over an indexed id list, rather than a correlated
+ * subquery per row. At 1,500 companies that was 4,500 subqueries a page load;
+ * this is two.
+ */
+async function attachCounts(leads) {
+  const ids = leads.map((l) => l.id);
+  const names = leads.map((l) => String(l.company).toLowerCase());
+
+  const [signalRows, contactRows] = await Promise.all([
+    db.all(
+      `SELECT lead_id,
+              COUNT(*)::int AS signal_count,
+              COUNT(*) FILTER (
+                WHERE COALESCE(published, created_at) >= now() - interval '${FRESH_DAYS} days'
+              )::int AS fresh_count
+         FROM signals
+        WHERE lead_id = ANY($1)
+        GROUP BY lead_id`,
+      [ids]
+    ),
+    db.all(
+      `SELECT lower(company) AS key, COUNT(*)::int AS contact_count
+         FROM company_contacts
+        WHERE lower(company) = ANY($1)
+        GROUP BY lower(company)`,
+      [names]
+    ),
+  ]);
+
+  const bySignal = new Map(signalRows.map((r) => [r.lead_id, r]));
+  const byContact = new Map(contactRows.map((r) => [r.key, r.contact_count]));
+
+  for (const lead of leads) {
+    const sg = bySignal.get(lead.id);
+    lead.signal_count = sg ? sg.signal_count : 0;
+    lead.fresh_count = sg ? sg.fresh_count : 0;
+    lead.contact_count = byContact.get(String(lead.company).toLowerCase()) || 0;
+  }
+}
+
 async function attachSignals(leads, maxAgeDays = null) {
   const window = Number(maxAgeDays);
   const ageFilter =
@@ -219,13 +267,77 @@ router.get("/", async (req, res, next) => {
     // Always settle expired claims before answering, so nobody sees a lead as
     // owned when its clock ran out an hour ago.
     await lifecycle.sweepExpired();
-    res.json({ leads: await queryLeads(req.query, req.user) });
+    const leads = await queryLeads(req.query, req.user);
+    // The client needs to know whether asking for more is worth a round trip.
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    res.json({ leads, hasMore: leads.length === limit });
   } catch (err) {
     next(err);
   }
 });
 
 /** The people behind one company — All Leads expands into this. */
+/**
+ * The same thing for a whole page of leads at once.
+ *
+ * Fresh Leads used to ask for each card's contacts separately — twelve cards
+ * meant twelve round trips before the page settled. This answers all of them
+ * in one, which is the difference between a page that appears and a page that
+ * fills in over several seconds.
+ */
+router.get("/people/batch", async (req, res, next) => {
+  try {
+    const ids = String(req.query.ids || "")
+      .split(",")
+      .map((n) => Number(n))
+      .filter(Number.isFinite)
+      .slice(0, 200);
+
+    if (!ids.length) return res.json({ byLead: {} });
+
+    const rows = await db.all(
+      `SELECT l.id AS lead_id, cc.id, cc.name, cc.role, cc.email, cc.phone,
+              cc.linkedin, cc.owner_id, u.display_name AS owner_name
+         FROM leads l
+         JOIN companies c ON c.id = l.company_id
+         JOIN company_contacts cc ON lower(cc.company) = lower(c.name)
+         LEFT JOIN users u ON u.id = cc.owner_id
+        WHERE l.id = ANY($1)
+        ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
+      [ids]
+    );
+
+    const contactIds = rows.map((r) => r.id);
+    const logs = contactIds.length
+      ? await db.all(
+          `SELECT * FROM (
+             SELECT a.contact_id, a.kind, a.body, a.created_at, u.display_name AS user_name,
+                    ROW_NUMBER() OVER (PARTITION BY a.contact_id ORDER BY a.created_at DESC) AS rn
+               FROM contact_activity a LEFT JOIN users u ON u.id = a.user_id
+              WHERE a.contact_id = ANY($1)
+           ) t WHERE t.rn <= 3`,
+          [contactIds]
+        )
+      : [];
+
+    const logsByContact = new Map();
+    for (const l of logs) {
+      if (!logsByContact.has(l.contact_id)) logsByContact.set(l.contact_id, []);
+      logsByContact.get(l.contact_id).push(l);
+    }
+
+    const byLead = {};
+    for (const r of rows) {
+      if (!byLead[r.lead_id]) byLead[r.lead_id] = [];
+      byLead[r.lead_id].push({ ...r, activity: logsByContact.get(r.id) || [] });
+    }
+
+    res.json({ byLead });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /**
  * Everyone at a company, with who holds each one and what they've logged.
  *

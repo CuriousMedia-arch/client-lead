@@ -520,7 +520,12 @@ const DEMO_RELEASES = [
 router.post("/demo-newspaper", async (req, res, next) => {
   try {
     if (req.body && req.body.clear) {
-      const removed = await db.run("DELETE FROM companies WHERE name LIKE $1", [`%${DEMO_MARK}`]);
+      // Remove by the flag, not by name — an earlier script used a different
+      // marker, and deleting by one name only ever cleared half of them.
+      const removed = await db.run(
+        `DELETE FROM companies
+          WHERE is_sample = true OR name LIKE '%[demo]%' OR name LIKE '%[sample]%'`
+      );
       return res.json({ cleared: removed });
     }
 
@@ -530,9 +535,9 @@ router.post("/demo-newspaper", async (req, res, next) => {
       const display = `${name} ${DEMO_MARK}`;
 
       const company = await db.one(
-        `INSERT INTO companies (name, keywords, active, origin, approval, industry)
-         VALUES ($1, $2::jsonb, false, 'discovered', 'approved', 'Sample data')
-         ON CONFLICT (lower(name)) DO UPDATE SET name = companies.name
+        `INSERT INTO companies (name, keywords, active, origin, approval, industry, is_sample)
+         VALUES ($1, $2::jsonb, false, 'discovered', 'approved', 'Sample data', true)
+         ON CONFLICT (lower(name)) DO UPDATE SET is_sample = true
          RETURNING id`,
         [display, JSON.stringify([name])]
       );
