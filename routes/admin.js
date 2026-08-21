@@ -401,7 +401,7 @@ router.post("/import", async (req, res, next) => {
              (company, name, role, email, email_alt, phone, phone_type, phone2, phone2_type,
               linkedin, notes, seniority, department, city, country, state, is_primary)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-           ON CONFLICT (lower(company), lower(name)) DO UPDATE
+           ON CONFLICT (lower(company), lower(name)) WHERE deleted_at IS NULL DO UPDATE
               SET role        = COALESCE(EXCLUDED.role,        company_contacts.role),
                   email       = COALESCE(EXCLUDED.email,       company_contacts.email),
                   email_alt   = COALESCE(EXCLUDED.email_alt,   company_contacts.email_alt),

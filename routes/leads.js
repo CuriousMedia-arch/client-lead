@@ -188,7 +188,7 @@ async function attachCounts(leads) {
     db.all(
       `SELECT lower(company) AS key, COUNT(*)::int AS contact_count
          FROM company_contacts
-        WHERE lower(company) = ANY($1)
+        WHERE lower(company) = ANY($1) AND deleted_at IS NULL
         GROUP BY lower(company)`,
       [names]
     ),
@@ -302,6 +302,7 @@ router.get("/people/batch", async (req, res, next) => {
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          JOIN company_contacts cc ON lower(cc.company) = lower(c.name)
+                                 AND cc.deleted_at IS NULL
          LEFT JOIN users u ON u.id = cc.owner_id
         WHERE l.id = ANY($1)
         ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
@@ -358,7 +359,7 @@ router.get("/:id/people", async (req, res, next) => {
       `SELECT cc.*, u.display_name AS owner_name
          FROM company_contacts cc
          LEFT JOIN users u ON u.id = cc.owner_id
-        WHERE lower(cc.company) = lower($1)
+        WHERE lower(cc.company) = lower($1) AND cc.deleted_at IS NULL
         ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
       [lead.name]
     );
@@ -397,7 +398,7 @@ router.get("/:id/contacts", async (req, res, next) => {
     const contacts = await db.all(
       `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department, city, is_primary
          FROM company_contacts
-        WHERE lower(company) = lower($1)
+        WHERE lower(company) = lower($1) AND deleted_at IS NULL
         ORDER BY is_primary DESC, name ASC`,
       [lead.name]
     );

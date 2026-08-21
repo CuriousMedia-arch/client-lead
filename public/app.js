@@ -2346,6 +2346,18 @@ async function renderAdmin() {
         : ""
     }
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>Deleted contacts</h3>
+      <p class="hint">
+        Deleting hides a contact rather than destroying it — its import snapshot,
+        edit history and outreach log are kept. Anything here can be put back.
+      </p>
+      <div class="inline-form">
+        <button class="btn" id="deleted-load">Show deleted contacts</button>
+      </div>
+      <div id="deleted-result"></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <h3>Newspaper samples</h3>
       <p class="hint">
         The Newspaper only fills once a Fresh Lead misses its 10-day deadline, so it
@@ -2587,6 +2599,48 @@ function wireAdmin() {
   root.addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (!btn) return;
+
+    if (btn.id === "deleted-load") {
+      const out = $("#deleted-result");
+      out.innerHTML = `<p class="hint" style="margin-top:10px">Loading…</p>`;
+      try {
+        const { contacts } = await api("/api/contacts/deleted");
+        out.innerHTML = contacts.length
+          ? `<div class="rows" style="margin-top:12px">
+               ${contacts
+                 .map(
+                   (c) => `<div class="row">
+                     <div class="row-main">
+                       <strong>${esc(c.name)}</strong>
+                       <span>${esc(c.company)}${c.role ? ` · ${esc(c.role)}` : ""} · deleted ${esc(
+                     timeAgo(c.deleted_at)
+                   )} by ${esc(c.deleted_by_name || "someone")}</span>
+                     </div>
+                     <div class="row-actions">
+                       <button class="btn btn-sm" data-restore="${c.id}">Restore</button>
+                     </div>
+                   </div>`
+                 )
+                 .join("")}
+             </div>`
+          : `<p class="hint" style="margin-top:10px">Nothing has been deleted.</p>`;
+      } catch (err) {
+        out.innerHTML = `<p class="hint" style="margin-top:10px"><strong>${esc(err.message)}</strong></p>`;
+      }
+      return;
+    }
+
+    if (btn.dataset.restore) {
+      try {
+        await api(`/api/contacts/people/${btn.dataset.restore}/restore`, { method: "POST" });
+        toast("Contact restored");
+        $("#deleted-load").click();
+        loadStats();
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
 
     if (btn.id === "demo-add" || btn.id === "demo-clear") {
       const clearing = btn.id === "demo-clear";

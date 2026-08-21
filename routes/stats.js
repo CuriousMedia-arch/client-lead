@@ -32,17 +32,17 @@ router.get("/", async (req, res, next) => {
            -- It used to count leads.owner_id, a company-level All Leads claim
            -- that no longer has a view to appear in — hence a count of 3 over
            -- an empty page.
-           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1)
+           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1 AND deleted_at IS NULL)
             + (SELECT COUNT(*) FROM leads WHERE fresh_owner_id = $1))          AS mine,
            (SELECT COUNT(*) FROM leads WHERE in_newspaper = true)              AS newspaper,
            ((SELECT COUNT(*) FROM company_contacts
-              WHERE owner_id = $1 AND closed_at IS NULL AND deadline_at IS NOT NULL
+              WHERE owner_id = $1 AND deleted_at IS NULL AND closed_at IS NULL AND deadline_at IS NOT NULL
                 AND deadline_at < now() + interval '3 days')
             + (SELECT COUNT(*) FROM leads
                 WHERE fresh_owner_id = $1 AND fresh_closed_at IS NULL
                   AND fresh_deadline_at IS NOT NULL
                   AND fresh_deadline_at < now() + interval '3 days'))          AS due_soon,
-           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1 AND closed_at IS NOT NULL)
+           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1 AND deleted_at IS NULL AND closed_at IS NOT NULL)
             + (SELECT COUNT(*) FROM leads WHERE fresh_owner_id = $1 AND fresh_closed_at IS NOT NULL))
                                                                                AS closed_by_me,
            (SELECT COUNT(*) FROM leads l
@@ -53,7 +53,7 @@ router.get("/", async (req, res, next) => {
            (SELECT COUNT(*) FROM signals)                                      AS total_signals,
            (SELECT COUNT(*) FROM companies WHERE active)                       AS total_companies,
            (SELECT COUNT(*) FROM sites WHERE active)                           AS total_sites,
-           (SELECT COUNT(*) FROM company_contacts)                             AS total_contacts`,
+           (SELECT COUNT(*) FROM company_contacts WHERE deleted_at IS NULL)                             AS total_contacts`,
         [req.user.id, days]
       ),
       db.one("SELECT * FROM runs WHERE status <> 'running' ORDER BY id DESC LIMIT 1"),

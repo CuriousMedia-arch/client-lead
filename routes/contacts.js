@@ -20,7 +20,7 @@ router.get("/", async (req, res, next) => {
     const contacts = await db.all(
       `SELECT id, name, role, email, phone, phone2, linkedin, notes, is_primary
          FROM company_contacts
-        WHERE lower(company) = lower($1)
+        WHERE lower(company) = lower($1) AND deleted_at IS NULL
         ORDER BY is_primary DESC, name ASC`,
       [company]
     );
@@ -86,6 +86,7 @@ function sweepExpiredContacts() {
     `UPDATE company_contacts
         SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL, status = 'new'
       WHERE owner_id IS NOT NULL
+        AND deleted_at IS NULL
         AND closed_at IS NULL
         AND deadline_at IS NOT NULL
         AND deadline_at < now()`
@@ -132,6 +133,7 @@ router.get("/people", async (req, res, next) => {
     const args = [];
     const bind = (v) => `$${args.push(v)}`;
 
+    where.push("cc.deleted_at IS NULL");
     if (req.query.mine === "1") where.push(`cc.owner_id = ${bind(req.user.id)}`);
     if (req.query.q) {
       const q = bind(`%${String(req.query.q).toLowerCase()}%`);
@@ -187,6 +189,7 @@ router.post("/:id/claim", async (req, res, next) => {
       const held = await db.one(
         `SELECT cc.name FROM company_contacts cc
           WHERE cc.owner_id = $1
+            AND cc.deleted_at IS NULL
             AND cc.closed_at IS NULL
             AND lower(cc.company) = (SELECT lower(company) FROM company_contacts WHERE id = $2)
             AND cc.id <> $2
@@ -510,11 +513,84 @@ router.get("/people/:id/history", async (req, res, next) => {
   }
 });
 
+/**
+ * Delete hides the contact rather than destroying it.
+ *
+ * Its import snapshot, edit history and outreach log all hang off this row by
+ * foreign key — a real DELETE would take them with it. Marking it deleted keeps
+ * the record and makes the action reversible.
+ */
 router.delete("/people/:id", requireAdmin, async (req, res, next) => {
   try {
-    const removed = await db.run("DELETE FROM company_contacts WHERE id = $1", [req.params.id]);
-    if (!removed) return res.status(404).json({ error: "That contact no longer exists." });
-    res.json({ ok: true });
+    const row = await db.one(
+      `UPDATE company_contacts
+          SET deleted_at = now(), deleted_by = $1,
+              owner_id = NULL, claimed_at = NULL, deadline_at = NULL
+        WHERE id = $2 AND deleted_at IS NULL
+        RETURNING id, name`,
+      [req.user.id, req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: "That contact no longer exists." });
+
+    await db.run(
+      `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+       VALUES ($1, $2, 'deleted', 'active', 'deleted')`,
+      [req.params.id, req.user.id]
+    );
+
+    res.json({ ok: true, name: row.name });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Everything an admin has deleted, newest first. */
+router.get("/deleted", requireAdmin, async (req, res, next) => {
+  try {
+    const contacts = await db.all(
+      `SELECT cc.id, cc.name, cc.company, cc.role, cc.email, cc.phone,
+              cc.deleted_at, u.display_name AS deleted_by_name
+         FROM company_contacts cc
+         LEFT JOIN users u ON u.id = cc.deleted_by
+        WHERE cc.deleted_at IS NOT NULL
+        ORDER BY cc.deleted_at DESC
+        LIMIT 500`
+    );
+    res.json({ contacts });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Put one back. */
+router.post("/people/:id/restore", requireAdmin, async (req, res, next) => {
+  try {
+    const clash = await db.one(
+      `SELECT id FROM company_contacts
+        WHERE deleted_at IS NULL AND id <> $1
+          AND lower(company) = (SELECT lower(company) FROM company_contacts WHERE id = $1)
+          AND lower(name)    = (SELECT lower(name)    FROM company_contacts WHERE id = $1)`,
+      [req.params.id]
+    );
+    if (clash) {
+      return res.status(409).json({
+        error: "That person has since been added again. Delete the duplicate first.",
+      });
+    }
+
+    const row = await db.one(
+      "UPDATE company_contacts SET deleted_at = NULL, deleted_by = NULL WHERE id = $1 RETURNING *",
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: "That contact no longer exists." });
+
+    await db.run(
+      `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+       VALUES ($1, $2, 'deleted', 'deleted', 'active')`,
+      [req.params.id, req.user.id]
+    );
+
+    res.json({ contact: row });
   } catch (err) {
     next(err);
   }
