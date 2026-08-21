@@ -180,18 +180,46 @@ router.post("/:id/claim", async (req, res, next) => {
     if (releasing && !isOwner && !isAdmin) {
       return res.status(403).json({ error: "Only the owner can release this contact." });
     }
+    // One contact per company per person. Holding three people at one company
+    // is hoarding, not working the account — a colleague should be able to take
+    // a different contact there.
+    if (!releasing && !isOwner) {
+      const held = await db.one(
+        `SELECT cc.name FROM company_contacts cc
+          WHERE cc.owner_id = $1
+            AND cc.closed_at IS NULL
+            AND lower(cc.company) = (SELECT lower(company) FROM company_contacts WHERE id = $2)
+            AND cc.id <> $2
+          LIMIT 1`,
+        [req.user.id, req.params.id]
+      );
+      if (held) {
+        return res.status(409).json({
+          error: `You already have ${held.name} at this company. Close or release them first.`,
+        });
+      }
+    }
+
     if (!releasing && current.owner_id && !isOwner && !isAdmin) {
       return res.status(409).json({
         error: "Someone else is already working this contact.",
       });
     }
 
+    const note = String((req.body && req.body.note) || "").trim();
+    if (releasing && note.length < 3) {
+      return res.status(400).json({
+        error: "Say why you're releasing it, so whoever picks it up knows where things stand.",
+      });
+    }
+
     const row = releasing
       ? await db.one(
           `UPDATE company_contacts
-              SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL, status = 'new'
+              SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
+                  status = 'new', release_note = $2
             WHERE id = $1 RETURNING *`,
-          [req.params.id]
+          [req.params.id, note]
         )
       : await db.one(
           `UPDATE company_contacts
@@ -204,6 +232,15 @@ router.post("/:id/claim", async (req, res, next) => {
         );
 
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
+
+    // The reason goes in the log too, so it sits in the history rather than
+    // only on the row where the next edit could overwrite it.
+    if (releasing) {
+      await db.run(
+        "INSERT INTO contact_activity (contact_id, user_id, kind, body) VALUES ($1,$2,'note',$3)",
+        [req.params.id, req.user.id, `Released — ${note}`]
+      );
+    }
 
     row.countdown = contactCountdown(row);
     res.json({ contact: row });
@@ -331,8 +368,13 @@ const EDITABLE = [
   "linkedin", "seniority", "department", "city", "country", "state", "company",
 ];
 
-router.patch("/people/:id", requireAdmin, async (req, res, next) => {
+router.patch("/people/:id", async (req, res, next) => {
   try {
+    // Anyone on the team can correct a record — a wrong phone number helps
+    // nobody. Deleting is a different matter and stays with admins.
+    const before = await db.one("SELECT * FROM company_contacts WHERE id = $1", [req.params.id]);
+    if (!before) return res.status(404).json({ error: "That contact no longer exists." });
+
     const sets = [];
     const args = [];
     const bind = (v) => `$${args.push(v)}`;
@@ -354,6 +396,21 @@ router.patch("/people/:id", requireAdmin, async (req, res, next) => {
     );
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
 
+    // One log entry per field that actually moved. Append-only: the history is
+    // a record of what happened, not something to be tidied up later.
+    for (const field of EDITABLE) {
+      if (req.body[field] === undefined) continue;
+      const oldValue = before[field] === null ? null : String(before[field]);
+      const newValue = row[field] === null ? null : String(row[field]);
+      if (oldValue === newValue) continue;
+
+      await db.run(
+        `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [req.params.id, req.user.id, field, oldValue, newValue]
+      );
+    }
+
     row.countdown = contactCountdown(row);
     res.json({ contact: row });
   } catch (err) {
@@ -361,6 +418,26 @@ router.patch("/people/:id", requireAdmin, async (req, res, next) => {
     if (err.code === "23505") {
       return res.status(409).json({ error: "That company already has someone with this name." });
     }
+    next(err);
+  }
+});
+
+/** What the sheet said, and everything that's happened to it since. */
+router.get("/people/:id/history", async (req, res, next) => {
+  try {
+    const [original, changes] = await Promise.all([
+      db.one("SELECT * FROM contact_originals WHERE contact_id = $1", [req.params.id]),
+      db.all(
+        `SELECT ch.field, ch.old_value, ch.new_value, ch.changed_at, u.display_name AS user_name
+           FROM contact_changes ch LEFT JOIN users u ON u.id = ch.user_id
+          WHERE ch.contact_id = $1
+          ORDER BY ch.changed_at DESC`,
+        [req.params.id]
+      ),
+    ]);
+
+    res.json({ original: original || null, changes });
+  } catch (err) {
     next(err);
   }
 });

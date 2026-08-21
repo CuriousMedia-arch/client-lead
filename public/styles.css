@@ -1715,7 +1715,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   border-radius: var(--radius);
 }
 
-.people-table { min-width: 2821px; }
+.people-table { min-width: 2180px; }
 
 .people-head, .people-row {
   display: grid;
@@ -1938,3 +1938,125 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .progress-form textarea:focus { background: #fff; }
 .progress-controls { display: flex; gap: 8px; flex-wrap: wrap; }
 .progress-controls .filter-select { flex: 1; min-width: 120px; }
+
+/* ── Contacts inside an expanded company (All Leads) ─────────────────────── */
+
+.contact-head, .contact-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.2fr) minmax(180px, 1.4fr) minmax(140px, 1fr) 150px 160px;
+  gap: 14px;
+  padding: 10px 16px 10px 50px;
+  align-items: center;
+  font-size: 12.5px;
+}
+.contact-row { border-top: 1px solid var(--line); }
+.contact-row.is-locked { opacity: .78; }
+
+.cr-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cr-name > a, .cr-name { font-weight: 600; color: var(--ink); }
+.cr-name > a { color: var(--teal); text-decoration: none; }
+.cr-name > a:hover { text-decoration: underline; }
+.cr-sub { font-weight: 400; font-size: 11.5px; color: var(--ink-faint); }
+
+.cr-reach { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cr-reach a { color: var(--teal); text-decoration: none; overflow: hidden; text-overflow: ellipsis; }
+.cr-reach a:hover { text-decoration: underline; }
+.cr-reach a.alt { color: var(--ink-faint); font-size: 11.5px; }
+
+.cr-owner { display: flex; align-items: center; gap: 6px; }
+.cr-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+/* ── Contacts shown under a Fresh Lead ───────────────────────────────────── */
+
+.fresh-people { display: flex; flex-direction: column; gap: 8px; }
+.fp-label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+}
+.fp-row {
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fp-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fp-name { font-weight: 600; font-size: 13px; }
+.fp-role { font-size: 12px; color: var(--ink-soft); flex: 1; }
+.fp-owner {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--teal-dark);
+  background: var(--teal-tint);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.fp-reach { display: flex; gap: 12px; font-size: 12px; flex-wrap: wrap; }
+.fp-reach a { color: var(--teal); text-decoration: none; }
+
+/* What a colleague has already said to this person. */
+.fp-log { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.fp-log-item span { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.fp-log-item p { margin: 2px 0 0; font-size: 12px; line-height: 1.4; }
+
+/* ── Record history, inside the edit dialog ──────────────────────────────── */
+
+.history-panel { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line); }
+.history-panel h3 {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  font-weight: 500;
+  margin: 0 0 12px;
+}
+
+.history-list { display: flex; flex-direction: column; gap: 10px; }
+
+.history-item { border-left: 2px solid var(--line); padding-left: 10px; }
+.history-meta { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+
+.history-diff {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  margin-top: 3px;
+}
+.history-diff .was { color: var(--ink-faint); text-decoration: line-through; }
+.history-diff .arrow { color: var(--ink-faint); }
+.history-diff .now { color: var(--ink); font-weight: 600; }
+
+.history-original { margin-top: 14px; }
+.history-original summary {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--teal);
+  cursor: pointer;
+}
+.history-original-body {
+  margin-top: 10px;
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+}
+.history-original-body > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; }
+.history-original-body span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+}

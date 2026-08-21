@@ -481,6 +481,10 @@ async function renderContent(opts = {}) {
 
   content.innerHTML = actionBar() + filterBar() + body;
 
+  // Fresh Leads works the whole company, so it needs to show who already holds
+  // which contact — and what they've said — or two people ring the same person.
+  if (state.tab === "fresh") for (const l of leads) loadFreshPeople(l.id);
+
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
   if ($("#f-sort")) $("#f-sort").value = state.sort;
@@ -538,26 +542,144 @@ function companyLocation(lead) {
 // column, and the company domain is gone because the company name already
 // links to the site. Claim is pinned to the right edge so it never scrolls
 // out of reach.
-const PEOPLE_COLUMNS = [
-  ["edit", ""],
-  ["name", "Name"],
-  ["company", "Company"],
-  ["role", "Position"],
-  ["owner", "Owner"],
-  ["email", "Work email"],
-  ["email_alt", "Additional email"],
-  ["phone", "Phone 1"],
-  ["phone2", "Phone 2"],
-  ["seniority", "Seniority"],
-  ["department", "Department"],
-  ["country", "Country"],
-  ["state", "State"],
-  ["city", "City"],
-  ["company_employees", "Employees"],
-  ["company_revenue", "Revenue"],
-  ["company_linkedin", "LinkedIn"],
-  ["actions", ""],
-];
+/**
+ * All Leads is the company database again: one row per company, expanding into
+ * its people. A COMPANY isn't claimed — a person is, and only one person per
+ * company per user, so nobody can sit on a whole account.
+ */
+async function renderPeople(opts = {}) {
+  const content = $("#content");
+
+  let leads;
+  try {
+    const p = new URLSearchParams();
+    p.set("tab", "all");
+    if (state.search) p.set("q", state.search);
+    p.set("sort", state.sort === "added" ? "added" : "company");
+    ({ leads } = await api(`/api/leads?${p}`));
+  } catch (err) {
+    content.innerHTML = `<div class="empty"><h2>Couldn't load leads</h2><p>${esc(err.message)}</p></div>`;
+    return;
+  }
+
+  const body = leads.length
+    ? `<div class="db-table">
+         <div class="db-head">
+           <span></span><span>Company</span><span>Contacts</span><span>Industry</span>
+           <span>Size</span><span>Revenue</span><span>Founded</span><span></span>
+         </div>
+         ${leads.map(companyRow).join("")}
+       </div>`
+    : emptyState().outerHTML;
+
+  content.innerHTML = actionBar() + filterBar() + body;
+  if ($("#f-sort")) $("#f-sort").value = state.sort;
+
+  if (opts.keepFocus) {
+    const el = $("#" + opts.keepFocus);
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }
+
+  wireListActions();
+}
+
+function companyRow(lead) {
+  const site = lead.website || (lead.domain ? `https://${lead.domain}` : null);
+
+  return `
+    <div class="db-row" data-lead="${lead.id}">
+      <button class="db-toggle" data-expand="${lead.id}" aria-label="Show contacts">▸</button>
+
+      <div class="db-company">
+        ${
+          site
+            ? `<a class="company-name" href="${esc(site)}" target="_blank" rel="noopener">${esc(lead.company)}</a>`
+            : `<span class="company-name">${esc(lead.company)}</span>`
+        }
+        ${
+          lead.linkedin
+            ? `<a class="li-link" href="${esc(lead.linkedin)}" target="_blank" rel="noopener">${linkedinMark()}LinkedIn</a>`
+            : ""
+        }
+      </div>
+
+      <div class="db-cell">
+        ${
+          Number(lead.contact_count) > 0
+            ? `<button class="contact-btn" data-expand="${lead.id}">
+                 ${lead.contact_count} contact${Number(lead.contact_count) === 1 ? "" : "s"}
+               </button>`
+            : `<span class="muted">None on file</span>`
+        }
+      </div>
+
+      <div class="db-cell">${esc(lead.industry || "—")}</div>
+      <div class="db-cell">${esc(lead.employees || "—")}</div>
+      <div class="db-cell">${esc(lead.revenue || "—")}</div>
+      <div class="db-cell">${esc(lead.founded || "—")}</div>
+      <div class="db-cell"></div>
+    </div>
+    <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
+}
+
+/** One person inside an expanded company — this is what gets claimed. */
+function contactRow(c) {
+  const isAdmin = state.user.role === "admin";
+  const isOwner = c.owner_id === state.user.id;
+  const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
+
+  return `
+    <div class="contact-row ${locked ? "is-locked" : ""}">
+      <span class="cr-name">
+        ${c.linkedin
+          ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+          : esc(c.name)}
+        <span class="cr-sub">${esc(c.role || "—")}</span>
+      </span>
+
+      <span class="cr-reach">
+        ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
+        ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
+      </span>
+
+      <span class="cr-reach">
+        ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+        ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
+        ${!c.phone && !c.phone2 ? `<span class="muted">—</span>` : ""}
+      </span>
+
+      <span class="cr-owner">
+        ${
+          c.owner_id
+            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
+            : `<span class="muted">Unclaimed</span>`
+        }
+      </span>
+
+      <span class="cr-actions">
+        <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
+        ${
+          isOwner
+            ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
+            : locked
+            ? `<span class="lock-note">Locked</span>`
+            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+        }
+      </span>
+    </div>`;
+}
+
+function linkedinMark() {
+  return `<svg class="li-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.98 3.5a2.5 2.5 0 11-.02 5 2.5 2.5 0 01.02-5zM3 9h4v12H3zM10 9h3.8v1.7h.05c.53-.95 1.83-1.95 3.77-1.95 4.03 0 4.78 2.5 4.78 5.76V21h-4v-5.6c0-1.34-.03-3.06-1.9-3.06-1.9 0-2.2 1.45-2.2 2.96V21h-4z"/>
+    </svg>`;
+}
+
+function pencil() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" class="pencil">
+      <path d="M4 16.5V20h3.5l9.9-9.9-3.5-3.5L4 16.5zM19.7 6.3a1 1 0 000-1.4l-2.6-2.6a1 1 0 00-1.4 0l-1.8 1.8 3.5 3.5 2.3-1.3z"/>
+    </svg>`;
+}
 
 /* ── Admin row editor ────────────────────────────────────────────────────── */
 
@@ -577,6 +699,74 @@ const EDIT_FIELDS = [
   ["country", "Country"],
 ];
 
+const FIELD_LABEL = Object.fromEntries(EDIT_FIELDS);
+
+/**
+ * What the sheet originally said, and every change since.
+ *
+ * Shown here rather than on its own screen because this is where someone is
+ * about to change something — seeing that a colleague already corrected the
+ * phone number last week is the thing that stops it being changed back.
+ */
+function historyPanel(history) {
+  const { original, changes } = history || {};
+  if (!original && (!changes || !changes.length)) return "";
+
+  const shown = (changes || []).slice(0, 12);
+
+  return `
+    <div class="history-panel">
+      <h3>Record history</h3>
+
+      ${
+        shown.length
+          ? `<div class="history-list">
+               ${shown
+                 .map(
+                   (c) => `
+                 <div class="history-item">
+                   <div class="history-meta">
+                     ${esc(FIELD_LABEL[c.field] || c.field)} ·
+                     ${esc(c.user_name || "Someone")} · ${esc(timeAgo(c.changed_at))}
+                   </div>
+                   <div class="history-diff">
+                     <span class="was">${esc(c.old_value || "(empty)")}</span>
+                     <span class="arrow">→</span>
+                     <span class="now">${esc(c.new_value || "(empty)")}</span>
+                   </div>
+                 </div>`
+                 )
+                 .join("")}
+               ${
+                 changes.length > shown.length
+                   ? `<p class="hint">${changes.length - shown.length} older change${
+                       changes.length - shown.length === 1 ? "" : "s"
+                     } not shown.</p>`
+                   : ""
+               }
+             </div>`
+          : `<p class="hint">Nothing has been changed since it was imported.</p>`
+      }
+
+      ${
+        original
+          ? `<details class="history-original">
+               <summary>As originally imported${
+                 original.imported_at ? ` · ${esc(shortDate(original.imported_at))}` : ""
+               }</summary>
+               <div class="history-original-body">
+                 ${EDIT_FIELDS.map(([key, label]) =>
+                   original[key]
+                     ? `<div><span>${esc(label)}</span>${esc(original[key])}</div>`
+                     : ""
+                 ).join("")}
+               </div>
+             </details>`
+          : ""
+      }
+    </div>`;
+}
+
 function closeContactEditor() {
   $("#contact-editor").hidden = true;
   $("#contact-editor-backdrop").hidden = true;
@@ -588,10 +778,14 @@ function closeContactEditor() {
  * private copy of the truth.
  */
 async function openContactEditor(id) {
-  let contact;
+  let contact, history = { original: null, changes: [] };
   try {
-    const { contacts } = await api("/api/contacts/people");
+    const [{ contacts }, hist] = await Promise.all([
+      api("/api/contacts/people"),
+      api(`/api/contacts/people/${id}/history`).catch(() => ({ original: null, changes: [] })),
+    ]);
     contact = contacts.find((c) => String(c.id) === String(id));
+    history = hist;
   } catch (err) {
     return toast(err.message, true);
   }
@@ -618,6 +812,8 @@ async function openContactEditor(id) {
       </div>
 
       <button class="btn btn-primary btn-block" id="editor-save">Save changes</button>
+
+      ${historyPanel(history)}
 
       <div class="editor-danger">
         <p class="hint">
@@ -664,276 +860,6 @@ function pencil() {
     </svg>`;
 }
 
-/** The LinkedIn glyph, so the cell can read as "in  Company". */
-function linkedinMark() {
-  return `<svg class="li-mark" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4.98 3.5a2.5 2.5 0 11-.02 5 2.5 2.5 0 01.02-5zM3 9h4v12H3zM10 9h3.8v1.7h.05c.53-.95 1.83-1.95 3.77-1.95 4.03 0 4.78 2.5 4.78 5.76V21h-4v-5.6c0-1.34-.03-3.06-1.9-3.06-1.9 0-2.2 1.45-2.2 2.96V21h-4z"/>
-    </svg>`;
-}
-
-async function renderPeople(opts = {}) {
-  const content = $("#content");
-
-  let contacts;
-  try {
-    const p = new URLSearchParams();
-    if (state.search) p.set("q", state.search);
-    p.set("sort", state.sort === "name" ? "name" : "company");
-    ({ contacts } = await api(`/api/contacts/people?${p}`));
-  } catch (err) {
-    content.innerHTML = `<div class="empty"><h2>Couldn't load contacts</h2><p>${esc(err.message)}</p></div>`;
-    return;
-  }
-
-  const body = contacts.length
-    ? `<div class="db-scroll">
-         <div class="people-table">
-           <div class="people-head">
-             ${PEOPLE_COLUMNS.map(([k, label]) => `<span class="col-${k}">${esc(label)}</span>`).join("")}
-           </div>
-           ${contacts.map(personRow).join("")}
-         </div>
-       </div>`
-    : emptyState().outerHTML;
-
-  content.innerHTML = actionBar() + filterBar() + body;
-  if ($("#f-sort")) $("#f-sort").value = state.sort;
-
-  if (opts.keepFocus) {
-    const el = $("#" + opts.keepFocus);
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-  }
-
-  wireListActions();
-}
-
-/** My Outreach → From All Leads: the people this user is working. */
-async function renderMyPeople(opts = {}) {
-  const content = $("#content");
-
-  // Fetch both halves, so each sub-tab can show its own count and neither
-  // can hide claims behind a tab nobody thought to click.
-  let contacts = [];
-  let freshCount = 0;
-  try {
-    const [people, leadRes] = await Promise.all([
-      api("/api/contacts/people?mine=1&sort=urgent"),
-      api("/api/leads?tab=mine").catch(() => ({ leads: [] })),
-    ]);
-    contacts = people.contacts;
-    freshCount = (leadRes.leads || []).filter((l) => l.fresh_owner_id === state.user.id).length;
-
-    // Land on the half that actually has something. Defaulting to All Leads
-    // when every claim is a Fresh one shows an empty page over a count of 2.
-    if (!contacts.length && freshCount > 0 && !state.mineViewChosen) {
-      state.mineView = "fresh";
-      return renderContent(opts);
-    }
-  } catch (err) {
-    content.innerHTML = `<div class="empty"><h2>Couldn't load your contacts</h2><p>${esc(err.message)}</p></div>`;
-    return;
-  }
-
-  const subtabs = `
-    <div class="mine-subtabs">
-      <button class="chip is-on" data-mineview="all">
-        From All Leads <span class="pill">${contacts.length}</span>
-      </button>
-      <button class="chip" data-mineview="fresh">
-        From Fresh Leads <span class="pill">${freshCount}</span>
-      </button>
-    </div>`;
-
-  const body = contacts.length
-    ? `<div class="mylead-grid">${contacts.map(myPersonCard).join("")}</div>`
-    : `<div class="empty">
-         <h2>No people claimed yet</h2>
-         <p>Claim someone in All Leads and they appear here with a 30-day countdown.${
-           freshCount ? ` You have ${freshCount} claimed from Fresh Leads — see the tab above.` : ""
-         }</p>
-       </div>`;
-
-  content.innerHTML = actionBar() + subtabs + body;
-  wireListActions();
-  for (const c of contacts) loadContactLog(c.id);
-}
-
-const stageLabel = (v) => (STATUSES.find((x) => x[0] === (v || "new")) || ["new", "New"])[1];
-
-const KIND_LABEL = { call: "Call", email: "Email", linkedin: "LinkedIn", meeting: "Meeting", note: "Note" };
-
-/** Paint one contact's history into its card. */
-async function loadContactLog(id) {
-  const box = $(`#log-${id}`);
-  if (!box) return;
-
-  let activity = [];
-  try {
-    ({ activity } = await api(`/api/contacts/people/${id}/activity`));
-  } catch {
-    box.innerHTML = "";
-    return;
-  }
-
-  box.innerHTML = activity.length
-    ? activity
-        .slice(0, 6)
-        .map(
-          (a) => `
-        <div class="log-item">
-          <div class="log-meta">
-            <span class="log-kind">${esc(KIND_LABEL[a.kind] || a.kind)}</span>
-            <span>${esc(timeAgo(a.created_at))} · ${esc(a.user_name || "Someone")}</span>
-          </div>
-          <p>${esc(a.body)}</p>
-          ${a.stage ? `<span class="log-stage">Moved to ${esc(stageLabel(a.stage))}</span>` : ""}
-        </div>`
-        )
-        .join("")
-    : `<p class="muted">Nothing logged yet. Add the first update below.</p>`;
-}
-
-function myPersonCard(c) {
-  const closed = Boolean(c.closed_at);
-
-  return `
-    <div class="mylead-card ${closed ? "is-closed" : ""}">
-      <div class="mylead-top">
-        <div class="mylead-heading">
-          <div class="company-name">
-            ${c.linkedin
-              ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
-              : esc(c.name)}
-          </div>
-          <div class="mylead-meta">${esc(c.role || "—")} · ${esc(c.company)}</div>
-        </div>
-        <div class="mylead-corner">
-          ${closed ? `<span class="clock clock-done">Closed</span>` : countdownChip(c.countdown)}
-        </div>
-      </div>
-
-      <div class="mylead-signals">
-        ${c.email ? `<div><a href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ""}
-        ${c.phone ? `<div><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></div>` : ""}
-        ${c.phone2 ? `<div><a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a></div>` : ""}
-        ${!c.email && !c.phone ? `<div class="signal-none">No email or mobile on file.</div>` : ""}
-      </div>
-
-      <div class="progress-block">
-        <div class="progress-head">
-          <span class="filter-label">Progress</span>
-          <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>
-        </div>
-
-        <div class="progress-log" id="log-${c.id}"></div>
-
-        <div class="progress-form">
-          <textarea id="note-${c.id}" rows="2"
-            placeholder="What did you discuss? e.g. Called — asked for the deck, wants pricing by Friday"></textarea>
-          <div class="progress-controls">
-            <select class="filter-select" id="kind-${c.id}">
-              <option value="call">Call</option>
-              <option value="email">Email</option>
-              <option value="linkedin">LinkedIn</option>
-              <option value="meeting">Meeting</option>
-              <option value="note">Note</option>
-            </select>
-            <select class="filter-select" id="stage-${c.id}">
-              <option value="">Stage unchanged</option>
-              ${STATUSES.map(([v, l]) => `<option value="${v}">Move to ${esc(l)}</option>`).join("")}
-            </select>
-            <button class="btn btn-sm btn-primary" data-log-for="${c.id}">Log it</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="mylead-actions">
-        ${
-          closed
-            ? `<button class="btn btn-ghost btn-sm" data-contact-act="reopen" data-id="${c.id}">Reopen</button>`
-            : `<button class="btn btn-sm btn-primary" data-contact-act="close" data-id="${c.id}">Mark closed</button>`
-        }
-        <button class="btn btn-ghost btn-sm release-trigger" data-contact-act="release" data-id="${c.id}">Release</button>
-      </div>
-    </div>`;
-}
-
-function personRow(c) {
-  const isAdmin = state.user.role === "admin";
-  const isOwner = c.owner_id === state.user.id;
-  // Claiming locks the row: only the owner works it, and only an admin can
-  // intervene. Everyone else still sees the record, just can't act on it.
-  const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
-
-  const link = (href, text) =>
-    href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>` : esc(text);
-
-  const cell = (key, value) =>
-    `<span class="col-${key}">${value == null || value === "" ? "—" : value}</span>`;
-
-  return `
-    <div class="people-row ${locked ? "is-locked" : ""}" data-contact="${c.id}">
-      <span class="col-edit">
-        ${
-          state.user.role === "admin"
-            ? `<button class="icon-btn" data-edit-contact="${c.id}" title="Edit this row">${pencil()}</button>`
-            : ""
-        }
-      </span>
-
-      <span class="col-name">${link(c.linkedin, c.name)}</span>
-
-      <span class="col-company">
-        ${link(c.company_website || (c.company_domain ? `https://${c.company_domain}` : null), c.company)}
-        ${c.company_founded ? `<span class="col-sub">Founded ${esc(c.company_founded)}</span>` : ""}
-      </span>
-
-      ${cell("role", esc(c.role))}
-
-      <span class="col-owner">
-        ${
-          c.owner_id
-            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(
-                c.owner_name
-              )}</span>`
-            : `<span class="muted">Unclaimed</span>`
-        }
-      </span>
-
-      ${cell("email", c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
-      ${cell("email_alt", c.email_alt ? `<a href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : "")}
-      ${cell("phone", c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
-      ${cell("phone2", c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
-
-      ${cell("seniority", esc(c.seniority))}
-      ${cell("department", esc(c.department))}
-      ${cell("country", esc(c.country))}
-      ${cell("state", esc(c.state))}
-      ${cell("city", esc(c.city))}
-      ${cell("company_employees", esc(c.company_employees))}
-      ${cell("company_revenue", esc(c.company_revenue))}
-      ${cell(
-        "company_linkedin",
-        c.company_linkedin
-          ? `<a class="li-link" href="${esc(c.company_linkedin)}" target="_blank" rel="noopener">${linkedinMark()}${esc(
-              c.company
-            )}</a>`
-          : ""
-      )}
-
-      <span class="col-actions">
-        ${
-          isOwner
-            ? `<button class="btn btn-sm" data-contact-act="release" data-id="${c.id}">Release</button>`
-            : locked
-            ? `<span class="lock-note" title="Claimed by ${esc(c.owner_name || "someone else")}">Locked</span>`
-            : c.owner_id
-            ? `<button class="btn btn-sm" data-contact-act="release" data-id="${c.id}">Release</button>`
-            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
-        }
-      </span>
-    </div>`;
-}
 
 /* ── Fresh Leads ─────────────────────────────────────────────────────────── */
 
@@ -1479,6 +1405,30 @@ async function onCardClick(e) {
     return openContactEditor(editBtn.dataset.editContact);
   }
 
+  // Releasing needs a reason before it will go through.
+  const releaseBtn = e.target.closest("[data-release-contact]");
+  if (releaseBtn) {
+    e.stopPropagation();
+    const note = window.prompt(
+      "Why are you releasing this contact?\n\nWhoever picks it up next will see this."
+    );
+    if (note === null) return;
+    if (note.trim().length < 3) return toast("Give a reason before releasing.", true);
+
+    try {
+      await api(`/api/contacts/${releaseBtn.dataset.releaseContact}/claim`, {
+        method: "POST",
+        body: { release: true, note: note.trim() },
+      });
+      toast("Released");
+      renderContent();
+      loadStats();
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+
   // Claiming a PERSON — All Leads rows and the people half of My Outreach.
   const personBtn = e.target.closest("[data-contact-act]");
   if (personBtn) {
@@ -1556,28 +1506,11 @@ async function onCardClick(e) {
     box.innerHTML = `<p class="muted" style="padding:10px 16px">Loading contacts…</p>`;
 
     try {
-      const { contacts } = await api(`/api/leads/${id}/contacts`);
+      const { contacts } = await api(`/api/leads/${id}/people`);
       box.innerHTML = contacts.length
         ? `<div class="contact-head">
-             <span>Name</span><span>Position</span><span>Email</span>
-             <span>Mobile</span><span>Second mobile</span><span>LinkedIn</span>
-           </div>` +
-          contacts
-            .map(
-              (c) => `<div class="contact-row">
-                <span>${esc(c.name)}${c.is_primary ? ` <span class="poc-flag">Primary</span>` : ""}</span>
-                <span>${esc(c.role || "—")}</span>
-                <span>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "—"}</span>
-                <span>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "—"}</span>
-                <span>${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "—"}</span>
-                <span>${
-                  c.linkedin
-                    ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">Profile</a>`
-                    : "—"
-                }</span>
-              </div>`
-            )
-            .join("")
+             <span>Name</span><span>Email</span><span>Phone</span><span>Owner</span><span></span>
+           </div>` + contacts.map(contactRow).join("")
         : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
     } catch (err) {
       box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
@@ -1597,10 +1530,7 @@ async function onCardClick(e) {
       if (act === "close" || act === "reopen") {
         await api(`/api/leads/${id}/close`, {
           method: "POST",
-          body: {
-            reopen: act === "reopen",
-            source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
-          },
+          body: { reopen: act === "reopen" },
         });
         toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
       } else {

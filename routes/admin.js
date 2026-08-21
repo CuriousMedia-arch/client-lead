@@ -417,12 +417,26 @@ router.post("/import", async (req, res, next) => {
                   department  = COALESCE(EXCLUDED.department,  company_contacts.department),
                   city        = COALESCE(EXCLUDED.city,        company_contacts.city),
                   is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
-           RETURNING (xmax = 0) AS inserted`,
+           RETURNING id, (xmax = 0) AS inserted`,
           [p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_type,
            p.phone2, p.phone2_type, p.linkedin, p.notes, p.seniority, p.department,
            p.city, p.country, p.state, p.is_primary]
         );
-        if (rows[0].inserted) contactsAdded++;
+        if (rows[0].inserted) {
+          contactsAdded++;
+          // Snapshot the row as the sheet delivered it. Written once — later
+          // imports and edits never touch it, so "what did the file say?"
+          // always has an answer.
+          await q(
+            `INSERT INTO contact_originals
+               (contact_id, company, name, role, email, email_alt, phone, phone2,
+                linkedin, seniority, department, city, country, state)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             ON CONFLICT (contact_id) DO NOTHING`,
+            [rows[0].id, p.company, p.name, p.role, p.email, p.email_alt, p.phone,
+             p.phone2, p.linkedin, p.seniority, p.department, p.city, p.country, p.state]
+          );
+        }
       }
     });
 

@@ -183,7 +183,9 @@ async function runDiscovery(runId, log = console.log, counters = null) {
   for (let i = 0; i < fresh.length; i++) {
     const article = fresh[i];
     const e = results[i] || {};
-    if (!e.company) continue;                       // couldn't name it - drop it
+    if (!e.company) continue;
+    // Same rule as the watchlist sweep: no trigger, no signal.
+    if (!e.signal_type || e.signal_type === "none") continue;                       // couldn't name it - drop it
 
     const key = e.company.toLowerCase();
     let company = known.get(key);
@@ -360,6 +362,11 @@ async function saveSignals(articles, enrichment, runId) {
     for (let i = 0; i < articles.length; i++) {
       const article = articles[i];
       const e = enrichment[i] || {};
+
+      // An article with no buying trigger is noise: it inflates the counts,
+      // dilutes the tier and gives a salesperson nothing to act on. Drop it
+      // rather than storing it to be filtered out later.
+      if (!e.signal_type || e.signal_type === "none") continue;
 
       const result = await q(
         `INSERT INTO signals
