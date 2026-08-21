@@ -768,8 +768,12 @@ router.post("/extension-requests/:id/resolve", requireAdmin, async (req, res, ne
     if (approve) {
       if (!days || days < 1) return res.status(400).json({ error: "Enter how many days to grant." });
 
+      // Add the granted days on top of the deadline that's already there,
+      // instead of resetting the clock to "now + days" — the rep still has
+      // whatever time was left, plus this extension.
       await db.run(
-        `UPDATE company_contacts SET deadline_at = now() + ($1 || ' days')::interval
+        `UPDATE company_contacts
+            SET deadline_at = COALESCE(deadline_at, now()) + ($1 || ' days')::interval
           WHERE id = $2`,
         [days, request.contact_id]
       );
