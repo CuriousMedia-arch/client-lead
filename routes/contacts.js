@@ -18,7 +18,8 @@ router.get("/", async (req, res, next) => {
     if (!company) return res.status(400).json({ error: "Which company?" });
 
     const contacts = await db.all(
-      `SELECT id, name, role, email, phone, phone2, linkedin, notes, is_primary
+      `SELECT id, name, role, email, phone, phone2, linkedin, notes,
+              city, state, country, verified, verified_at, is_primary
          FROM company_contacts
         WHERE lower(company) = lower($1) AND deleted_at IS NULL
         ORDER BY is_primary DESC, name ASC`,
@@ -84,7 +85,8 @@ const CLAIM_DAYS = Number(process.env.CLAIM_DAYS_ALL || 30);
 function sweepExpiredContacts() {
   return db.run(
     `UPDATE company_contacts
-        SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL, status = 'new'
+        SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
+            claim_source = NULL, status = 'new'
       WHERE owner_id IS NOT NULL
         AND deleted_at IS NULL
         AND closed_at IS NULL
@@ -119,10 +121,12 @@ const PEOPLE_SELECT = `
          c.revenue      AS company_revenue,
          c.industry     AS company_industry,
          c.specialities AS company_specialities,
-         u.display_name AS owner_name
+         u.display_name  AS owner_name,
+         vu.display_name AS verified_by_name
     FROM company_contacts cc
     LEFT JOIN companies c ON lower(c.name) = lower(cc.company)
-    LEFT JOIN users u ON u.id = cc.owner_id`;
+    LEFT JOIN users u  ON u.id  = cc.owner_id
+    LEFT JOIN users vu ON vu.id = cc.verified_by`;
 
 /** GET /api/contacts/people?q=&mine=1&sort= */
 router.get("/people", async (req, res, next) => {
@@ -182,15 +186,21 @@ router.post("/:id/claim", async (req, res, next) => {
     if (releasing && !isOwner && !isAdmin) {
       return res.status(403).json({ error: "Only the owner can release this contact." });
     }
-    // One contact per company per person. Holding three people at one company
-    // is hoarding, not working the account — a colleague should be able to take
-    // a different contact there.
+    // One contact per company per person, on MANUAL claims. Holding three
+    // people at one company by hand is hoarding, not working the account — a
+    // colleague should be able to take a different contact there.
+    //
+    // Contacts that arrived with a Fresh Leads company claim don't count
+    // against it (claim_source = 'fresh'). Whoever holds the Fresh Lead is
+    // meant to have the whole account for those ten days, so the cap would
+    // otherwise lock them out of the one contact the sweep couldn't take.
     if (!releasing && !isOwner) {
       const held = await db.one(
         `SELECT cc.name FROM company_contacts cc
           WHERE cc.owner_id = $1
             AND cc.deleted_at IS NULL
             AND cc.closed_at IS NULL
+            AND COALESCE(cc.claim_source, 'all') <> 'fresh'
             AND lower(cc.company) = (SELECT lower(company) FROM company_contacts WHERE id = $2)
             AND cc.id <> $2
           LIMIT 1`,
@@ -220,7 +230,7 @@ router.post("/:id/claim", async (req, res, next) => {
       ? await db.one(
           `UPDATE company_contacts
               SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
-                  status = 'new', release_note = $2
+                  claim_source = NULL, status = 'new', release_note = $2
             WHERE id = $1 RETURNING *`,
           [req.params.id, note]
         )
@@ -229,6 +239,7 @@ router.post("/:id/claim", async (req, res, next) => {
               SET owner_id = $1, claimed_at = now(),
                   deadline_at = now() + ($2 || ' days')::interval,
                   closed_at = NULL,
+                  claim_source = 'all',
                   status = CASE WHEN status = 'new' THEN 'working' ELSE status END
             WHERE id = $3 RETURNING *`,
           [req.user.id, CLAIM_DAYS, req.params.id]
@@ -489,6 +500,57 @@ router.patch("/people/:id", async (req, res, next) => {
     if (err.code === "23505") {
       return res.status(409).json({ error: "That company already has someone with this name." });
     }
+    next(err);
+  }
+});
+
+/**
+ * Verified / Unverified — one flag, shared by the whole team.
+ *
+ * Anyone signed in can set it, because anyone can be the person who rang the
+ * number and found it works. The point is that the next person doesn't have to
+ * ring it again, so it can't be a per-user preference: it's stamped on the row
+ * with who did it and when, and it shows for everybody.
+ *
+ * It goes in the change log too, so "who said this was good?" is answerable
+ * six weeks later when the number turns out to be dead after all.
+ */
+router.post("/people/:id/verify", async (req, res, next) => {
+  try {
+    const verified = req.body && req.body.verified === false ? false : true;
+
+    const before = await db.one(
+      "SELECT verified FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!before) return res.status(404).json({ error: "That contact no longer exists." });
+
+    const row = await db.one(
+      `UPDATE company_contacts
+          SET verified    = $1,
+              verified_by = CASE WHEN $1 THEN $2::bigint ELSE NULL END,
+              verified_at = CASE WHEN $1 THEN now() ELSE NULL END
+        WHERE id = $3
+        RETURNING *`,
+      [verified, req.user.id, req.params.id]
+    );
+
+    if (Boolean(before.verified) !== verified) {
+      await db.run(
+        `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
+         VALUES ($1, $2, 'verified', $3, $4)`,
+        [
+          req.params.id,
+          req.user.id,
+          before.verified ? "verified" : "unverified",
+          verified ? "verified" : "unverified",
+        ]
+      );
+    }
+
+    row.countdown = contactCountdown(row);
+    res.json({ contact: row, verified_by_name: verified ? req.user.display_name : null });
+  } catch (err) {
     next(err);
   }
 });

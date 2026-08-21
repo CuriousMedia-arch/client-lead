@@ -49,34 +49,6 @@
     </div>
   </header>
 
-  <section class="stats" id="stats">
-    <article class="stat">
-      <p class="stat-label">Fresh leads</p>
-      <p class="stat-value" data-stat="fresh">0</p>
-      <p class="stat-note">with news in the last few days</p>
-    </article>
-    <article class="stat">
-      <p class="stat-label">Claimed by me</p>
-      <p class="stat-value" data-stat="mine">0</p>
-      <p class="stat-note">open right now</p>
-    </article>
-    <article class="stat">
-      <p class="stat-label">Due within 3 days</p>
-      <p class="stat-value" data-stat="dueSoon">0</p>
-      <p class="stat-note">act on these first</p>
-    </article>
-    <article class="stat">
-      <p class="stat-label">Closed by me</p>
-      <p class="stat-value" data-stat="closedByMe">0</p>
-      <p class="stat-note">done and dusted</p>
-    </article>
-    <article class="stat stat-admin" id="stat-admin-unclaimed" hidden>
-      <p class="stat-label">Unclaimed Fresh Leads</p>
-      <p class="stat-value" data-stat="unclaimedFresh">0</p>
-      <p class="stat-note">admin only · nobody has picked these up</p>
-    </article>
-  </section>
-
   <nav class="tabs" id="tabs">
     <button class="tab is-active" data-tab="all">All Leads <span class="pill" data-count="all">0</span></button>
     <button class="tab" data-tab="fresh">Fresh Leads <span class="pill" data-count="fresh">0</span></button>
@@ -99,9 +71,8 @@
 
 <aside class="drawer" id="drawer" hidden aria-label="Lead detail"></aside>
 
-<!-- ── Unclaimed Fresh Leads (admin only) ───────────────────────────────────── -->
-<div class="modal-backdrop" id="unclaimed-backdrop" hidden></div>
-<aside class="modal-panel" id="unclaimed-modal" hidden aria-label="Unclaimed fresh leads"></aside>
+<!-- Unclaimed Fresh Leads used to be a stat card that opened this panel. It's a
+     block inside the Admin tab now, so there's nothing to pop up. -->
 
 <div class="toast" id="toast" hidden></div>
 

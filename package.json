@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "setup": "node db/seed.js",
-    "scrape": "node services/runOnce.js",
+    "scrape": "node services/runOnce.js company",
+    "scrape:company": "node services/runOnce.js company",
+    "scrape:new": "node services/runOnce.js new",
     "discover": "node services/discoverOnce.js",
     "demo:newspaper": "node scripts/demoNewspaper.js"
   },

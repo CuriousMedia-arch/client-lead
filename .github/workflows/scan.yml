@@ -2,12 +2,28 @@ name: Lead scan
 
 # The scan is far too long for a Vercel function, so it runs here instead and
 # writes straight to Supabase. The deployed app just reads the results.
+#
+# Two cadences, one workflow:
+#   Company Leads - the watchlist sweep, every 3 days (2am IST).
+#   New Leads     - the discovery sweep, daily (3am IST).
 on:
   schedule:
-    # 2am and 2pm IST (cron here is UTC, IST is UTC+5:30).
-    - cron: "30 20 * * *"
-    - cron: "30 8 * * *"
-  workflow_dispatch:        # lets the "Run now" button in the admin tab fire this
+    # 2am IST every 3rd day — Company Leads. Cron here is UTC; IST is UTC+5:30,
+    # so 2am IST is 20:30 the previous day, and the day-of-month step runs it
+    # on the 1st, 4th, 7th and so on.
+    - cron: "30 20 */3 * *"
+    # 3am IST daily — New Leads.
+    - cron: "30 21 * * *"
+  workflow_dispatch:        # lets the Sync buttons in the admin tab fire this
+    inputs:
+      mode:
+        description: "Which sweep to run"
+        required: false
+        default: "company"
+        type: choice
+        options:
+          - company
+          - new
 
 jobs:
   scan:
@@ -24,6 +40,20 @@ jobs:
 
       - run: npm ci
 
+      # A scheduled run doesn't carry inputs, so the mode comes from which of
+      # the two cron lines fired. A manual dispatch uses whatever the button
+      # asked for.
+      - name: Decide which sweep this is
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.mode || 'company' }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 21 * * *" ]; then
+            echo "value=new" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=company" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run the collection cycle
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -32,4 +62,4 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.0-flash' }}
           RESULTS_PER_QUERY: "10"
           REQUEST_DELAY_MS: "500"
-        run: node services/runOnce.js
+        run: node services/runOnce.js ${{ steps.mode.outputs.value }}

@@ -120,15 +120,28 @@ router.get("/discoveries", async (req, res, next) => {
   }
 });
 
+/**
+ * Approving is the ONLY way a discovered company reaches All Leads.
+ *
+ * Until this runs the company sits at approval='pending': claimable from
+ * Fresh Leads > New Leads, invisible in All Leads, and skipped by the
+ * every-3-days watchlist sweep. Approving flips all three at once.
+ */
 router.post("/discoveries/:id/approve", async (req, res, next) => {
   try {
     const row = await db.one(
       `UPDATE companies SET approval = 'approved', active = true
-        WHERE id = $1 AND approval = 'pending' RETURNING id`,
+        WHERE id = $1 AND approval = 'pending' RETURNING id, name`,
       [req.params.id]
     );
     if (!row) return res.status(404).json({ error: "That discovery is no longer pending." });
-    res.json({ ok: true });
+
+    // It needs a lead row to appear in All Leads at all. Discovery normally
+    // creates one, but a company approved before its first signal landed
+    // wouldn't have one yet.
+    await ensureLead(row.id);
+
+    res.json({ ok: true, name: row.name });
   } catch (err) {
     next(err);
   }
@@ -473,6 +486,7 @@ router.get("/unclaimed", async (req, res, next) => {
     const days = Number(process.env.FRESH_WINDOW_DAYS || 3);
     const leads = await db.all(
       `SELECT l.id, c.name AS company, l.last_signal_at,
+              CASE WHEN c.approval = 'pending' THEN 'new' ELSE 'company' END AS kind,
               (SELECT COUNT(*)::int FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval) AS fresh_count,
               (SELECT s.title FROM signals s WHERE s.lead_id = l.id
@@ -480,12 +494,22 @@ router.get("/unclaimed", async (req, res, next) => {
          FROM leads l JOIN companies c ON c.id = l.company_id
         WHERE l.fresh_owner_id IS NULL
           AND l.in_newspaper = false
+          AND c.is_sample = false
+          AND c.approval IN ('approved', 'pending')
           AND EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                        AND COALESCE(s.published, s.created_at) >= now() - ($1 || ' days')::interval)
         ORDER BY l.last_signal_at DESC NULLS LAST`,
       [days]
     );
-    res.json({ leads, windowDays: days });
+
+    // Split here rather than in the browser: the Admin tab shows them as two
+    // lists, matching the two Fresh Leads sub-tabs they came from.
+    res.json({
+      leads,
+      company: leads.filter((l) => l.kind === "company"),
+      fresh: leads.filter((l) => l.kind === "new"),
+      windowDays: days,
+    });
   } catch (err) {
     next(err);
   }
@@ -601,17 +625,32 @@ router.get("/runs", async (req, res, next) => {
   }
 });
 
+/**
+ * Sync one of the two lists.
+ *
+ *   { mode: 'company' } - the watchlist sweep behind Fresh Leads > Company
+ *                         Leads. Scheduled every 3 days.
+ *   { mode: 'new' }     - the discovery sweep behind Fresh Leads > New Leads.
+ *                         Scheduled daily.
+ *
+ * Only one may be in flight at a time, so asking for the second while the
+ * first is running is refused rather than queued.
+ */
 router.post("/run", async (req, res, next) => {
   try {
+    const mode = req.body && req.body.mode === "new" ? "new" : "company";
+    const label = mode === "new" ? "New Leads" : "Company Leads";
+
     // On Vercel a request dies after 60s, and a full cycle takes minutes, so
     // the button asks GitHub Actions to do the work instead. Locally it just
     // runs in-process as before.
     if (remoteRunConfigured()) {
-      await triggerRemoteRun();
+      await triggerRemoteRun(mode);
       return res.json({
         started: true,
         remote: true,
-        message: "Scan queued on GitHub Actions - results appear here in a few minutes.",
+        mode,
+        message: `${label} sync queued on GitHub Actions - results appear here in a few minutes.`,
       });
     }
 
@@ -619,9 +658,16 @@ router.post("/run", async (req, res, next) => {
     if (!process.env.NEWSAPI_AI_KEY) {
       return res.status(400).json({ error: "NEWSAPI_AI_KEY is missing." });
     }
+    if (mode === "new" && !process.env.GEMINI_API_KEY) {
+      return res.status(400).json({
+        error: "New Leads needs GEMINI_API_KEY — discovery can't name companies without it.",
+      });
+    }
 
-    runPipeline("manual").catch((err) => console.error("[run] failed:", err.message));
-    res.json({ started: true, remote: false });
+    runPipeline("manual", console.log, mode).catch((err) =>
+      console.error(`[run:${mode}] failed:`, err.message)
+    );
+    res.json({ started: true, remote: false, mode });
   } catch (err) {
     next(err);
   }

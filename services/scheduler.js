@@ -1,14 +1,58 @@
 const cron = require("node-cron");
 const { runPipeline, isRunning } = require("./pipeline");
 
-// Two cycles a day by default: 2am (overnight news, ready for the morning
-// stand-up) and 2pm (afternoon wire). Override with CRON_SCHEDULE.
-const SCHEDULE = process.env.CRON_SCHEDULE || "0 2,14 * * *";
+/**
+ * Two schedules, because Fresh Leads is two lists on two clocks.
+ *
+ *   Company Leads - the watchlist sweep, every 3 days at 2am. It's the
+ *                   expensive one (a query per watched company across every
+ *                   source) and the companies in it are already ours, so
+ *                   nightly would be spend without news to show for it.
+ *
+ *   New Leads     - the discovery sweep, daily at 3am. This is how unknown
+ *                   companies surface at all, and a company that made the
+ *                   wire on Tuesday is stale by Friday, so it runs every day.
+ *                   Nothing it finds enters All Leads without an admin
+ *                   approving it.
+ *
+ * They're offset by an hour so the two never collide on the same night — only
+ * one run may be in flight at a time.
+ */
+const SCHEDULE_COMPANY = process.env.CRON_SCHEDULE_COMPANY || process.env.CRON_SCHEDULE || "0 2 */3 * *";
+const SCHEDULE_NEW = process.env.CRON_SCHEDULE_NEW || "0 3 * * *";
 const TIMEZONE = process.env.TZ_NAME || "Asia/Kolkata";
+
+// Kept for anything still importing the old single-schedule name.
+const SCHEDULE = SCHEDULE_COMPANY;
+
+function schedule(expression, mode, label) {
+  if (!cron.validate(expression)) {
+    console.error(`[scheduler] "${expression}" is not a valid cron expression. ${label} off.`);
+    return false;
+  }
+
+  cron.schedule(
+    expression,
+    async () => {
+      if (isRunning()) {
+        console.log(`[scheduler] Previous run still going - skipping this ${label} cycle.`);
+        return;
+      }
+      try {
+        await runPipeline("schedule", console.log, mode);
+      } catch (err) {
+        console.error(`[scheduler] ${label} run failed:`, err.message);
+      }
+    },
+    { timezone: TIMEZONE }
+  );
+
+  return true;
+}
 
 function start() {
   // Serverless has no always-on process, so an in-process cron would never
-  // fire. GitHub Actions runs the schedule for the deployed app instead.
+  // fire. GitHub Actions runs both schedules for the deployed app instead.
   if (process.env.VERCEL) return;
 
   if (process.env.DISABLE_SCHEDULER === "true") {
@@ -16,28 +60,13 @@ function start() {
     return;
   }
 
-  if (!cron.validate(SCHEDULE)) {
-    console.error(`[scheduler] "${SCHEDULE}" is not a valid cron expression. Scheduler off.`);
-    return;
+  if (schedule(SCHEDULE_COMPANY, "company", "Company Leads")) {
+    console.log(`[scheduler] Company Leads: "${SCHEDULE_COMPANY}" (${TIMEZONE})`);
   }
 
-  cron.schedule(
-    SCHEDULE,
-    async () => {
-      if (isRunning()) {
-        console.log("[scheduler] Previous run still going - skipping this cycle.");
-        return;
-      }
-      try {
-        await runPipeline("schedule");
-      } catch (err) {
-        console.error("[scheduler] Run failed:", err.message);
-      }
-    },
-    { timezone: TIMEZONE }
-  );
-
-  console.log(`[scheduler] Cycles scheduled: "${SCHEDULE}" (${TIMEZONE})`);
+  if (schedule(SCHEDULE_NEW, "new", "New Leads")) {
+    console.log(`[scheduler] New Leads: "${SCHEDULE_NEW}" (${TIMEZONE})`);
+  }
 }
 
-module.exports = { start, SCHEDULE, TIMEZONE };
+module.exports = { start, SCHEDULE, SCHEDULE_COMPANY, SCHEDULE_NEW, TIMEZONE };

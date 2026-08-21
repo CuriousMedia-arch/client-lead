@@ -161,54 +161,12 @@ a { color: var(--teal); }
 .content { min-width: 0; }
 
 /* ── Stats ───────────────────────────────────────────────────────────────── */
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  max-width: 1180px;
-  margin: 22px auto 0;
-  padding: 0 28px;
-}
-
-.stats:has(.stat-admin:not([hidden])) {
-  grid-template-columns: repeat(5, 1fr);
-}
-
-.stat {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.stat-admin {
-  border-color: var(--teal);
-  background: color-mix(in srgb, var(--teal) 7%, var(--surface));
-  cursor: pointer;
-}
-.stat-admin:hover { box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,.08)); }
-
-.stat-admin .stat-value { color: var(--teal-dark, var(--teal)); }
-
-.stat-label {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  color: var(--ink-faint);
-  margin: 0;
-}
-
-.stat-value {
-  font-family: var(--display);
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1.1;
-  margin: 6px 0 2px;
-}
-
-.stat-note { font-size: 12px; color: var(--ink-soft); margin: 0; }
+/*
+ * The stat strip is gone. Five numbers across the top of every page, four of
+ * which nobody acted on and one of which only admins could — the tab pills
+ * carry the counts that mattered, and Unclaimed Fresh Leads lives in Admin
+ * where the person who can act on it already is.
+ */
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
 
@@ -685,8 +643,36 @@ a { color: var(--teal); }
 
 /* My Outreach — From All Leads / From Fresh Leads. Two separate claims,
    two separate lists; this is just the toggle between them. */
-.mine-subtabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.mine-subtabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; }
 .mine-subtabs .chip .pill { margin-left: 6px; }
+
+/* The one line that says what this half of the list actually is, and how
+   often it refreshes. Sits beside the chips rather than under them so the
+   two sub-tabs stay visually one control. */
+.subtab-note {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.admin-sub {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  margin: 18px 0 0;
+}
+.admin-sub .pill { margin-left: 6px; }
+
+.run-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+
+/* Unclaimed rows open the lead, so they need to look like they're for
+   clicking. */
+.row[data-open-lead] { cursor: pointer; }
+.row[data-open-lead]:hover { border-color: var(--teal); }
 
 .timeline { display: flex; flex-direction: column; }
 
@@ -887,13 +873,12 @@ table.mini tr:last-child td { border-bottom: none; }
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .stats, .stats:has(.stat-admin:not([hidden])) { grid-template-columns: repeat(2, 1fr); }
   .grid-2 { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
   .topbar { padding: 12px 16px; }
-  .stats, .layout { padding-left: 16px; padding-right: 16px; }
+  .layout { padding-left: 16px; padding-right: 16px; }
   .tabs { width: 100%; }
   .lead-top { flex-direction: column; }
 }
@@ -2147,15 +2132,34 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 
 .ct-table { overflow-x: auto; }
 
+/*
+ * Thirteen columns, and the two that matter most are the first and the last.
+ *
+ * Edit and Verify are pinned to the LEFT edge, Claim to the RIGHT, and the
+ * eleven data columns scroll between them. On a 1,900px-wide table the old
+ * layout put both actions off-screen the moment you scrolled to read a phone
+ * number — you'd scroll right to check the row, then scroll back left to do
+ * anything about it. Now both ends stay put.
+ *
+ * City and State are one Location column, which is why this is 13 tracks and
+ * not 14.
+ */
 .ct-head, .ct-row {
   display: grid;
   grid-template-columns:
-    150px 165px 195px 180px 135px 135px
-    105px 125px 100px 115px 95px 130px 130px;
+    /* tools */ 150px
+    /* name */  165px
+    /* role */  180px
+    /* email */ 195px 180px
+    /* phone */ 135px 135px
+    /* org   */ 105px 125px
+    /* place */ 150px 95px
+    /* owner */ 140px
+    /* claim */ 108px;
   gap: 12px;
   align-items: center;
-  padding: 9px 16px 9px 50px;
-  min-width: 1740px;
+  padding: 9px 16px;
+  min-width: 1780px;
 }
 
 .ct-head {
@@ -2173,6 +2177,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   border-top: 1px solid var(--line);
   font-size: 12.5px;
   color: var(--ink-soft);
+  background: var(--surface);
 }
 .ct-row.is-locked { opacity: .78; }
 .ct-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2184,7 +2189,98 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .ct-name a:hover { color: var(--teal) !important; }
 
 .ct-owner { display: flex; align-items: center; gap: 6px; }
-.ct-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+/* ── The two pinned ends ─────────────────────────────────────────────────── */
+
+.ct-head > span:first-child,
+.ct-tools {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* The sticky cell sits on top of the scrolling ones, so it needs its own
+     background or the text underneath shows through it. The negative margin
+     plus padding lets that background cover the row's left padding too. */
+  background: inherit;
+  margin-left: -16px;
+  padding-left: 16px;
+  padding-right: 8px;
+  box-shadow: 1px 0 0 var(--line);
+  overflow: visible !important;
+}
+
+.ct-head > span:last-child,
+.ct-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  background: inherit;
+  margin-right: -16px;
+  padding-right: 16px;
+  padding-left: 8px;
+  box-shadow: -1px 0 0 var(--line);
+  overflow: visible !important;
+}
+
+.ct-head > span:first-child,
+.ct-head > span:last-child { background: var(--surface); }
+
+/* ── Verified / Unverified ───────────────────────────────────────────────── */
+
+/*
+ * One flag, shared by everyone. Anybody can set it, because anybody can be the
+ * person who rang the number and found it works — the whole point is that the
+ * next person doesn't ring it again.
+ */
+.verify-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px 3px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .12s, border-color .12s, background .12s;
+}
+
+.verify-chip:hover { border-color: var(--teal); color: var(--teal); }
+.verify-chip:disabled { opacity: .5; cursor: default; }
+
+.verify-chip.is-verified {
+  color: var(--teal-dark, var(--teal));
+  border-color: var(--teal);
+  background: var(--teal-tint);
+}
+
+.verify-chip .vmark { width: 12px; height: 12px; fill: currentColor; flex: none; }
+
+/* A verified row reads as settled at a glance, without shouting. */
+.ct-row.is-verified .ct-name { color: var(--ink); }
+
+/* Where a contact came from, when it wasn't claimed by hand. */
+.via-fresh {
+  font-family: var(--mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
 
 /* ── Contacts in the lead drawer ─────────────────────────────────────────── */
 

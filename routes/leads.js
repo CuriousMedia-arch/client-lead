@@ -20,6 +20,9 @@ const list = (v) =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+/** Which half of Fresh Leads is being asked for. Anything else is "company". */
+const freshKind = (params) => (params && params.freshKind === "new" ? "new" : "company");
+
 /**
  * The four views are all the same query with a different WHERE.
  *
@@ -39,6 +42,19 @@ async function queryLeads(params, user) {
     // company from All Leads is irrelevant here — that's a different claim.
     where.push("l.fresh_owner_id IS NULL");
     where.push("l.in_newspaper = false");
+    where.push("c.is_sample = false");
+
+    // Fresh Leads is two lists, not one.
+    //
+    //   company - news about companies that are already in All Leads. The
+    //             watchlist sweep finds these, every 3 days.
+    //   new     - companies the discovery sweep turned up that are NOT in All
+    //             Leads. They run daily, they're claimable here, and they stay
+    //             out of All Leads until an admin approves them.
+    where.push(
+      freshKind(params) === "new" ? "c.approval = 'pending'" : "c.approval = 'approved'"
+    );
+
     where.push(
       `EXISTS (SELECT 1 FROM signals s WHERE s.lead_id = l.id
                 AND COALESCE(s.published, s.created_at) >= now() - interval '${FRESH_DAYS} days')`
@@ -52,6 +68,10 @@ async function queryLeads(params, user) {
     // All Leads is the real database. Sample rows exist only to demonstrate the
     // Newspaper and have no place in it.
     where.push("c.is_sample = false");
+    // Nor do companies the discovery sweep found on its own. Those sit in
+    // Fresh Leads > New Leads and only cross over once an admin approves
+    // them — a name Gemini read off an article isn't the contact database.
+    where.push("c.approval = 'approved'");
   }
   // "all" has no filter: every company on the watchlist, regardless of
   // whether it also happens to be claimed, fresh, or sitting in the
@@ -298,7 +318,8 @@ router.get("/people/batch", async (req, res, next) => {
     const rows = await db.all(
       `SELECT l.id AS lead_id, cc.id, cc.name, cc.role, cc.email, cc.phone,
               cc.linkedin, cc.owner_id, cc.status, cc.claimed_at, cc.closed_at,
-              cc.release_note, u.display_name AS owner_name
+              cc.release_note, cc.verified, cc.verified_at, cc.claim_source,
+              u.display_name AS owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          JOIN company_contacts cc ON lower(cc.company) = lower(c.name)
@@ -356,9 +377,10 @@ router.get("/:id/people", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     const contacts = await db.all(
-      `SELECT cc.*, u.display_name AS owner_name
+      `SELECT cc.*, u.display_name AS owner_name, vu.display_name AS verified_by_name
          FROM company_contacts cc
-         LEFT JOIN users u ON u.id = cc.owner_id
+         LEFT JOIN users u  ON u.id  = cc.owner_id
+         LEFT JOIN users vu ON vu.id = cc.verified_by
         WHERE lower(cc.company) = lower($1) AND cc.deleted_at IS NULL
         ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
       [lead.name]
@@ -396,7 +418,8 @@ router.get("/:id/contacts", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     const contacts = await db.all(
-      `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department, city, is_primary
+      `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department,
+              city, state, country, verified, is_primary
          FROM company_contacts
         WHERE lower(company) = lower($1) AND deleted_at IS NULL
         ORDER BY is_primary DESC, name ASC`,
@@ -443,7 +466,8 @@ router.get("/:id", async (req, res, next) => {
         [lead.id]
       ),
       db.all(
-        `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department, city, is_primary
+        `SELECT id, name, role, email, phone, phone2, linkedin, seniority, department,
+                city, state, country, verified, is_primary
            FROM company_contacts WHERE lower(company) = lower($1)
           ORDER BY is_primary DESC, name ASC`,
         [lead.company]
@@ -606,6 +630,29 @@ router.post("/:id/claim", async (req, res, next) => {
         source
       )} days to close`
     );
+
+    // Claiming the company takes its people with it. Only on the Fresh track:
+    // an All Leads claim is a claim on one person, and always has been.
+    if (source !== "all") {
+      const cascade = await lifecycle.cascadeFreshClaim(lead.id, req.user.id);
+      claimed.cascade = cascade;
+
+      if (cascade.claimed.length) {
+        await logActivity(
+          lead.id,
+          req.user.id,
+          "claim",
+          `Also took ${cascade.claimed.length} contact${
+            cascade.claimed.length === 1 ? "" : "s"
+          } at ${cascade.company}` +
+            (cascade.takenOver.length
+              ? ` — ${cascade.takenOver.length} reassigned from ${[
+                  ...new Set(cascade.takenOver.map((t) => t.previous_owner || "someone else")),
+                ].join(", ")}`
+              : "")
+        );
+      }
+    }
 
     if (source === "fresh") claimed.fresh_countdown = lifecycle.countdown(claimed.fresh_deadline_at, claimed.fresh_closed_at);
     else claimed.countdown = lifecycle.countdown(claimed.deadline_at, claimed.closed_at);

@@ -242,22 +242,44 @@ async function runDiscovery(runId, log = console.log, counters = null) {
 }
 
 /**
- * Run the full cycle.
- * @param {string} trigger  'manual' | 'schedule' | 'startup'
+ * Run one cycle.
+ *
+ * There are two, on two different clocks, and a run only ever does one of them:
+ *
+ *   'company' - the watchlist sweep. News about companies already in All Leads.
+ *               Feeds Fresh Leads > Company Leads. Every 3 days.
+ *   'new'     - the discovery sweep. Reads the wire with no company filter and
+ *               lets Gemini name the company, filing anything unknown as
+ *               pending. Feeds Fresh Leads > New Leads. Daily.
+ *
+ * Keeping them apart means the expensive watchlist sweep isn't dragged along
+ * every night just to refresh discoveries, and a failure in one doesn't take
+ * the other's results with it.
+ *
+ * @param {string} trigger  'manual' | 'schedule' | 'startup' | 'login'
  * @param {function} log
+ * @param {string} mode     'company' | 'new'
  */
-async function runPipeline(trigger = "manual", log = console.log) {
+async function runPipeline(trigger = "manual", log = console.log, mode = "company") {
   if (isRunning()) {
     throw new Error("A scrape is already running. Wait for it to finish.");
   }
 
-  const runRow = await db.one("INSERT INTO runs (trigger) VALUES ($1) RETURNING id", [trigger]);
+  const runMode = mode === "new" ? "new" : "company";
+
+  const runRow = await db.one(
+    "INSERT INTO runs (trigger, mode) VALUES ($1, $2) RETURNING id",
+    [trigger, runMode]
+  );
   const runId = runRow.id;
 
-  const queries = await buildQueries();
+  // The discovery sweep issues its own queries from the keyword playbook, so
+  // the watchlist query plan is only built for a company run.
+  const queries = runMode === "company" ? await buildQueries() : [];
   currentRun = {
     id: runId,
     trigger,
+    mode: runMode,
     startedAt: new Date().toISOString(),
     total: queries.length,
     done: 0,
@@ -267,6 +289,26 @@ async function runPipeline(trigger = "manual", log = console.log) {
   };
 
   await backfillLeads();
+
+  // --- New Leads: discovery only -------------------------------------------
+  if (runMode === "new") {
+    currentRun.phase = "discovery";
+    try {
+      currentRun.newSignals = await runDiscovery(runId, log, currentRun);
+      await recomputeLeadRollups();
+      await finishRun(runId, currentRun, "done", null);
+      log(`[run ${runId}] Discovery done. ${currentRun.newSignals} new signals stored.`);
+    } catch (err) {
+      await finishRun(runId, currentRun, "failed", err.message);
+      log(`[run ${runId}] Discovery failed: ${err.message}`);
+      currentRun = null;
+      throw err;
+    }
+
+    const snapshot = runState();
+    currentRun = null;
+    return snapshot;
+  }
 
   if (queries.length === 0) {
     await finishRun(runId, currentRun, "done", "Nothing to run - add a company and a source first.");
@@ -319,10 +361,10 @@ async function runPipeline(trigger = "manual", log = console.log) {
       currentRun.newSignals = await saveSignals(fresh, enrichment, runId);
     }
 
-    // Fresh Leads is news about companies already in the database, so the
-    // portal no longer hunts for unknown companies. The sweep is kept behind a
-    // flag rather than deleted, in case that changes back.
-    if (process.env.DISCOVERY_ENABLED === "true") {
+    // Discovery has its own daily run now, so a company cycle doesn't carry it
+    // by default. Set DISCOVERY_IN_COMPANY_RUN=true to fold it back in — useful
+    // locally, where you'd rather press one button than two.
+    if (process.env.DISCOVERY_IN_COMPANY_RUN === "true") {
       currentRun.phase = "discovery";
       try {
         currentRun.newSignals += await runDiscovery(runId, log, currentRun);
@@ -448,6 +490,20 @@ async function recomputeLeadRollups() {
   }
 }
 
+/** How long ago each cadence last completed, so the UI can say so per list. */
+async function lastRunByMode() {
+  const rows = await db.all(
+    `SELECT DISTINCT ON (mode) mode, id, trigger, status, fetched, new_signals,
+            errors, message, started_at, finished_at
+       FROM runs
+      WHERE status <> 'running'
+      ORDER BY mode, id DESC`
+  );
+  const byMode = { company: null, new: null };
+  for (const r of rows) byMode[r.mode] = r;
+  return byMode;
+}
+
 function finishRun(runId, state, status, message) {
   return db.run(
     `UPDATE runs
@@ -461,6 +517,7 @@ function finishRun(runId, state, status, message) {
 module.exports = {
   runPipeline,
   runDiscovery,
+  lastRunByMode,
   buildQueries,
   isRunning,
   runState,

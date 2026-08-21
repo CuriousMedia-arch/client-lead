@@ -103,6 +103,11 @@ const state = {
   // Which sub-list "My Outreach" is showing — claims from All Leads or from
   // Fresh Leads. They're separate commitments, so they never mix in one list.
   mineView: "all",
+  // Which half of Fresh Leads is showing: "company" (already in All Leads,
+  // synced every 3 days) or "new" (discovered, synced daily, not in All Leads
+  // until an admin approves it).
+  freshView: "company",
+  freshCounts: { company: 0, new: 0 },
   search: "",
   types: new Set(),
   statuses: new Set(),
@@ -113,6 +118,10 @@ const state = {
   scanning: false,
   runPoll: null,
   lastRun: null,
+  // Last completed sync per cadence — the two lists move on different clocks,
+  // so one "last synced" line would be wrong for one of them.
+  lastRunCompany: null,
+  lastRunNew: null,
   freshWindowDays: 3,
   pageSize: 50,
   hasMore: false,
@@ -209,7 +218,6 @@ async function enterApp(user) {
   $("#me-name").textContent = user.name;
   $("#me-role").textContent = user.role === "admin" ? "Admin" : "Team";
   $("#tab-admin").hidden = user.role !== "admin";
-  $("#stat-admin-unclaimed").hidden = user.role !== "admin";
 
   // Fire the roster alongside the dashboard rather than before it - on a
   // remote database each sequential request is a fresh round trip of latency.
@@ -293,11 +301,8 @@ function wireEvents() {
   $("#contact-editor-backdrop").addEventListener("click", closeContactEditor);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
-    if (e.key === "Escape" && !$("#unclaimed-modal").hidden) closeUnclaimedModal();
+    if (e.key === "Escape" && !$("#contact-editor").hidden) closeContactEditor();
   });
-
-  $("#stat-admin-unclaimed").addEventListener("click", openUnclaimedModal);
-  $("#unclaimed-backdrop").addEventListener("click", closeUnclaimedModal);
 }
 
 function toggleSet(set, value, chip) {
@@ -315,12 +320,10 @@ async function refresh() {
 async function loadStats() {
   try {
     const data = await api("/api/stats");
-    for (const [key, value] of Object.entries(data.stats)) {
-      const el = $(`[data-stat="${key}"]`);
-      if (el) el.textContent = value;
-    }
-    // One pill per tab. These were still pointing at the old tab names, which
-    // is why every count sat at zero.
+    // The stat strip is gone — the numbers that mattered are on the tabs and
+    // inside Admin now, so nothing here writes to a card any more.
+    //
+    // One pill per tab.
     for (const [tab, value] of [
       ["all", data.totals.leads],
       ["fresh", data.totals.fresh],
@@ -330,10 +333,16 @@ async function loadStats() {
       const pill = $(`[data-count="${tab}"]`);
       if (pill) pill.textContent = value;
     }
+    state.freshCounts = {
+      company: (data.totals && data.totals.freshCompany) || 0,
+      new: (data.totals && data.totals.freshNew) || 0,
+    };
     state.freshWindowDays = (data.schedule && data.schedule.freshWindowDays) || 3;
     state.schedule = data.schedule;
     state.run = data.run;
     state.lastRun = data.run.last;
+    state.lastRunCompany = data.run.lastCompany || null;
+    state.lastRunNew = data.run.lastNew || null;
     if (data.run.running && !state.scanning) { state.scanning = true; pollRun(); }
   } catch (err) {
     if (err.status === 401) location.reload();
@@ -343,6 +352,7 @@ async function loadStats() {
 function currentQuery() {
   const p = new URLSearchParams();
   p.set("tab", state.tab);
+  if (state.tab === "fresh") p.set("freshKind", state.freshView === "new" ? "new" : "company");
   if (state.search) p.set("q", state.search);
   if (state.freshness) p.set("freshness", state.freshness);
   if (state.types.size) p.set("types", [...state.types].join(","));
@@ -361,7 +371,7 @@ const PAGE_COPY = {
   all: ["All Leads", "Your contact database. Claim one and you have 30 days to close it."],
   fresh: [
     "Fresh Leads",
-    "News from the last 3 days only. Claim one and you have 10 days.",
+    "News from the last 3 days only. Claim one and you have 10 days — and the company's contacts come with it.",
   ],
   mine: [
     "My Outreach",
@@ -373,9 +383,27 @@ const PAGE_COPY = {
   ],
 };
 
+/**
+ * Which sync cadence the page in front of you is fed by.
+ *
+ * Company Leads comes off the watchlist sweep, every 3 days. New Leads comes
+ * off the discovery sweep, daily. Everywhere else reads whichever ran last,
+ * because those views aren't tied to one sweep.
+ */
+function syncInfo() {
+  if (state.tab === "fresh" && state.freshView === "new") {
+    return { run: state.lastRunNew, everyDays: 1, label: "New Leads", mode: "new" };
+  }
+  if (state.tab === "fresh") {
+    return { run: state.lastRunCompany, everyDays: 3, label: "Company Leads", mode: "company" };
+  }
+  return { run: state.lastRun, everyDays: 3, label: null, mode: "company" };
+}
+
 function actionBar() {
   const [title, desc] = PAGE_COPY[state.tab] || ["Leads", ""];
-  const run = state.lastRun;
+  const { run, everyDays, label, mode } = syncInfo();
+  const cadence = everyDays === 1 ? "daily" : `every ${everyDays} days`;
 
   return `
     <div class="action-bar">
@@ -386,10 +414,10 @@ function actionBar() {
           <span class="scan-dot"></span>
           ${
             run && run.finished_at
-              ? `Last sync ${esc(timeAgo(run.finished_at))} · syncs every ${
-                  state.freshWindowDays || 3
-                } days`
-              : "Not synced yet"
+              ? `${label ? esc(label) + " l" : "L"}ast synced ${esc(
+                  timeAgo(run.finished_at)
+                )} · syncs ${cadence}`
+              : `${label ? esc(label) + " n" : "N"}ot synced yet · syncs ${cadence}`
           }
         </p>
       </div>
@@ -402,12 +430,47 @@ function actionBar() {
                       <button class="btn" id="ab-upload">Import contacts (CSV)</button>`
                    : ""
                }
-               <button class="btn btn-primary" id="ab-scan" ${state.scanning ? "disabled" : ""}>
-                 ${state.scanning ? "Syncing…" : "Sync"}
+               <button class="btn btn-primary" id="ab-scan" data-mode="${mode}" ${
+                 state.scanning ? "disabled" : ""
+               }>
+                 ${
+                   state.scanning
+                     ? "Syncing…"
+                     : label
+                     ? `Sync ${esc(label)}`
+                     : "Sync"
+                 }
                </button>
              </div>`
           : ""
       }
+    </div>`;
+}
+
+/**
+ * The two halves of Fresh Leads.
+ *
+ * Company Leads is news about companies already in All Leads. New Leads is
+ * everything else the discovery sweep turned up — claimable here, but not in
+ * the contact database and not going there without an admin approving it.
+ */
+function freshSubtabs() {
+  const view = state.freshView === "new" ? "new" : "company";
+  return `
+    <div class="mine-subtabs">
+      <button class="chip ${view === "company" ? "is-on" : ""}" data-freshview="company">
+        Company Leads <span class="pill">${state.freshCounts.company || 0}</span>
+      </button>
+      <button class="chip ${view === "new" ? "is-on" : ""}" data-freshview="new">
+        New Leads <span class="pill">${state.freshCounts.new || 0}</span>
+      </button>
+      <span class="subtab-note">
+        ${
+          view === "new"
+            ? "Companies the sweep found that aren't in All Leads. Synced daily. Claim freely — nothing here joins All Leads until an admin approves it."
+            : "News about companies already in All Leads. Synced every 3 days."
+        }
+      </span>
     </div>`;
 }
 
@@ -474,13 +537,17 @@ async function renderContent(opts = {}) {
     return;
   }
 
-  const body = !leads.length
-    ? emptyState().outerHTML
-    : state.tab === "newspaper"
-    ? newspaperView(leads)
-    : state.tab === "fresh"
-    ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
-    : myOutreachView(leads);
+  const body =
+    state.tab === "fresh"
+      ? freshSubtabs() +
+        (leads.length
+          ? `<div class="mylead-grid">${leads.map(freshCard).join("")}</div>`
+          : emptyState().outerHTML)
+      : !leads.length
+      ? emptyState().outerHTML
+      : state.tab === "newspaper"
+      ? newspaperView(leads)
+      : myOutreachView(leads);
 
   content.innerHTML = actionBar() + filterBar() + body;
 
@@ -634,14 +701,62 @@ function companyRow(lead) {
     <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
 }
 
-/** Column headings for the expanded contact table. */
+/**
+ * Column headings for the expanded contact table.
+ *
+ * The first column isn't data — it's the two things you do to a row (correct
+ * it, vouch for it), pinned to the left edge. The last is Claim, pinned to the
+ * right edge. Everything in between scrolls between them.
+ *
+ * City and State are one Location column now. They were two columns that were
+ * each half a fact, and the sheet leaves State blank for Delhi and the union
+ * territories, so one of them was empty on a good share of rows anyway.
+ */
 const CONTACT_COLUMNS = [
-  "Name", "Position", "Work email", "Additional email", "Phone 1", "Phone 2",
-  "Seniority", "Department", "City", "State", "Country", "Owner", "",
+  "", "Name", "Position", "Work email", "Additional email", "Phone 1", "Phone 2",
+  "Seniority", "Department", "Location", "Country", "Owner", "",
 ];
 
 function contactHead() {
   return `<div class="ct-head">${CONTACT_COLUMNS.map((h) => `<span>${esc(h)}</span>`).join("")}</div>`;
+}
+
+/** "City, State" — or whichever half the row actually has. */
+function contactLocation(c) {
+  return [c.city, c.state].filter(Boolean).join(", ");
+}
+
+/**
+ * The verified badge — one flag for the whole team.
+ *
+ * Anyone can set it, because anyone can be the person who rang the number and
+ * found it works. The point is that the next person doesn't repeat the call,
+ * so it can't be a private note: it's stamped on the row and everybody sees
+ * the same badge, with who vouched for it in the tooltip.
+ */
+function verifyChip(c) {
+  const on = Boolean(c.verified);
+  const who = c.verified_by_name ? `Verified by ${c.verified_by_name}` : "Verified";
+  const when = c.verified_at ? ` · ${timeAgo(c.verified_at)}` : "";
+
+  return `<button class="verify-chip ${on ? "is-verified" : ""}"
+                  data-verify="${c.id}" data-to="${on ? 0 : 1}"
+                  title="${esc(on ? who + when + " — click to unverify" : "Not verified yet — click if you've checked these details")}">
+      ${on ? tickMark() : circleMark()}
+      <span>${on ? "Verified" : "Unverified"}</span>
+    </button>`;
+}
+
+function tickMark() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" class="vmark">
+      <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1.2 14.4L6.4 12l1.4-1.4 3 3 6-6L18.2 9l-7.4 7.4z"/>
+    </svg>`;
+}
+
+function circleMark() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" class="vmark">
+      <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 2a8 8 0 110 16 8 8 0 010-16z"/>
+    </svg>`;
 }
 
 /**
@@ -649,16 +764,25 @@ function contactHead() {
  *
  * A row under proper headings, not labelled fragments. How the outreach is
  * GOING isn't here: that belongs to whoever holds the Fresh Lead.
+ *
+ * A contact swept up by a Fresh Leads company claim says so, because "why do I
+ * suddenly own eleven people at Zepto" deserves an answer on the row itself.
  */
 function contactRow(c) {
   const isAdmin = state.user.role === "admin";
   const isOwner = c.owner_id === state.user.id;
   const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
+  const viaFresh = c.claim_source === "fresh";
 
   const cell = (v) => `<span>${v == null || v === "" ? "—" : v}</span>`;
 
   return `
-    <div class="ct-row ${locked ? "is-locked" : ""}">
+    <div class="ct-row ${locked ? "is-locked" : ""} ${c.verified ? "is-verified" : ""}">
+      <span class="ct-tools">
+        <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
+        ${verifyChip(c)}
+      </span>
+
       <span class="ct-name">
         ${c.linkedin
           ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
@@ -671,26 +795,25 @@ function contactRow(c) {
       ${cell(c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
       ${cell(esc(c.seniority))}
       ${cell(esc(c.department))}
-      ${cell(esc(c.city))}
-      ${cell(esc(c.state))}
+      ${cell(esc(contactLocation(c)))}
       ${cell(esc(c.country))}
 
       <span class="ct-owner">
         ${
           c.owner_id
-            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
+            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>
+               ${viaFresh ? `<span class="via-fresh" title="Came with the Fresh Leads claim on this company">via Fresh</span>` : ""}`
             : `<span class="muted">Unclaimed</span>`
         }
       </span>
 
       <span class="ct-actions">
-        <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
         ${
           isOwner
             ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
             : locked
             ? `<span class="lock-note">Locked</span>`
-            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+            : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
         }
       </span>
     </div>`;
@@ -1528,11 +1651,15 @@ function wireListActions() {
   const scan = $("#ab-scan");
   if (scan) {
     scan.addEventListener("click", async () => {
+      // Which list you're looking at decides which sweep runs. The two are on
+      // different clocks and cost very different amounts, so "Sync" on New
+      // Leads must not drag the whole watchlist along with it.
+      const mode = scan.dataset.mode === "new" ? "new" : "company";
       state.scanning = true;
       renderContent();
       try {
-        await api("/api/admin/run", { method: "POST" });
-        toast("Syncing — this takes a few minutes");
+        const r = await api("/api/admin/run", { method: "POST", body: { mode } });
+        toast(r.message || "Syncing — this takes a few minutes");
         pollRun();
       } catch (err) {
         state.scanning = false;
@@ -1602,10 +1729,16 @@ function emptyState() {
       "Nothing in your database yet",
       "Import your contact sheet from this tab and every company in it becomes a lead, with its people attached.",
     ],
-    fresh: [
-      "No news in the last few days",
-      "Fresh Leads shows companies from your database that made the news. Refresh, or widen the window in settings.",
-    ],
+    fresh:
+      state.freshView === "new"
+        ? [
+            "No new companies right now",
+            "New Leads shows companies the daily sweep found in the news that aren't in All Leads yet. Nothing turned up in the last few days.",
+          ]
+        : [
+            "No news in the last few days",
+            "Company Leads shows companies from your database that made the news. It syncs every 3 days — or widen the window in settings.",
+          ],
     mine: [
       "You haven't claimed anything yet",
       "Claim from All Leads for a 30-day window, or from Fresh Leads for 10 days. They collect here with their countdown.",
@@ -1646,6 +1779,47 @@ async function onCardClick(e) {
     } catch (err) {
       toast(err.message, true);
     }
+    return;
+  }
+
+  // Verified / Unverified. Anyone can set it and it shows for everyone, so
+  // the row is repainted from the server's answer rather than toggled
+  // optimistically — the badge has to be the truth, not this tab's guess.
+  const verifyBtn = e.target.closest("[data-verify]");
+  if (verifyBtn) {
+    e.stopPropagation();
+    const id = verifyBtn.dataset.verify;
+    const to = verifyBtn.dataset.to === "1";
+
+    verifyBtn.disabled = true;
+    try {
+      const { contact, verified_by_name } = await api(`/api/contacts/people/${id}/verify`, {
+        method: "POST",
+        body: { verified: to },
+      });
+
+      // Swap the chip in place. Re-rendering the whole page would collapse
+      // every company someone had expanded to get here.
+      const fresh = { ...contact, verified_by_name };
+      verifyBtn.outerHTML = verifyChip(fresh);
+      const row = $(`[data-verify="${id}"]`).closest(".ct-row");
+      if (row) row.classList.toggle("is-verified", Boolean(contact.verified));
+
+      toast(to ? "Marked verified — the whole team sees this" : "Marked unverified");
+    } catch (err) {
+      verifyBtn.disabled = false;
+      toast(err.message, true);
+    }
+    return;
+  }
+
+  // Fresh Leads sub-tab toggle (Company Leads / New Leads).
+  const freshToggle = e.target.closest("[data-freshview]");
+  if (freshToggle) {
+    e.stopPropagation();
+    state.freshView = freshToggle.dataset.freshview === "new" ? "new" : "company";
+    state.pageSize = 50;
+    renderContent();
     return;
   }
 
@@ -1793,7 +1967,7 @@ async function onCardClick(e) {
         }
 
         // Where it was claimed from decides the deadline: 10 days or 30.
-        await api(`/api/leads/${id}/claim`, {
+        const { lead } = await api(`/api/leads/${id}/claim`, {
           method: "POST",
           body: {
             release: act === "release",
@@ -1801,12 +1975,25 @@ async function onCardClick(e) {
             source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
           },
         });
+
+        // A fresh claim takes the company's people with it. Say how many, and
+        // say plainly if any were reassigned — someone else just lost a row
+        // and the person who took it should know that happened.
+        const swept = lead && lead.cascade;
+        const sweptNote =
+          swept && swept.claimed && swept.claimed.length
+            ? ` · ${swept.claimed.length} contact${swept.claimed.length === 1 ? "" : "s"} came with it` +
+              (swept.takenOver && swept.takenOver.length
+                ? ` (${swept.takenOver.length} reassigned)`
+                : "")
+            : "";
+
         toast(
           act === "release"
             ? "Released"
             : actionBtn.dataset.source === "newspaper"
-            ? "Picked up — no deadline on this one"
-            : `Claimed — ${actionBtn.dataset.source === "fresh" ? 10 : 30} days to close`
+            ? `Picked up — no deadline on this one${sweptNote}`
+            : `Claimed — ${actionBtn.dataset.source === "fresh" ? 10 : 30} days to close${sweptNote}`
         );
       }
       refresh();
@@ -1882,73 +2069,61 @@ async function openDrawer(id) {
   wireDrawer(lead);
 }
 
-/* ── Unclaimed Fresh Leads modal (admin only) ────────────────────────────── */
+/* ── Unclaimed Fresh Leads (admin only) ──────────────────────────────────── */
 
-function closeUnclaimedModal() {
-  $("#unclaimed-modal").hidden = true;
-  $("#unclaimed-backdrop").hidden = true;
-}
+/**
+ * Unclaimed Fresh Leads — an Admin block now, not a stat card with a modal.
+ *
+ * It was a number in the top strip that opened a panel, which meant the one
+ * person who could act on it saw it constantly and everybody else saw it
+ * never. It belongs where the rest of the oversight lives.
+ *
+ * Split the same way Fresh Leads is, because the two lists mean different
+ * things: an unclaimed Company Lead is news about an account the team already
+ * owns and walked past. An unclaimed New Lead is a company nobody has decided
+ * about yet, and it may want approving rather than claiming.
+ */
+function unclaimedBlock(data) {
+  const rows = (list, emptyCopy) =>
+    list.length
+      ? `<div class="rows" style="margin-top:12px">
+           ${list
+             .map(
+               (l) => `<div class="row" data-open-lead="${l.id}">
+                 <div class="row-main">
+                   <strong>${esc(l.company)}</strong>
+                   <span>
+                     ${l.fresh_count} signal${l.fresh_count === 1 ? "" : "s"} in the last ${
+                 data.windowDays
+               } days${l.top_title ? ` · ${esc(String(l.top_title).slice(0, 70))}` : ""}
+                   </span>
+                 </div>
+                 <span class="muted">${esc(timeAgo(l.last_signal_at) || "")}</span>
+               </div>`
+             )
+             .join("")}
+         </div>`
+      : `<p class="hint" style="margin-top:10px">${esc(emptyCopy)}</p>`;
 
-async function openUnclaimedModal() {
-  if (!state.user || state.user.role !== "admin") return;
+  const company = data.company || [];
+  const fresh = data.fresh || [];
 
-  const modal = $("#unclaimed-modal");
-  modal.hidden = false;
-  $("#unclaimed-backdrop").hidden = false;
-  modal.innerHTML = `
-    <div class="drawer-head">
-      <h2>Unclaimed Fresh Leads</h2>
-      <button class="drawer-close" id="unclaimed-close">&times;</button>
-    </div>
-    <div class="empty"><p>Loading…</p></div>`;
-  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
+  return `
+    <div class="admin-block" style="margin-bottom:16px">
+      <h3>Unclaimed Fresh Leads <span class="pill">${company.length + fresh.length}</span></h3>
+      <p class="hint">
+        News from the last ${data.windowDays} days that nobody has picked up. Click one to open it.
+      </p>
 
-  let leads, windowDays;
-  try {
-    ({ leads, windowDays } = await api("/api/admin/unclaimed"));
-  } catch (err) {
-    modal.innerHTML = `
-      <div class="drawer-head">
-        <h2>Unclaimed Fresh Leads</h2>
-        <button class="drawer-close" id="unclaimed-close">&times;</button>
-      </div>
-      <div class="empty"><h2>Couldn't load this</h2><p>${esc(err.message)}</p></div>`;
-    $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
-    return;
-  }
+      <h4 class="admin-sub">Company Leads <span class="pill">${company.length}</span></h4>
+      ${rows(company, "Nothing sitting unclaimed — the team is keeping up.")}
 
-  modal.innerHTML = `
-    <div class="drawer-head">
-      <h2>Unclaimed Fresh Leads</h2>
-      <button class="drawer-close" id="unclaimed-close">&times;</button>
-    </div>
-    ${
-      leads.length
-        ? leads
-            .map(
-              (l) => `
-        <div class="modal-row" data-open="${l.id}">
-          <div class="modal-row-main">
-            <strong>${esc(l.company)}</strong>
-            <span>
-              ${l.fresh_count} signal${l.fresh_count === 1 ? "" : "s"} in the last ${windowDays} days
-              ${l.top_title ? ` · ${esc(String(l.top_title).slice(0, 70))}` : ""}
-            </span>
-          </div>
-          <span class="muted">${esc(timeAgo(l.last_signal_at) || "")}</span>
-        </div>`
-            )
-            .join("")
-        : `<div class="modal-empty">Nothing sitting unclaimed right now — the team is keeping up.</div>`
-    }`;
-
-  $("#unclaimed-close").addEventListener("click", closeUnclaimedModal);
-  modal.querySelectorAll("[data-open]").forEach((row) =>
-    row.addEventListener("click", () => {
-      closeUnclaimedModal();
-      openDrawer(row.dataset.open);
-    })
-  );
+      <h4 class="admin-sub">New Leads <span class="pill">${fresh.length}</span></h4>
+      ${rows(
+        fresh,
+        "No unclaimed discoveries. Anything the daily sweep finds shows up here first."
+      )}
+    </div>`;
 }
 
 function drawerHtml(lead) {
@@ -2295,16 +2470,18 @@ async function renderAdmin() {
   const content = $("#content");
   content.innerHTML = `<div class="empty"><p>Loading…</p></div>`;
 
-  let companies, sites, users, runs, topics, discovered;
+  let companies, sites, users, runs, topics, discovered, unclaimed;
   try {
-    [{ companies }, { sites }, { users }, runs, { topics }, discovered] = await Promise.all([
-      api("/api/admin/companies"),
-      api("/api/admin/sites"),
-      api("/api/admin/users"),
-      api("/api/admin/runs"),
-      api("/api/admin/topics"),
-      api("/api/admin/discoveries").catch(() => ({ companies: [] })),
-    ]);
+    [{ companies }, { sites }, { users }, runs, { topics }, discovered, unclaimed] =
+      await Promise.all([
+        api("/api/admin/companies"),
+        api("/api/admin/sites"),
+        api("/api/admin/users"),
+        api("/api/admin/runs"),
+        api("/api/admin/topics"),
+        api("/api/admin/discoveries").catch(() => ({ companies: [] })),
+        api("/api/admin/unclaimed").catch(() => ({ company: [], fresh: [], windowDays: 3 })),
+      ]);
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Admin unavailable</h2><p>${esc(err.message)}</p></div>`;
     return;
@@ -2314,14 +2491,17 @@ async function renderAdmin() {
 
   content.innerHTML = `
     <div id="admin-root">
+    ${unclaimedBlock(unclaimed)}
     ${
       discovered && discovered.companies.length
         ? `<div class="admin-block" style="margin-bottom:16px">
              <h3>Discovered companies <span class="pill">${discovered.companies.length}</span></h3>
              <p class="hint">
-               The sweep found these in the news. They're already visible in Fresh Leads and can be
-               claimed. Approving one adds it to the watchlist so it gets scanned every cycle.
-               Rejecting hides it for good.
+               The daily discovery sweep found these in the news. They already show in
+               <strong>Fresh Leads &rsaquo; New Leads</strong> and can be claimed from there.
+               They are <strong>not</strong> in All Leads and won't be until you approve one —
+               approving adds it to the watchlist, so it joins All Leads and gets swept with the
+               other companies every 3 days. Rejecting hides it for good.
              </p>
              <div class="rows" style="margin-top:12px">
                ${discovered.companies
@@ -2400,22 +2580,33 @@ async function renderAdmin() {
     <div class="admin-block" style="margin-bottom:16px">
       <div class="runbar">
         <div>
-          <h3>Collection cycle</h3>
+          <h3>Collection cycles</h3>
           <p class="hint" id="run-hint">
-            ${runs.queryCount} queries per cycle (${companies.filter((c) => c.active).length} companies ×
-            ${sites.filter((s) => s.active).length} sources).
-            Scheduled ${esc(state.schedule ? state.schedule.cron : "0 2,14 * * *")} (${esc(state.schedule ? state.schedule.timezone : "")}).
+            <strong>Company Leads</strong> — the watchlist sweep. ${runs.queryCount} queries per cycle
+            (${companies.filter((c) => c.active).length} companies × ${sites.filter((s) => s.active).length} sources),
+            scheduled ${esc(state.schedule ? state.schedule.cronCompany || state.schedule.cron : "0 2 */3 * *")}
+            (${esc(state.schedule ? state.schedule.timezone : "")}) — every 3 days.
+            <br />
+            <strong>New Leads</strong> — the discovery sweep. Reads the same sources with no company
+            filter and lets Gemini name the company, scheduled
+            ${esc(state.schedule ? state.schedule.cronNew || "0 3 * * *" : "0 3 * * *")} — daily.
+            Nothing it finds enters All Leads until you approve it above.
             ${runs.hasNewsKey ? "" : "<strong>NEWSAPI_AI_KEY is missing from .env.</strong>"}
-            ${runs.hasGeminiKey ? "" : "Gemini key not set — signals will be classified by keyword only."}
+            ${runs.hasGeminiKey ? "" : "<strong>Gemini key not set — New Leads can't run without it.</strong>"}
           </p>
         </div>
-        <button class="btn btn-primary" id="run-now" ${runs.running ? "disabled" : ""}>
-          ${runs.running ? "Running…" : "Run a cycle now"}
-        </button>
+        <div class="run-buttons">
+          <button class="btn btn-primary" id="run-now" data-mode="company" ${runs.running ? "disabled" : ""}>
+            ${runs.running ? "Running…" : "Sync Company Leads"}
+          </button>
+          <button class="btn" id="run-now-new" data-mode="new" ${runs.running ? "disabled" : ""}>
+            ${runs.running ? "Running…" : "Sync New Leads"}
+          </button>
+        </div>
       </div>
       <div id="run-progress"></div>
       <table class="mini" style="margin-top:14px">
-        <thead><tr><th>Started</th><th>Trigger</th><th>Fetched</th><th>New</th><th>Errors</th><th>Status</th></tr></thead>
+        <thead><tr><th>Started</th><th>List</th><th>Trigger</th><th>Fetched</th><th>New</th><th>Errors</th><th>Status</th></tr></thead>
         <tbody>
           ${
             runs.runs.length
@@ -2423,6 +2614,7 @@ async function renderAdmin() {
                   .map(
                     (r) => `<tr>
                       <td>${esc(timeAgo(r.started_at))}</td>
+                      <td>${esc(r.mode === "new" ? "New Leads" : "Company Leads")}</td>
                       <td>${esc(r.trigger)}</td>
                       <td>${r.fetched}</td>
                       <td>${r.new_signals}</td>
@@ -2431,7 +2623,7 @@ async function renderAdmin() {
                     </tr>`
                   )
                   .join("")
-              : `<tr><td colspan="6">No cycles have run yet.</td></tr>`
+              : `<tr><td colspan="7">No cycles have run yet.</td></tr>`
           }
         </tbody>
       </table>
@@ -2542,15 +2734,30 @@ function wireAdmin() {
     catch (err) { toast(err.message, true); }
   };
 
-  $("#run-now").addEventListener("click", async () => {
-    try {
-      await api("/api/admin/run", { method: "POST" });
-      toast("Cycle started");
-      $("#run-now").disabled = true;
-      $("#run-now").textContent = "Running…";
-      pollRun();
-    } catch (err) { toast(err.message, true); }
-  });
+  // Two buttons, two sweeps. Only one run may be in flight, so both are
+  // disabled the moment either starts.
+  for (const id of ["#run-now", "#run-now-new"]) {
+    const btn = $(id);
+    if (!btn) continue;
+
+    btn.addEventListener("click", async () => {
+      const mode = btn.dataset.mode === "new" ? "new" : "company";
+      try {
+        const r = await api("/api/admin/run", { method: "POST", body: { mode } });
+        toast(r.message || `${mode === "new" ? "New Leads" : "Company Leads"} cycle started`);
+        for (const other of ["#run-now", "#run-now-new"]) {
+          const el = $(other);
+          if (el) { el.disabled = true; el.textContent = "Running…"; }
+        }
+        pollRun();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
+  // Rows in the unclaimed block open the lead, same as the old modal did.
+  root.querySelectorAll("[data-open-lead]").forEach((row) =>
+    row.addEventListener("click", () => openDrawer(row.dataset.openLead))
+  );
 
   $("#co-add").addEventListener("click", () =>
     guard(async () => {
