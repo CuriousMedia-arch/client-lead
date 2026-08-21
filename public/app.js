@@ -486,7 +486,6 @@ async function renderContent(opts = {}) {
 
   // Fresh Leads works the whole company, so it needs to show who already holds
   // which contact — and what they've said — or two people ring the same person.
-  if (state.tab === "fresh") loadFreshPeopleBatch(leads.map((l) => l.id));
 
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
@@ -635,69 +634,65 @@ function companyRow(lead) {
     <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
 }
 
+/** Column headings for the expanded contact table. */
+const CONTACT_COLUMNS = [
+  "Name", "Position", "Work email", "Additional email", "Phone 1", "Phone 2",
+  "Seniority", "Department", "City", "State", "Country", "Owner", "",
+];
+
+function contactHead() {
+  return `<div class="ct-head">${CONTACT_COLUMNS.map((h) => `<span>${esc(h)}</span>`).join("")}</div>`;
+}
+
 /**
  * One person inside an expanded company — this is what gets claimed.
  *
- * Every field from the sheet, laid out over two lines: who they are and how to
- * reach them on top, the rest underneath. How the outreach is GOING isn't here
- * — that belongs to whoever holds the Fresh Lead for this company.
+ * A row under proper headings, not labelled fragments. How the outreach is
+ * GOING isn't here: that belongs to whoever holds the Fresh Lead.
  */
 function contactRow(c) {
   const isAdmin = state.user.role === "admin";
   const isOwner = c.owner_id === state.user.id;
   const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
 
-  const detail = [
-    ["Seniority", c.seniority],
-    ["Department", c.department],
-    ["City", c.city],
-    ["State", c.state],
-    ["Country", c.country],
-  ].filter(([, v]) => v);
+  const cell = (v) => `<span>${v == null || v === "" ? "—" : v}</span>`;
 
   return `
-    <div class="contact-card ${locked ? "is-locked" : ""}">
-      <div class="cc-main">
-        <div class="cc-who">
-          <span class="cc-name">
-            ${c.linkedin
-              ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
-              : esc(c.name)}
-          </span>
-          <span class="cc-role">${esc(c.role || "—")}</span>
-        </div>
+    <div class="ct-row ${locked ? "is-locked" : ""}">
+      <span class="ct-name">
+        ${c.linkedin
+          ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+          : esc(c.name)}
+      </span>
+      ${cell(esc(c.role))}
+      ${cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
+      ${cell(c.email_alt ? `<a href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : "")}
+      ${cell(c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
+      ${cell(c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
+      ${cell(esc(c.seniority))}
+      ${cell(esc(c.department))}
+      ${cell(esc(c.city))}
+      ${cell(esc(c.state))}
+      ${cell(esc(c.country))}
 
-        <div class="cc-reach">
-          ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
-          ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
-          ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
-          ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
-        </div>
+      <span class="ct-owner">
+        ${
+          c.owner_id
+            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
+            : `<span class="muted">Unclaimed</span>`
+        }
+      </span>
 
-        <div class="cc-actions">
-          ${
-            c.owner_id
-              ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
-              : `<span class="muted">Unclaimed</span>`
-          }
-          <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
-          ${
-            isOwner
-              ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
-              : locked
-              ? `<span class="lock-note">Locked</span>`
-              : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
-          }
-        </div>
-      </div>
-
-      ${
-        detail.length
-          ? `<div class="cc-detail">
-               ${detail.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(v)}</span>`).join("")}
-             </div>`
-          : ""
-      }
+      <span class="ct-actions">
+        <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
+        ${
+          isOwner
+            ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
+            : locked
+            ? `<span class="lock-note">Locked</span>`
+            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+        }
+      </span>
     </div>`;
 }
 
@@ -1112,7 +1107,7 @@ function myPersonCard(c) {
 /** News on a company you already have. Claimable, no Inspect. */
 function freshCard(lead) {
   return `
-    <div class="mylead-card">
+    <div class="mylead-card" data-lead="${lead.id}">
       <div class="mylead-top">
         <div class="mylead-heading">
           <div class="company-name">${esc(lead.company)}</div>
@@ -1764,7 +1759,7 @@ async function onCardClick(e) {
     try {
       const { contacts } = await api(`/api/leads/${id}/people`);
       box.innerHTML = contacts.length
-        ? contacts.map(contactRow).join("")
+        ? `<div class="ct-table">${contactHead()}${contacts.map(contactRow).join("")}</div>`
         : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
     } catch (err) {
       box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
@@ -2127,32 +2122,49 @@ function timelineHtml(activity) {
     .join("");
 }
 
-/** Pull every known POC for this company out of Supabase. */
+/**
+ * The people at this company, inside the lead drawer.
+ *
+ * When you hold the Fresh Lead you're working the whole account, so this has
+ * to show who already has each contact, how far they've got, and what they've
+ * said — otherwise two people ring the same person in the same week. It also
+ * shows why anyone handed a contact back.
+ */
 async function loadContacts(lead) {
   const box = $("#d-poc");
   if (!box) return;
 
-  let data;
+  let contacts = [];
   try {
-    data = await api(`/api/contacts?company=${encodeURIComponent(lead.company)}`);
+    ({ contacts } = await api(`/api/leads/${lead.id}/people`));
   } catch (err) {
     box.innerHTML = `<p class="sig-sub">${esc(err.message)}</p>`;
     return;
   }
 
-  if (!data.contacts.length) {
-    box.innerHTML = `<p class="sig-sub">Nobody on file for ${esc(lead.company)} yet. Fill the fields below and hit “Add to directory”.</p>`;
+  if (!contacts.length) {
+    box.innerHTML = `<p class="sig-sub">Nobody on file for ${esc(lead.company)} yet.</p>`;
     return;
   }
 
-  box.innerHTML = data.contacts
+  box.innerHTML = contacts
     .map(
       (c, i) => `
-    <div class="poc-card">
-      <p class="poc-name">
-        ${esc(c.name)}${c.is_primary ? `<span class="poc-flag">Primary</span>` : ""}
-      </p>
+    <div class="poc-card ${c.owner_id && c.owner_id !== state.user.id ? "is-taken" : ""}">
+      <div class="poc-head">
+        <p class="poc-name">${esc(c.name)}</p>
+        ${
+          c.owner_id
+            ? `<span class="poc-owner">
+                 ${esc(c.owner_name)}${c.owner_id === state.user.id ? " (you)" : ""}
+               </span>
+               <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>`
+            : `<span class="poc-free">Unclaimed</span>`
+        }
+      </div>
+
       ${c.role ? `<p class="poc-role">${esc(c.role)}</p>` : ""}
+
       <p class="poc-reach">
         ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
         ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
@@ -2160,10 +2172,44 @@ async function loadContacts(lead) {
         ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
         ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
       </p>
-      <button class="chip" data-use="${i}">Use this contact</button>
+
+      ${
+        !c.owner_id && c.release_note
+          ? `<div class="release-note">Handed back: ${esc(c.release_note)}</div>`
+          : ""
+      }
+
+      ${
+        c.activity && c.activity.length
+          ? `<div class="poc-log">
+               ${c.activity
+                 .slice(0, 3)
+                 .map(
+                   (a) => `<div class="poc-log-item">
+                     <span>${esc(KIND_LABEL[a.kind] || a.kind)} · ${esc(timeAgo(a.created_at))} · ${esc(
+                     a.user_name || "Someone"
+                   )}</span>
+                     <p>${esc(a.body)}</p>
+                   </div>`
+                 )
+                 .join("")}
+             </div>`
+          : ""
+      }
+
+      <div class="poc-actions">
+        <button class="chip" data-use="${i}">Use this contact</button>
+        ${
+          !c.owner_id
+            ? `<button class="chip" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+            : ""
+        }
+      </div>
     </div>`
     )
     .join("");
+
+  const data = { contacts };
 
   box.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-use]");

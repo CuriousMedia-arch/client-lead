@@ -2142,3 +2142,69 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   .cc-main { grid-template-columns: minmax(0, 1fr); }
   .cc-actions { justify-content: flex-start; }
 }
+
+/* ── Expanded contacts: a table under its own headings ───────────────────── */
+
+.ct-table { overflow-x: auto; }
+
+.ct-head, .ct-row {
+  display: grid;
+  grid-template-columns:
+    150px 165px 195px 180px 135px 135px
+    105px 125px 100px 115px 95px 130px 130px;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 16px 9px 50px;
+  min-width: 1740px;
+}
+
+.ct-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+.ct-row {
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.ct-row.is-locked { opacity: .78; }
+.ct-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-row a { color: var(--teal); text-decoration: none; }
+.ct-row a:hover { text-decoration: underline; }
+
+.ct-name { font-weight: 600; }
+.ct-name a { color: var(--ink) !important; }
+.ct-name a:hover { color: var(--teal) !important; }
+
+.ct-owner { display: flex; align-items: center; gap: 6px; }
+.ct-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+/* ── Contacts in the lead drawer ─────────────────────────────────────────── */
+
+.poc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.poc-card.is-taken { border-left: 3px solid var(--amber); }
+
+.poc-owner {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--teal-dark);
+  background: var(--teal-tint);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.poc-free { font-family: var(--mono); font-size: 10px; text-transform: uppercase; color: var(--ink-faint); }
+
+.poc-log { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; display: flex; flex-direction: column; gap: 7px; }
+.poc-log-item span { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.poc-log-item p { margin: 2px 0 0; font-size: 12px; line-height: 1.4; }
+
+.poc-actions { display: flex; gap: 6px; margin-top: 10px; }
