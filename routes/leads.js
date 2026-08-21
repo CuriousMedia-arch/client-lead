@@ -104,7 +104,7 @@ async function queryLeads(params, user) {
     `SELECT l.id, l.status, l.owner_id,
             l.claimed_at, l.claim_source, l.deadline_at, l.closed_at,
             l.fresh_owner_id, l.fresh_claimed_at, l.fresh_deadline_at, l.fresh_closed_at,
-            l.in_newspaper,
+            l.in_newspaper, l.fresh_from_newspaper, l.fresh_release_note,
             l.contact_name, l.contact_role, l.contact_email, l.contact_phone,
             l.last_contacted_at, l.next_followup_at, l.last_signal_at,
             c.name AS company, c.id AS company_id,
@@ -297,7 +297,8 @@ router.get("/people/batch", async (req, res, next) => {
 
     const rows = await db.all(
       `SELECT l.id AS lead_id, cc.id, cc.name, cc.role, cc.email, cc.phone,
-              cc.linkedin, cc.owner_id, u.display_name AS owner_name
+              cc.linkedin, cc.owner_id, cc.status, cc.claimed_at, cc.closed_at,
+              cc.release_note, u.display_name AS owner_name
          FROM leads l
          JOIN companies c ON c.id = l.company_id
          JOIN company_contacts cc ON lower(cc.company) = lower(c.name)
@@ -356,7 +357,7 @@ router.get("/:id/people", async (req, res, next) => {
     const contacts = await db.all(
       `SELECT cc.id, cc.name, cc.role, cc.email, cc.email_alt, cc.phone, cc.phone2,
               cc.linkedin, cc.seniority, cc.department, cc.city, cc.status,
-              cc.owner_id, cc.claimed_at, cc.deadline_at, cc.closed_at,
+              cc.owner_id, cc.claimed_at, cc.deadline_at, cc.closed_at, cc.release_note,
               u.display_name AS owner_name
          FROM company_contacts cc
          LEFT JOIN users u ON u.id = cc.owner_id
@@ -553,7 +554,8 @@ router.post("/:id/claim", async (req, res, next) => {
     );
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
-    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
+    const raw = req.body && req.body.source;
+    const source = raw === "fresh" || raw === "newspaper" || raw === "all" ? raw : "all";
     const ownerId = source === "fresh" ? lead.fresh_owner_id : lead.owner_id;
     const ownerName = source === "fresh" ? lead.fresh_owner_name : lead.owner_name;
 
@@ -607,7 +609,8 @@ router.post("/:id/close", async (req, res, next) => {
     const lead = await db.one("SELECT * FROM leads WHERE id = $1", [req.params.id]);
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
-    const source = req.body && req.body.source === "fresh" ? "fresh" : "all";
+    const raw = req.body && req.body.source;
+    const source = raw === "fresh" || raw === "newspaper" || raw === "all" ? raw : "all";
     const reopening = Boolean(req.body && req.body.reopen);
     const updated = reopening
       ? await lifecycle.reopen(lead.id, source)

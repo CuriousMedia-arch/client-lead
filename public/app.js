@@ -571,8 +571,8 @@ async function renderPeople(opts = {}) {
   const body = leads.length
     ? `<div class="db-table">
          <div class="db-head">
-           <span></span><span>Company</span><span>LinkedIn</span><span>Contacts</span>
-           <span>Industry</span><span>Size</span><span>Revenue</span><span>Founded</span>
+           <span></span><span>Company</span><span>Contacts</span><span>Industry</span>
+           <span>Size</span><span>Revenue</span><span>LinkedIn</span>
          </div>
          ${leads.map(companyRow).join("")}
        </div>
@@ -607,14 +607,7 @@ function companyRow(lead) {
             ? `<a class="company-name" href="${esc(site)}" target="_blank" rel="noopener">${esc(lead.company)}</a>`
             : `<span class="company-name">${esc(lead.company)}</span>`
         }
-      </div>
-
-      <div class="db-cell">
-        ${
-          lead.linkedin
-            ? `<a class="li-link" href="${esc(lead.linkedin)}" target="_blank" rel="noopener">${linkedinMark()}Profile</a>`
-            : `<span class="muted">—</span>`
-        }
+        ${lead.founded ? `<span class="company-meta">Founded ${esc(lead.founded)}</span>` : ""}
       </div>
 
       <div class="db-cell">
@@ -630,7 +623,14 @@ function companyRow(lead) {
       <div class="db-cell">${esc(lead.industry || "—")}</div>
       <div class="db-cell">${esc(lead.employees || "—")}</div>
       <div class="db-cell">${esc(lead.revenue || "—")}</div>
-      <div class="db-cell">${esc(lead.founded || "—")}</div>
+
+      <div class="db-cell">
+        ${
+          lead.linkedin
+            ? `<a class="li-link" href="${esc(lead.linkedin)}" target="_blank" rel="noopener">${linkedinMark()}${esc(lead.company)}</a>`
+            : `<span class="muted">—</span>`
+        }
+      </div>
     </div>
     <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
 }
@@ -664,7 +664,11 @@ function contactRow(c) {
       <span class="cr-owner">
         ${
           c.owner_id
-            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
+            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>
+               <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>`
+            : c.release_note
+            ? `<span class="muted" title="${esc(c.release_note)}">Released</span>
+               <span class="release-note-inline">${esc(c.release_note)}</span>`
             : `<span class="muted">Unclaimed</span>`
         }
       </span>
@@ -926,40 +930,70 @@ async function renderMyPeople(opts = {}) {
   const content = $("#content");
 
   let contacts = [];
-  let freshLeads = [];
+  let leads = [];
   try {
     const [people, leadRes] = await Promise.all([
       api("/api/contacts/people?mine=1&sort=urgent"),
-      api("/api/leads?tab=mine&limit=100").catch(() => ({ leads: [] })),
+      api("/api/leads?tab=mine&limit=200").catch(() => ({ leads: [] })),
     ]);
     contacts = people.contacts || [];
-    freshLeads = (leadRes.leads || []).filter((l) => l.fresh_owner_id === state.user.id);
+    leads = (leadRes.leads || []).filter((l) => l.fresh_owner_id === state.user.id);
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load your outreach</h2><p>${esc(err.message)}</p></div>`;
     return;
   }
 
-  content.innerHTML =
-    actionBar() +
-    (!contacts.length && !freshLeads.length
-      ? `<div class="empty">
-           <h2>You haven't claimed anything yet</h2>
-           <p>Claim a person in All Leads for 30 days, or a company in Fresh Leads for 10.</p>
-         </div>`
-      : `${
-          contacts.length
-            ? `<h2 class="section-head">People from All Leads <span class="pill">${contacts.length}</span></h2>
-               <div class="mylead-grid">${contacts.map(myPersonCard).join("")}</div>`
-            : ""
-        }${
-          freshLeads.length
-            ? `<h2 class="section-head">Companies from Fresh Leads <span class="pill">${freshLeads.length}</span></h2>
-               <div class="mylead-grid">${freshLeads.map((l) => outreachCard(l, "fresh")).join("")}</div>`
-            : ""
-        }`);
+  // Three separate commitments, three separate lists. A Newspaper pickup has
+  // no deadline — it already ran out of time once, and a second countdown
+  // would only send it round the same loop.
+  const groups = {
+    all: contacts,
+    fresh: leads.filter((l) => !l.fresh_from_newspaper),
+    newspaper: leads.filter((l) => l.fresh_from_newspaper),
+  };
+
+  const TABS = [
+    ["all", "From All Leads"],
+    ["fresh", "From Fresh Leads"],
+    ["newspaper", "From Newspaper"],
+  ];
+
+  // Open on a tab that has something, unless the user has picked one.
+  if (!state.mineViewChosen) {
+    const firstFull = TABS.find(([k]) => groups[k].length);
+    if (firstFull) state.mineView = firstFull[0];
+  }
+  if (!groups[state.mineView]) state.mineView = "all";
+
+  const view = state.mineView;
+  const list = groups[view];
+
+  const subtabs = `
+    <div class="mine-subtabs">
+      ${TABS.map(
+        ([key, label]) => `
+        <button class="chip ${view === key ? "is-on" : ""}" data-mineview="${key}">
+          ${esc(label)} <span class="pill">${groups[key].length}</span>
+        </button>`
+      ).join("")}
+    </div>`;
+
+  const empty = {
+    all: ["Nothing claimed from All Leads", "Claim a person there and you have 30 days to close it."],
+    fresh: ["Nothing claimed from Fresh Leads", "Claim a company there and you have 10 days."],
+    newspaper: ["Nothing picked up from the Newspaper", "Leads released for missing their deadline land there for anyone to take. These carry no clock."],
+  }[view];
+
+  const body = list.length
+    ? view === "all"
+      ? `<div class="mylead-grid">${list.map(myPersonCard).join("")}</div>`
+      : `<div class="mylead-grid">${list.map((l) => outreachCard(l, "fresh")).join("")}</div>`
+    : `<div class="empty"><h2>${esc(empty[0])}</h2><p>${esc(empty[1])}</p></div>`;
+
+  content.innerHTML = actionBar() + subtabs + body;
 
   wireListActions();
-  for (const c of contacts) loadContactLog(c.id);
+  if (view === "all") for (const c of list) loadContactLog(c.id);
 }
 
 /** Paint one contact's history into its card. */
@@ -1376,8 +1410,8 @@ function newspaperCard(lead) {
       ${signalsByType(lead.signals, 3)}
 
       <div class="mylead-actions">
-        <span class="muted">Went unworked past its deadline</span>
-        <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
+        <span class="muted">Went unworked past its deadline · no clock on this one</span>
+        <button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper" data-id="${lead.id}">
           Pick this up
         </button>
       </div>
@@ -1752,6 +1786,8 @@ async function onCardClick(e) {
         toast(
           act === "release"
             ? "Released"
+            : actionBtn.dataset.source === "newspaper"
+            ? "Picked up — no deadline on this one"
             : `Claimed — ${actionBtn.dataset.source === "fresh" ? 10 : 30} days to close`
         );
       }
