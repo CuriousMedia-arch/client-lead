@@ -355,10 +355,7 @@ router.get("/:id/people", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     const contacts = await db.all(
-      `SELECT cc.id, cc.name, cc.role, cc.email, cc.email_alt, cc.phone, cc.phone2,
-              cc.linkedin, cc.seniority, cc.department, cc.city, cc.status,
-              cc.owner_id, cc.claimed_at, cc.deadline_at, cc.closed_at, cc.release_note,
-              u.display_name AS owner_name
+      `SELECT cc.*, u.display_name AS owner_name
          FROM company_contacts cc
          LEFT JOIN users u ON u.id = cc.owner_id
         WHERE lower(cc.company) = lower($1)
@@ -563,12 +560,29 @@ router.post("/:id/claim", async (req, res, next) => {
       if (ownerId && ownerId !== req.user.id) {
         return res.status(403).json({ error: "Only the owner can release this lead." });
       }
+
+      // Same rule as releasing a contact: whoever picks this up next needs to
+      // know why it was handed back, not just that it was.
+      const note = String((req.body && req.body.note) || "").trim();
+      if (note.length < 3) {
+        return res.status(400).json({
+          error: "Say why you're releasing it, so whoever picks it up knows where things stand.",
+        });
+      }
+
       const released = await lifecycle.release(lead.id, source);
+      await db.run(
+        `UPDATE leads SET ${source === "fresh" ? "fresh_release_note" : "release_note"} = $1
+          WHERE id = $2`,
+        [note, lead.id]
+      );
+      released[source === "fresh" ? "fresh_release_note" : "release_note"] = note;
+
       await logActivity(
         lead.id,
         req.user.id,
         "claim",
-        `Released ${source === "fresh" ? "Fresh Leads" : "All Leads"} claim back to the pool`
+        `Released ${source === "fresh" ? "Fresh Leads" : "All Leads"} claim — ${note}`
       );
       if (source === "fresh") released.fresh_countdown = null;
       else released.countdown = null;

@@ -635,54 +635,69 @@ function companyRow(lead) {
     <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
 }
 
-/** One person inside an expanded company — this is what gets claimed. */
+/**
+ * One person inside an expanded company — this is what gets claimed.
+ *
+ * Every field from the sheet, laid out over two lines: who they are and how to
+ * reach them on top, the rest underneath. How the outreach is GOING isn't here
+ * — that belongs to whoever holds the Fresh Lead for this company.
+ */
 function contactRow(c) {
   const isAdmin = state.user.role === "admin";
   const isOwner = c.owner_id === state.user.id;
   const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
 
+  const detail = [
+    ["Seniority", c.seniority],
+    ["Department", c.department],
+    ["City", c.city],
+    ["State", c.state],
+    ["Country", c.country],
+  ].filter(([, v]) => v);
+
   return `
-    <div class="contact-row ${locked ? "is-locked" : ""}">
-      <span class="cr-name">
-        ${c.linkedin
-          ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
-          : esc(c.name)}
-        <span class="cr-sub">${esc(c.role || "—")}</span>
-      </span>
+    <div class="contact-card ${locked ? "is-locked" : ""}">
+      <div class="cc-main">
+        <div class="cc-who">
+          <span class="cc-name">
+            ${c.linkedin
+              ? `<a href="${esc(c.linkedin)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+              : esc(c.name)}
+          </span>
+          <span class="cc-role">${esc(c.role || "—")}</span>
+        </div>
 
-      <span class="cr-reach">
-        ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
-        ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
-      </span>
+        <div class="cc-reach">
+          ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
+          ${c.email_alt ? `<a class="alt" href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : ""}
+          ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+          ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
+        </div>
 
-      <span class="cr-reach">
-        ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
-        ${c.phone2 ? `<a class="alt" href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
-        ${!c.phone && !c.phone2 ? `<span class="muted">—</span>` : ""}
-      </span>
+        <div class="cc-actions">
+          ${
+            c.owner_id
+              ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>`
+              : `<span class="muted">Unclaimed</span>`
+          }
+          <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
+          ${
+            isOwner
+              ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
+              : locked
+              ? `<span class="lock-note">Locked</span>`
+              : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+          }
+        </div>
+      </div>
 
-      <span class="cr-owner">
-        ${
-          c.owner_id
-            ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>
-               <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>`
-            : c.release_note
-            ? `<span class="muted" title="${esc(c.release_note)}">Released</span>
-               <span class="release-note-inline">${esc(c.release_note)}</span>`
-            : `<span class="muted">Unclaimed</span>`
-        }
-      </span>
-
-      <span class="cr-actions">
-        <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
-        ${
-          isOwner
-            ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
-            : locked
-            ? `<span class="lock-note">Locked</span>`
-            : `<button class="btn btn-sm" data-contact-act="claim" data-id="${c.id}">Claim</button>`
-        }
-      </span>
+      ${
+        detail.length
+          ? `<div class="cc-detail">
+               ${detail.map(([k, v]) => `<span><b>${esc(k)}</b>${esc(v)}</span>`).join("")}
+             </div>`
+          : ""
+      }
     </div>`;
 }
 
@@ -1749,9 +1764,7 @@ async function onCardClick(e) {
     try {
       const { contacts } = await api(`/api/leads/${id}/people`);
       box.innerHTML = contacts.length
-        ? `<div class="contact-head">
-             <span>Name</span><span>Email</span><span>Phone</span><span>Owner</span><span></span>
-           </div>` + contacts.map(contactRow).join("")
+        ? contacts.map(contactRow).join("")
         : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
     } catch (err) {
       box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
@@ -1775,11 +1788,21 @@ async function onCardClick(e) {
         });
         toast(act === "reopen" ? "Reopened — clock restarted" : "Marked closed");
       } else {
+        let note;
+        if (act === "release") {
+          note = window.prompt(
+            "Why are you releasing this lead?\n\nWhoever picks it up next will see this."
+          );
+          if (note === null) return;
+          if (note.trim().length < 3) return toast("Give a reason before releasing.", true);
+        }
+
         // Where it was claimed from decides the deadline: 10 days or 30.
         await api(`/api/leads/${id}/claim`, {
           method: "POST",
           body: {
             release: act === "release",
+            note: note ? note.trim() : undefined,
             source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
           },
         });
