@@ -448,21 +448,27 @@ function actionBar() {
                ${
                  state.tab === "all"
                    ? `<input type="file" id="ab-csv" accept=".csv,text/csv" class="upload-input" />
-                      <button class="btn" id="ab-upload">Import contacts (CSV)</button>
                       <button class="btn btn-primary" id="ab-new-lead">+ New Lead</button>`
                    : ""
                }
-               <button class="btn btn-primary" id="ab-scan" data-mode="${mode}" ${
-                 state.scanning ? "disabled" : ""
-               }>
+               <div class="action-bar-stack">
                  ${
-                   state.scanning
-                     ? "Syncing…"
-                     : label
-                     ? `Sync ${esc(label)}`
-                     : "Sync"
+                   state.tab === "all"
+                     ? `<button class="btn" id="ab-upload">Import contacts (CSV)</button>`
+                     : ""
                  }
-               </button>
+                 <button class="btn btn-primary" id="ab-scan" data-mode="${mode}" ${
+                   state.scanning ? "disabled" : ""
+                 }>
+                   ${
+                     state.scanning
+                       ? "Syncing…"
+                       : label
+                       ? `Sync ${esc(label)}`
+                       : "Sync"
+                   }
+                 </button>
+               </div>
              </div>`
           : ""
       }
@@ -827,12 +833,13 @@ function contactRow(c) {
       ${cell(esc(contactLocation(c)))}
       ${cell(esc(c.country))}
 
-      <span class="ct-owner">
+      <span class="ct-owner ${!c.owner_id && c.release_note ? "cr-owner" : ""}">
         ${
           c.owner_id
             ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>
                ${viaFresh ? `<span class="via-fresh" title="Came with the Fresh Leads claim on this company">via Fresh</span>` : ""}`
-            : `<span class="muted">Unclaimed</span>`
+            : `<span class="muted">Unclaimed</span>
+               ${c.release_note ? `<span class="release-note-inline" title="${esc(c.release_note)}">Released: ${esc(c.release_note)}</span>` : ""}`
         }
       </span>
 

@@ -236,12 +236,22 @@ router.post("/:id/claim", async (req, res, next) => {
           [req.params.id, note]
         )
       : await db.one(
-          `UPDATE company_contacts
+          // claim_count is "how many distinct people have claimed this,"
+          // not "how many times." contact_claims has one row per
+          // (contact, user), so a person releasing and re-claiming the same
+          // contact only ever counts once — the INSERT is a no-op the
+          // second time round.
+          `WITH ins AS (
+             INSERT INTO contact_claims (contact_id, user_id)
+             VALUES ($3, $1)
+             ON CONFLICT (contact_id, user_id) DO NOTHING
+           )
+           UPDATE company_contacts
               SET owner_id = $1, claimed_at = now(),
                   deadline_at = now() + ($2 || ' days')::interval,
                   closed_at = NULL,
                   claim_source = 'all',
-                  claim_count = claim_count + 1,
+                  claim_count = (SELECT COUNT(*) FROM contact_claims WHERE contact_id = $3),
                   status = CASE WHEN status = 'new' THEN 'working' ELSE status END
             WHERE id = $3 RETURNING *`,
           [req.user.id, CLAIM_DAYS, req.params.id]
@@ -537,18 +547,10 @@ router.post("/people/:id/verify", async (req, res, next) => {
       [verified, req.user.id, req.params.id]
     );
 
-    if (Boolean(before.verified) !== verified) {
-      await db.run(
-        `INSERT INTO contact_changes (contact_id, user_id, field, old_value, new_value)
-         VALUES ($1, $2, 'verified', $3, $4)`,
-        [
-          req.params.id,
-          req.user.id,
-          before.verified ? "verified" : "unverified",
-          verified ? "verified" : "unverified",
-        ]
-      );
-    }
+    // No change-log entry here on purpose — Verified/Unverified isn't history,
+    // it's a status. verified_at already carries "the latest date it was
+    // checked," and re-verifying just moves that date forward. Logging every
+    // toggle would just be noise in the timeline.
 
     row.countdown = contactCountdown(row);
     res.json({ contact: row, verified_by_name: verified ? req.user.display_name : null });
