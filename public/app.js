@@ -1832,6 +1832,7 @@ async function onCardClick(e) {
     e.stopPropagation();
     const id = verifyBtn.dataset.verify;
     const to = verifyBtn.dataset.to === "1";
+    const wrap = verifyBtn.closest(".verify-wrap");
 
     verifyBtn.disabled = true;
     try {
@@ -1840,10 +1841,12 @@ async function onCardClick(e) {
         body: { verified: to },
       });
 
-      // Swap the chip in place. Re-rendering the whole page would collapse
-      // every company someone had expanded to get here.
+      // Swap the WHOLE wrap (button + date span), not just the button.
+      // Replacing only the button left the old date span behind as an
+      // orphaned sibling — that's why unverifying could leave a stale date
+      // on screen until the page was refreshed.
       const fresh = { ...contact, verified_by_name };
-      verifyBtn.outerHTML = verifyChip(fresh);
+      if (wrap) wrap.outerHTML = verifyChip(fresh);
       const row = $(`[data-verify="${id}"]`).closest(".ct-row");
       if (row) row.classList.toggle("is-verified", Boolean(contact.verified));
 
