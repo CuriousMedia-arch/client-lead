@@ -8,6 +8,7 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 
+
 const router = express.Router();
 router.use(requireAuth);
 
@@ -240,6 +241,7 @@ router.post("/:id/claim", async (req, res, next) => {
                   deadline_at = now() + ($2 || ' days')::interval,
                   closed_at = NULL,
                   claim_source = 'all',
+                  claim_count = claim_count + 1,
                   status = CASE WHEN status = 'new' THEN 'working' ELSE status END
             WHERE id = $3 RETURNING *`,
           [req.user.id, CLAIM_DAYS, req.params.id]
@@ -653,6 +655,245 @@ router.post("/people/:id/restore", requireAdmin, async (req, res, next) => {
     );
 
     res.json({ contact: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/contacts/my-alerts
+ * Claims this user owns on All Leads that hit their deadline within 5 days,
+ * plus (admin only) how many extension requests are waiting on a decision.
+ * Powers the notification bell.
+ */
+router.get("/my-alerts", async (req, res, next) => {
+  try {
+    await sweepExpiredContacts();
+
+    const expiring = await db.all(
+      `SELECT id, name, company, deadline_at
+         FROM company_contacts
+        WHERE owner_id = $1 AND deleted_at IS NULL AND closed_at IS NULL
+          AND deadline_at IS NOT NULL
+          AND deadline_at <= now() + interval '5 days'
+        ORDER BY deadline_at ASC`,
+      [req.user.id]
+    );
+    for (const c of expiring) c.countdown = contactCountdown(c);
+
+    const myPending = await db.all(
+      `SELECT id, status FROM extension_requests WHERE user_id = $1 AND status = 'pending'`,
+      [req.user.id]
+    );
+
+    let pendingReview = 0;
+    if (req.user.role === "admin") {
+      pendingReview = await db.value(
+        "SELECT count(*)::int AS n FROM extension_requests WHERE status = 'pending'"
+      );
+    }
+
+    res.json({ expiring, myPendingRequests: myPending.length, pendingReview: pendingReview || 0 });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** POST /api/contacts/:id/request-extension { reason } */
+router.post("/:id/request-extension", async (req, res, next) => {
+  try {
+    const reason = String((req.body && req.body.reason) || "").trim();
+    if (reason.length < 3) return res.status(400).json({ error: "Say why you need more time." });
+
+    const contact = await db.one(
+      "SELECT id, owner_id FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!contact) return res.status(404).json({ error: "That contact no longer exists." });
+    if (contact.owner_id !== req.user.id) {
+      return res.status(403).json({ error: "Only the owner can request an extension on this." });
+    }
+
+    const existing = await db.all(
+      "SELECT id FROM extension_requests WHERE contact_id = $1 AND status = 'pending'",
+      [req.params.id]
+    );
+    if (existing.length) {
+      return res.status(409).json({ error: "You already have a pending extension request on this one." });
+    }
+
+    const row = await db.one(
+      `INSERT INTO extension_requests (contact_id, user_id, reason)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [req.params.id, req.user.id, reason]
+    );
+
+    res.json({ request: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** GET /api/contacts/extension-requests — admin inbox. */
+router.get("/extension-requests", requireAdmin, async (req, res, next) => {
+  try {
+    const requests = await db.all(
+      `SELECT er.*, cc.name AS contact_name, cc.company, u.display_name AS requested_by
+         FROM extension_requests er
+         JOIN company_contacts cc ON cc.id = er.contact_id
+         JOIN users u ON u.id = er.user_id
+        WHERE er.status = 'pending'
+        ORDER BY er.created_at ASC`
+    );
+    res.json({ requests });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** POST /api/contacts/extension-requests/:id/resolve { approve, days } */
+router.post("/extension-requests/:id/resolve", requireAdmin, async (req, res, next) => {
+  try {
+    const approve = Boolean(req.body && req.body.approve);
+    const days = Number(req.body && req.body.days);
+
+    const request = await db.one(
+      "SELECT * FROM extension_requests WHERE id = $1 AND status = 'pending'",
+      [req.params.id]
+    );
+    if (!request) return res.status(404).json({ error: "That request has already been handled." });
+
+    if (approve) {
+      if (!days || days < 1) return res.status(400).json({ error: "Enter how many days to grant." });
+
+      await db.run(
+        `UPDATE company_contacts SET deadline_at = now() + ($1 || ' days')::interval
+          WHERE id = $2`,
+        [days, request.contact_id]
+      );
+      await db.run(
+        `UPDATE extension_requests
+            SET status = 'approved', granted_days = $1, resolved_at = now(), resolved_by = $2
+          WHERE id = $3`,
+        [days, req.user.id, req.params.id]
+      );
+    } else {
+      await db.run(
+        `UPDATE extension_requests
+            SET status = 'denied', resolved_at = now(), resolved_by = $1
+          WHERE id = $2`,
+        [req.user.id, req.params.id]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** GET /api/contacts/company-lookup?name= — autofill for the New Lead dialog. */
+router.get("/company-lookup", async (req, res, next) => {
+  try {
+    const name = String(req.query.name || "").trim();
+    if (!name) return res.json({ company: null });
+
+    const company = await db.all(
+      `SELECT name, domain, website, linkedin, industry, employees, revenue, founded, city, state
+         FROM companies WHERE lower(name) = lower($1) LIMIT 1`,
+      [name]
+    );
+    res.json({ company: company[0] || null });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/contacts/new-lead — the "+ New Lead" dialog.
+ * Same shape as one CSV row. Company is upserted the same way the importer
+ * does it; the contact is a plain insert guarded by the duplicate check
+ * below — company + phone + name all matching means this is the same
+ * person the sheet or a colleague already logged, not a new row.
+ */
+router.post("/new-lead", requireAdmin, async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const clean = (v) => String(v || "").trim() || null;
+
+    const company = clean(b.company);
+    const name = clean(b.name);
+    if (!company || !name) {
+      return res.status(400).json({ error: "A company and a name are the minimum." });
+    }
+    const phone = clean(b.phone);
+
+    const dupe = await db.all(
+      `SELECT id FROM company_contacts
+        WHERE lower(company) = lower($1) AND lower(name) = lower($2)
+          AND phone IS NOT DISTINCT FROM $3 AND deleted_at IS NULL`,
+      [company, name, phone]
+    );
+    if (dupe.length) {
+      return res.status(409).json({
+        error: "This lead already exists — same company, name and phone number.",
+      });
+    }
+
+    let contact;
+    await db.tx(async (q) => {
+      await q(
+        `INSERT INTO companies
+           (name, keywords, active, origin, approval,
+            domain, website, linkedin, employees, revenue, industry, founded, city, state)
+         VALUES ($1, '[]'::jsonb, true, 'watchlist', 'approved', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (lower(name)) DO UPDATE
+            SET domain    = COALESCE(EXCLUDED.domain,    companies.domain),
+                website   = COALESCE(EXCLUDED.website,   companies.website),
+                linkedin  = COALESCE(EXCLUDED.linkedin,  companies.linkedin),
+                employees = COALESCE(EXCLUDED.employees, companies.employees),
+                revenue   = COALESCE(EXCLUDED.revenue,   companies.revenue),
+                industry  = COALESCE(EXCLUDED.industry,  companies.industry),
+                founded   = COALESCE(EXCLUDED.founded,   companies.founded),
+                city      = COALESCE(EXCLUDED.city,      companies.city),
+                state     = COALESCE(EXCLUDED.state,     companies.state)`,
+        [company, clean(b.company_domain), clean(b.company_website), clean(b.company_linkedin),
+         clean(b.company_employees), clean(b.company_revenue), clean(b.company_industry),
+         clean(b.company_founded), clean(b.city), clean(b.state)]
+      );
+
+      await q(
+        `INSERT INTO leads (company_id)
+         SELECT id FROM companies WHERE lower(name) = lower($1)
+         ON CONFLICT (company_id) DO NOTHING`,
+        [company]
+      );
+
+      const { rows } = await q(
+        `INSERT INTO company_contacts
+           (company, name, role, email, phone, phone2, linkedin,
+            seniority, department, city, country, state, is_primary)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING *`,
+        [company, name, clean(b.role), clean(b.email), phone, clean(b.phone2), clean(b.linkedin),
+         clean(b.seniority), clean(b.department), clean(b.city), clean(b.country), clean(b.state),
+         Boolean(b.is_primary)]
+      );
+      contact = rows[0];
+
+      await q(
+        `INSERT INTO contact_originals
+           (contact_id, company, name, role, email, phone, phone2, linkedin,
+            seniority, department, city, country, state)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (contact_id) DO NOTHING`,
+        [contact.id, company, name, clean(b.role), clean(b.email), phone, clean(b.phone2),
+         clean(b.linkedin), clean(b.seniority), clean(b.department), clean(b.city),
+         clean(b.country), clean(b.state)]
+      );
+    });
+
+    res.json({ contact });
   } catch (err) {
     next(err);
   }

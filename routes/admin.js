@@ -369,6 +369,7 @@ router.post("/import", async (req, res, next) => {
 
     let companiesAdded = 0;
     let contactsAdded = 0;
+    let duplicatesSkipped = 0;
 
     await db.tx(async (q) => {
       for (const c of companies) {
@@ -430,12 +431,19 @@ router.post("/import", async (req, res, next) => {
                   department  = COALESCE(EXCLUDED.department,  company_contacts.department),
                   city        = COALESCE(EXCLUDED.city,        company_contacts.city),
                   is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
+           -- Company + phone + name all matching the row already on file means
+           -- this import row is a duplicate of what we have, not new info —
+           -- skip the write entirely rather than touching the existing row.
+           WHERE NOT (company_contacts.phone IS NOT DISTINCT FROM EXCLUDED.phone)
            RETURNING id, (xmax = 0) AS inserted`,
           [p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_type,
            p.phone2, p.phone2_type, p.linkedin, p.notes, p.seniority, p.department,
            p.city, p.country, p.state, p.is_primary]
         );
-        if (rows[0].inserted) {
+        // No row comes back at all when the update WHERE clause above
+        // rejected the write — company + phone + name matched exactly what
+        // was already on file, so it's a duplicate and nothing changed.
+        if (rows[0] && rows[0].inserted) {
           contactsAdded++;
           // Snapshot the row as the sheet delivered it. Written once — later
           // imports and edits never touch it, so "what did the file say?"
@@ -449,6 +457,8 @@ router.post("/import", async (req, res, next) => {
             [rows[0].id, p.company, p.name, p.role, p.email, p.email_alt, p.phone,
              p.phone2, p.linkedin, p.seniority, p.department, p.city, p.country, p.state]
           );
+        } else if (!rows[0]) {
+          duplicatesSkipped++;
         }
       }
     });
@@ -459,6 +469,7 @@ router.post("/import", async (req, res, next) => {
       contacts: contacts.length,
       companiesAdded,
       contactsAdded,
+      duplicatesSkipped,
       skipped,
       matched,
       unmatched,

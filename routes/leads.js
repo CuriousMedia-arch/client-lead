@@ -122,7 +122,7 @@ async function queryLeads(params, user) {
 
   const leads = await db.all(
     `SELECT l.id, l.status, l.owner_id,
-            l.claimed_at, l.claim_source, l.deadline_at, l.closed_at,
+            l.claimed_at, l.claim_source, l.deadline_at, l.closed_at, l.release_note,
             l.fresh_owner_id, l.fresh_claimed_at, l.fresh_deadline_at, l.fresh_closed_at,
             l.in_newspaper, l.fresh_from_newspaper, l.fresh_release_note,
             l.contact_name, l.contact_role, l.contact_email, l.contact_phone,

@@ -2133,16 +2133,16 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .ct-table { overflow-x: auto; }
 
 /*
- * Thirteen columns, and the two that matter most are the first and the last.
+ * Twelve columns, and the two that matter most are the first and the last.
  *
  * Edit and Verify are pinned to the LEFT edge, Claim to the RIGHT, and the
- * eleven data columns scroll between them. On a 1,900px-wide table the old
- * layout put both actions off-screen the moment you scrolled to read a phone
+ * ten data columns scroll between them. On a wide table the old layout put
+ * both actions off-screen the moment you scrolled to read a phone
  * number — you'd scroll right to check the row, then scroll back left to do
  * anything about it. Now both ends stay put.
  *
- * City and State are one Location column, which is why this is 13 tracks and
- * not 14.
+ * City and State are one Location column, which is why this is 12 tracks and
+ * not 14. Additional email was dropped as a column entirely.
  */
 .ct-head, .ct-row {
   display: grid;
@@ -2150,7 +2150,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
     /* tools */ 150px
     /* name */  165px
     /* role */  180px
-    /* email */ 195px 180px
+    /* email */ 195px
     /* phone */ 135px 135px
     /* org   */ 105px 125px
     /* place */ 150px 95px
@@ -2159,7 +2159,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   gap: 12px;
   align-items: center;
   padding: 9px 16px;
-  min-width: 1780px;
+  min-width: 1588px;
 }
 
 .ct-head {
@@ -2179,7 +2179,13 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   color: var(--ink-soft);
   background: var(--surface);
 }
-.ct-row.is-locked { opacity: .78; }
+/* Locked rows used to dim via opacity on the whole row, which let the sunk
+   grey background of the contacts panel bleed through underneath — as you
+   scrolled, rows toggling between locked/unlocked made the background
+   itself look like it was shifting. Dimming only the text keeps the row's
+   own background solid at all times. */
+.ct-row.is-locked { opacity: 1; }
+.ct-row.is-locked > span:not(.ct-tools):not(.ct-actions) { opacity: .78; }
 .ct-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ct-row a { color: var(--teal); text-decoration: none; }
 .ct-row a:hover { text-decoration: underline; }
@@ -2201,9 +2207,10 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   align-items: center;
   gap: 6px;
   /* The sticky cell sits on top of the scrolling ones, so it needs its own
-     background or the text underneath shows through it. The negative margin
-     plus padding lets that background cover the row's left padding too. */
-  background: inherit;
+     solid background or the text underneath shows through it — using an
+     explicit color rather than `inherit` also stops it flickering to the
+     panel's sunk background during fast/sub-pixel scroll repaints. */
+  background: var(--surface);
   margin-left: -16px;
   padding-left: 16px;
   padding-right: 8px;
@@ -2220,7 +2227,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   align-items: center;
   gap: 6px;
   justify-content: flex-end;
-  background: inherit;
+  background: var(--surface);
   margin-right: -16px;
   padding-right: 16px;
   padding-left: 8px;
@@ -2304,3 +2311,103 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .poc-log-item p { margin: 2px 0 0; font-size: 12px; line-height: 1.4; }
 
 .poc-actions { display: flex; gap: 6px; margin-top: 10px; }
+
+/* ── Verify date + claim count (All Leads contact rows) ──────────────────── */
+
+.verify-wrap { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.verify-date {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  padding-left: 2px;
+}
+
+.ct-actions-col { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.claim-count {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+/* ── Notification bell ────────────────────────────────────────────────────── */
+
+.bell-wrap { position: relative; }
+.bell-btn { position: relative; padding: 8px; }
+.bell-icon { width: 19px; height: 19px; fill: currentColor; }
+.bell-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e2543f;
+  border: 1.5px solid var(--surface);
+}
+
+.bell-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 340px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 120;
+  padding: 12px;
+}
+
+.bell-section {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  margin: 14px 0 8px;
+}
+.bell-section:first-child { margin-top: 2px; }
+
+.bell-empty { font-size: 12.5px; color: var(--ink-faint); padding: 4px 2px; }
+
+.bell-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 6px;
+  border-top: 1px solid var(--line);
+}
+.bell-item:first-of-type { border-top: none; }
+.bell-item-main { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; min-width: 0; }
+.bell-item-sub { font-size: 11px; color: var(--ink-soft); }
+
+.bell-review { flex-direction: column; align-items: stretch; gap: 6px; }
+.bell-review-actions { display: flex; align-items: center; gap: 6px; }
+.bell-days {
+  width: 60px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+/* ── Generic modal (New Lead, Request extension) ──────────────────────────── */
+
+.modal-box {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-md);
+  z-index: 121;
+  animation: fadeIn .15s ease;
+}

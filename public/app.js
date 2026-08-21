@@ -118,6 +118,9 @@ const state = {
   scanning: false,
   runPoll: null,
   lastRun: null,
+  alertPoll: null,
+  alerts: { expiring: [], myPendingRequests: 0, pendingReview: 0 },
+  reviewQueue: [],
   // Last completed sync per cadence — the two lists move on different clocks,
   // so one "last synced" line would be wrong for one of them.
   lastRunCompany: null,
@@ -226,6 +229,10 @@ async function enterApp(user) {
     .catch(() => { state.team = []; });
 
   await Promise.all([team, refresh()]);
+
+  loadAlerts();
+  clearInterval(state.alertPoll);
+  state.alertPoll = setInterval(loadAlerts, 60000);
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -299,9 +306,23 @@ function wireEvents() {
 
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
   $("#contact-editor-backdrop").addEventListener("click", closeContactEditor);
+  $("#modal-backdrop").addEventListener("click", closeModal);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer();
     if (e.key === "Escape" && !$("#contact-editor").hidden) closeContactEditor();
+    if (e.key === "Escape" && !$("#modal-box").hidden) closeModal();
+  });
+
+  $("#bell-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const panel = $("#bell-panel");
+    if (panel.hidden) { renderBellPanel(); panel.hidden = false; }
+    else panel.hidden = true;
+  });
+  document.addEventListener("click", (e) => {
+    const panel = $("#bell-panel");
+    if (!panel || panel.hidden) return;
+    if (!panel.contains(e.target) && e.target.id !== "bell-btn") panel.hidden = true;
   });
 }
 
@@ -427,7 +448,8 @@ function actionBar() {
                ${
                  state.tab === "all"
                    ? `<input type="file" id="ab-csv" accept=".csv,text/csv" class="upload-input" />
-                      <button class="btn" id="ab-upload">Import contacts (CSV)</button>`
+                      <button class="btn" id="ab-upload">Import contacts (CSV)</button>
+                      <button class="btn btn-primary" id="ab-new-lead">+ New Lead</button>`
                    : ""
                }
                <button class="btn btn-primary" id="ab-scan" data-mode="${mode}" ${
@@ -674,6 +696,11 @@ function companyRow(lead) {
             : `<span class="company-name">${esc(lead.company)}</span>`
         }
         ${lead.founded ? `<span class="company-meta">Founded ${esc(lead.founded)}</span>` : ""}
+        ${
+          !lead.owner_id && lead.release_note
+            ? `<div class="release-note">Handed back: ${esc(lead.release_note)}</div>`
+            : ""
+        }
       </div>
 
       <div class="db-cell">
@@ -713,7 +740,7 @@ function companyRow(lead) {
  * territories, so one of them was empty on a good share of rows anyway.
  */
 const CONTACT_COLUMNS = [
-  "", "Name", "Position", "Work email", "Additional email", "Phone 1", "Phone 2",
+  "", "Name", "Position", "Work email", "Phone 1", "Phone 2",
   "Seniority", "Department", "Location", "Country", "Owner", "",
 ];
 
@@ -739,12 +766,15 @@ function verifyChip(c) {
   const who = c.verified_by_name ? `Verified by ${c.verified_by_name}` : "Verified";
   const when = c.verified_at ? ` · ${timeAgo(c.verified_at)}` : "";
 
-  return `<button class="verify-chip ${on ? "is-verified" : ""}"
+  return `<span class="verify-wrap">
+    <button class="verify-chip ${on ? "is-verified" : ""}"
                   data-verify="${c.id}" data-to="${on ? 0 : 1}"
                   title="${esc(on ? who + when + " — click to unverify" : "Not verified yet — click if you've checked these details")}">
       ${on ? tickMark() : circleMark()}
       <span>${on ? "Verified" : "Unverified"}</span>
-    </button>`;
+    </button>
+    ${on && c.verified_at ? `<span class="verify-date">${esc(shortDate(c.verified_at))}</span>` : ""}
+  </span>`;
 }
 
 function tickMark() {
@@ -790,7 +820,6 @@ function contactRow(c) {
       </span>
       ${cell(esc(c.role))}
       ${cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
-      ${cell(c.email_alt ? `<a href="mailto:${esc(c.email_alt)}">${esc(c.email_alt)}</a>` : "")}
       ${cell(c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
       ${cell(c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
       ${cell(esc(c.seniority))}
@@ -808,13 +837,16 @@ function contactRow(c) {
       </span>
 
       <span class="ct-actions">
-        ${
-          isOwner
-            ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
-            : locked
-            ? `<span class="lock-note">Locked</span>`
-            : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
-        }
+        <span class="ct-actions-col">
+          ${
+            isOwner
+              ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
+              : locked
+              ? `<span class="lock-note">Locked</span>`
+              : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+          }
+          <span class="claim-count">${Number(c.claim_count) > 0 ? `Claimed ${c.claim_count}x before` : "Never claimed"}</span>
+        </span>
       </span>
     </div>`;
 }
@@ -837,7 +869,6 @@ const EDIT_FIELDS = [
   ["name", "Name"],
   ["role", "Position"],
   ["email", "Work email"],
-  ["email_alt", "Additional email"],
   ["phone", "Phone 1"],
   ["phone2", "Phone 2"],
   ["linkedin", "LinkedIn URL"],
@@ -1628,7 +1659,8 @@ function wireListActions() {
           toast(
             `${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}, ` +
               `${r.contactsAdded} new contact${r.contactsAdded === 1 ? "" : "s"}` +
-              (r.skipped ? ` · ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped` : "")
+              (r.skipped ? ` · ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped` : "") +
+              (r.duplicatesSkipped ? ` · ${r.duplicatesSkipped} duplicate${r.duplicatesSkipped === 1 ? "" : "s"} skipped` : "")
           );
         }
         refresh();
@@ -1637,6 +1669,9 @@ function wireListActions() {
       }
     });
   }
+
+  const newLead = $("#ab-new-lead");
+  if (newLead) newLead.addEventListener("click", openNewLeadModal);
 
   // Ask for a bigger page rather than paging blindly — the list keeps its
   // place and nobody loses their scroll position.
@@ -2990,4 +3025,246 @@ function pollRun() {
       loadStats();
     }
   }, 2000);
+}
+/* ── Generic modal ────────────────────────────────────────────────────────
+ * One dialog box reused for "+ New Lead" and "Request extension" so the two
+ * new flows don't each need their own drawer plumbing. */
+function openModal(title, bodyHtml) {
+  $("#modal-backdrop").hidden = false;
+  const box = $("#modal-box");
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="drawer-head">
+      <h2>${esc(title)}</h2>
+      <button class="drawer-close" id="modal-close">&times;</button>
+    </div>
+    <div class="drawer-body">${bodyHtml}</div>`;
+  $("#modal-close").addEventListener("click", closeModal);
+}
+
+function closeModal() {
+  $("#modal-backdrop").hidden = true;
+  $("#modal-box").hidden = true;
+  $("#modal-box").innerHTML = "";
+}
+
+/* ── Notification bell ────────────────────────────────────────────────────
+ * Everything here is in-app only — there's no email/SMS service wired up,
+ * so the 5-day warning and the extension-request inbox both live behind
+ * this one icon. */
+async function loadAlerts() {
+  try {
+    const data = await api("/api/contacts/my-alerts");
+    state.alerts = data;
+
+    if (state.user && state.user.role === "admin" && data.pendingReview > 0) {
+      try {
+        const { requests } = await api("/api/contacts/extension-requests");
+        state.reviewQueue = requests;
+      } catch { state.reviewQueue = []; }
+    } else {
+      state.reviewQueue = [];
+    }
+
+    const total = (data.expiring ? data.expiring.length : 0) + (data.pendingReview || 0);
+    $("#bell-dot").hidden = total === 0;
+
+    if (!$("#bell-panel").hidden) renderBellPanel();
+  } catch {
+    // Alerts are a nice-to-have — a failed fetch shouldn't interrupt anything.
+  }
+}
+
+function renderBellPanel() {
+  const panel = $("#bell-panel");
+  const { expiring } = state.alerts;
+
+  const expiringHtml = expiring && expiring.length
+    ? expiring.map((c) => `
+        <div class="bell-item">
+          <div class="bell-item-main">
+            <b>${esc(c.name)}</b> at ${esc(c.company)}
+            <span class="bell-item-sub">${c.countdown ? esc(c.countdown.label) : "Due soon"} on your All Leads claim</span>
+          </div>
+          <button class="btn btn-sm" data-request-ext="${c.id}">Request extension</button>
+        </div>`).join("")
+    : `<p class="bell-empty">Nothing expiring in the next 5 days.</p>`;
+
+  const reviewHtml = state.user.role === "admin"
+    ? `<h4 class="bell-section">Extension requests</h4>
+       ${
+         state.reviewQueue.length
+           ? state.reviewQueue.map((r) => `
+               <div class="bell-item bell-review" data-review-id="${r.id}">
+                 <div class="bell-item-main">
+                   <b>${esc(r.requested_by)}</b> on ${esc(r.contact_name)} at ${esc(r.company)}
+                   <span class="bell-item-sub">"${esc(r.reason)}"</span>
+                 </div>
+                 <div class="bell-review-actions">
+                   <input type="number" min="1" class="bell-days" placeholder="days" id="days-${r.id}" />
+                   <button class="btn btn-sm btn-primary" data-approve-ext="${r.id}">Approve</button>
+                   <button class="btn btn-sm btn-ghost" data-deny-ext="${r.id}">Deny</button>
+                 </div>
+               </div>`).join("")
+           : `<p class="bell-empty">No pending requests.</p>`
+       }`
+    : "";
+
+  panel.innerHTML = `
+    <h4 class="bell-section">Expiring soon</h4>
+    ${expiringHtml}
+    ${reviewHtml}`;
+}
+
+document.addEventListener("click", async (e) => {
+  const reqBtn = e.target.closest("[data-request-ext]");
+  if (reqBtn) {
+    e.stopPropagation();
+    openExtensionModal(reqBtn.dataset.requestExt);
+    return;
+  }
+
+  const approveBtn = e.target.closest("[data-approve-ext]");
+  if (approveBtn) {
+    e.stopPropagation();
+    const id = approveBtn.dataset.approveExt;
+    const days = Number($(`#days-${id}`).value);
+    if (!days || days < 1) return toast("Enter how many days to grant.", true);
+    try {
+      await api(`/api/contacts/extension-requests/${id}/resolve`, {
+        method: "POST",
+        body: { approve: true, days },
+      });
+      toast(`Approved — ${days} more day${days === 1 ? "" : "s"}`);
+      loadAlerts();
+      refresh();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+
+  const denyBtn = e.target.closest("[data-deny-ext]");
+  if (denyBtn) {
+    e.stopPropagation();
+    const id = denyBtn.dataset.denyExt;
+    try {
+      await api(`/api/contacts/extension-requests/${id}/resolve`, { method: "POST", body: { approve: false } });
+      toast("Denied");
+      loadAlerts();
+    } catch (err) { toast(err.message, true); }
+  }
+});
+
+function openExtensionModal(contactId) {
+  openModal("Request an extension", `
+    <label class="field">
+      <span>Why do you need more time?</span>
+      <textarea id="ext-reason" rows="4" placeholder="What's blocking you from closing this in time?"></textarea>
+    </label>
+    <button class="btn btn-primary btn-block" id="ext-submit">Send to admin</button>`);
+
+  $("#ext-submit").addEventListener("click", async () => {
+    const reason = $("#ext-reason").value.trim();
+    if (reason.length < 3) return toast("Say why you're asking, so the admin has something to go on.", true);
+    try {
+      await api(`/api/contacts/${contactId}/request-extension`, { method: "POST", body: { reason } });
+      toast("Sent — the admin will review it");
+      closeModal();
+      loadAlerts();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+}
+
+/* ── "+ New Lead" dialog ──────────────────────────────────────────────────
+ * Same field set the CSV importer reads. Typing a company that already
+ * exists in All Leads pulls its firmographics in automatically, the same
+ * way a second row for that company behaves in the sheet. */
+const NEW_LEAD_CONTACT_FIELDS = [
+  ["name", "Name", true],
+  ["role", "Position", false],
+  ["email", "Work email", false],
+  ["phone", "Phone 1", false],
+  ["phone2", "Phone 2", false],
+  ["linkedin", "LinkedIn URL", false],
+  ["seniority", "Seniority", false],
+  ["department", "Department", false],
+  ["city", "City", false],
+  ["state", "State", false],
+  ["country", "Country", false],
+];
+
+const NEW_LEAD_COMPANY_FIELDS = [
+  ["company", "Company name", true],
+  ["company_website", "Website", false],
+  ["company_linkedin", "Company LinkedIn", false],
+  ["company_domain", "Domain", false],
+  ["company_industry", "Industry", false],
+  ["company_employees", "Employees", false],
+  ["company_revenue", "Revenue", false],
+  ["company_founded", "Year founded", false],
+];
+
+function openNewLeadModal() {
+  openModal("New lead", `
+    <h3 class="editor-section">Person</h3>
+    <div class="grid-2">
+      ${NEW_LEAD_CONTACT_FIELDS.map(([key, label, required]) => `
+        <label class="field">
+          <span>${esc(label)}${required ? " *" : ""}</span>
+          <input id="nl-${key}" ${required ? "required" : ""} />
+        </label>`).join("")}
+    </div>
+    <h3 class="editor-section">Company</h3>
+    <p class="hint" id="nl-autofill-hint" hidden>Matched an existing company — filled in what we already have.</p>
+    <div class="grid-2">
+      ${NEW_LEAD_COMPANY_FIELDS.map(([key, label, required]) => `
+        <label class="field">
+          <span>${esc(label)}${required ? " *" : ""}</span>
+          <input id="nl-${key}" ${required ? "required" : ""} />
+        </label>`).join("")}
+    </div>
+    <button class="btn btn-primary btn-block" id="nl-submit">Add lead</button>`);
+
+  let lookupTimer;
+  $("#nl-company").addEventListener("input", (e) => {
+    clearTimeout(lookupTimer);
+    const name = e.target.value.trim();
+    if (!name) return;
+    lookupTimer = setTimeout(async () => {
+      try {
+        const { company } = await api(`/api/contacts/company-lookup?name=${encodeURIComponent(name)}`);
+        if (!company) { $("#nl-autofill-hint").hidden = true; return; }
+        $("#nl-autofill-hint").hidden = false;
+        const map = {
+          company_website: company.website, company_linkedin: company.linkedin,
+          company_domain: company.domain, company_industry: company.industry,
+          company_employees: company.employees, company_revenue: company.revenue,
+          company_founded: company.founded, city: company.city, state: company.state,
+        };
+        for (const [key, val] of Object.entries(map)) {
+          const input = $(`#nl-${key}`);
+          if (input && !input.value && val) input.value = val;
+        }
+      } catch { /* autofill is best-effort */ }
+    }, 350);
+  });
+
+  $("#nl-submit").addEventListener("click", async () => {
+    const body = {};
+    for (const [key] of [...NEW_LEAD_CONTACT_FIELDS, ...NEW_LEAD_COMPANY_FIELDS]) {
+      const input = $(`#nl-${key}`);
+      if (input) body[key] = input.value.trim();
+    }
+    if (!body.company || !body.name) return toast("Company and name are required.", true);
+
+    try {
+      await api("/api/contacts/new-lead", { method: "POST", body });
+      toast("Lead added");
+      closeModal();
+      refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
 }

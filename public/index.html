@@ -41,6 +41,15 @@
       <h1 class="wordmark">Curious <span>Media</span></h1>
     </div>
     <div class="whoami">
+      <div class="bell-wrap">
+        <button class="btn btn-ghost bell-btn" id="bell-btn" aria-label="Notifications">
+          <svg viewBox="0 0 24 24" class="bell-icon" aria-hidden="true">
+            <path d="M12 22a2.2 2.2 0 002.2-2.2h-4.4A2.2 2.2 0 0012 22zM18 16v-5a6 6 0 00-5-5.92V4a1 1 0 10-2 0v1.08A6 6 0 006 11v5l-1.6 1.6A1 1 0 005 19h14a1 1 0 00.7-1.7L18 16z"/>
+          </svg>
+          <span class="bell-dot" id="bell-dot" hidden></span>
+        </button>
+        <div class="bell-panel" id="bell-panel" hidden></div>
+      </div>
       <div class="whoami-text">
         <strong id="me-name">—</strong>
         <span id="me-role">—</span>
@@ -73,6 +82,10 @@
 
 <!-- Unclaimed Fresh Leads used to be a stat card that opened this panel. It's a
      block inside the Admin tab now, so there's nothing to pop up. -->
+
+<!-- ── Generic modal (New Lead, Request extension) ──────────────────────────── -->
+<div class="drawer-backdrop" id="modal-backdrop" hidden></div>
+<div class="modal-box" id="modal-box" hidden></div>
 
 <div class="toast" id="toast" hidden></div>
 
