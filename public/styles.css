@@ -2536,20 +2536,31 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 }
 .note-pop p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
 
-/* ── The pinned Claim column stays white with its row ────────────────────── */
-/* It was painted sunk grey, so scrolling sideways showed the row change
-   colour halfway across. It should be invisible, not a visible seam. */
-/* The pinned column takes the background of whatever row it sits in: grey in
-   the header, white in a row. Painted one way for both, it showed as a seam
-   halfway across when you scrolled sideways. */
+/* ── The pinned ends and their row must always agree ─────────────────────────
+   Two things broke this. The header's pinned cells were forced white while the
+   header band is grey, so the grey stopped dead where the pinned column began.
+   And the row's pinned cell went grey on hover while the rest of the row
+   stayed white, putting a grey block behind whichever Claim button the cursor
+   happened to be near.
+
+   A pinned cell has to be invisible: same colour as the row it belongs to,
+   in every state. Grey in the header, white in a row, and unchanged on hover
+   unless the whole row changes with it. */
+
+.ct-head > span:first-child,
+.ct-head > span:last-child,
 .ct-head .ct-actions,
 .ct-actions-head {
   background: var(--surface-sunk);
   z-index: 3;
 }
 
-.ct-row .ct-actions { background: var(--surface); }
-.ct-row:hover .ct-actions { background: var(--surface-sunk); }
+.ct-row > .ct-tools,
+.ct-row > .ct-actions,
+.ct-row:hover > .ct-tools,
+.ct-row:hover > .ct-actions {
+  background: var(--surface);
+}
 
 .db-contacts, .ct-table { background: var(--surface); }
 .ct-head { background: var(--surface-sunk); }
