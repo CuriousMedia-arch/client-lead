@@ -9,6 +9,53 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 /** Escape anything user- or news-supplied before it goes into innerHTML. */
+/**
+ * The Owner column is narrow, so a release reason shows its first few words
+ * and opens in full on click. Cutting at a word boundary rather than mid-word
+ * keeps it readable, and "more" says there IS more — an ellipsis alone doesn't
+ * tell you whether one word was dropped or twenty.
+ */
+function wordCount(text) {
+  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function firstWords(text, n) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  return words.slice(0, n).join(" ");
+}
+
+function showNotePopover(anchor, text) {
+  document.querySelectorAll(".note-pop").forEach((p) => p.remove());
+
+  const pop = document.createElement("div");
+  pop.className = "note-pop";
+  pop.innerHTML = `
+    <span class="mono-label">Why it was released</span>
+    <p>${esc(text)}</p>`;
+  document.body.appendChild(pop);
+
+  const box = anchor.getBoundingClientRect();
+  const top = box.bottom + window.scrollY + 6;
+  const left = Math.max(
+    12,
+    Math.min(box.left + window.scrollX, window.innerWidth - pop.offsetWidth - 12)
+  );
+  pop.style.top = `${top}px`;
+  pop.style.left = `${left}px`;
+
+  setTimeout(() => {
+    document.addEventListener(
+      "click",
+      function close(e) {
+        if (pop.contains(e.target)) return;
+        pop.remove();
+        document.removeEventListener("click", close);
+      },
+      { once: false }
+    );
+  }, 0);
+}
+
 function esc(value) {
   return String(value == null ? "" : value)
     .replace(/&/g, "&amp;")
@@ -839,7 +886,15 @@ function contactRow(c) {
             ? `<span class="owner"><span class="avatar">${esc(initials(c.owner_name))}</span>${esc(c.owner_name)}</span>
                ${viaFresh ? `<span class="via-fresh" title="Came with the Fresh Leads claim on this company">via Fresh</span>` : ""}`
             : `<span class="muted">Unclaimed</span>
-               ${c.release_note ? `<span class="release-note-inline" title="${esc(c.release_note)}">Released: ${esc(c.release_note)}</span>` : ""}`
+               ${
+                 c.release_note
+                   ? `<button class="release-note-btn" data-note="${esc(c.release_note)}">
+                        Released: ${esc(firstWords(c.release_note, 6))}${
+                          wordCount(c.release_note) > 6 ? ` <span class="more">more</span>` : ""
+                        }
+                      </button>`
+                   : ""
+               }`
         }
       </span>
 
@@ -1110,8 +1165,8 @@ function outreachSlabs(contacts, leads) {
   const overdue = [...contacts, ...leads].filter((x) => x.countdown && x.countdown.overdue).length;
   const closed = [...contacts, ...leads].filter((x) => x.closed_at || x.fresh_closed_at).length;
 
-  const slab = (label, value, note) => `
-    <div class="stat">
+  const slab = (label, value, note, tone) => `
+    <div class="stat ${tone && value > 0 ? tone : ""}">
       <p class="stat-label">${esc(label)}</p>
       <p class="stat-value">${value}</p>
       <p class="stat-note">${esc(note)}</p>
@@ -1120,8 +1175,8 @@ function outreachSlabs(contacts, leads) {
   return `
     <div class="stats">
       ${slab("Open right now", contacts.length + leads.length - closed, "claimed and not closed")}
-      ${slab("Due within 3 days", soon, "act on these first")}
-      ${slab("Overdue", overdue, overdue ? "past the deadline" : "nothing late")}
+      ${slab("Due within 3 days", soon, "act on these first", "is-urgent")}
+      ${slab("Overdue", overdue, overdue ? "past the deadline" : "nothing late", "is-late")}
       ${slab("Closed by me", closed, "done and dusted")}
     </div>`;
 }
@@ -1897,6 +1952,14 @@ async function onCardClick(e) {
     return;
   }
 
+  // The full release reason, on click.
+  const noteBtn = e.target.closest("[data-note]");
+  if (noteBtn) {
+    e.stopPropagation();
+    showNotePopover(noteBtn, noteBtn.dataset.note);
+    return;
+  }
+
   // Admin-only row editor.
   const editBtn = e.target.closest("[data-edit-contact]");
   if (editBtn) {
@@ -1959,7 +2022,10 @@ async function onCardClick(e) {
   const mineToggle = e.target.closest("[data-mineview]");
   if (mineToggle) {
     e.stopPropagation();
-    state.mineView = mineToggle.dataset.mineview === "fresh" ? "fresh" : "all";
+    // Any of the three, not just fresh-or-everything-else — "newspaper" used to
+    // fall through to "all", so that tab could never be opened.
+    const picked = mineToggle.dataset.mineview;
+    state.mineView = ["all", "fresh", "newspaper"].includes(picked) ? picked : "all";
     state.mineViewChosen = true;   // respect an explicit choice over the smart default
     renderContent();
     return;

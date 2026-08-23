@@ -2436,7 +2436,7 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .mylead-card.is-static:hover { box-shadow: none; }
 
 /* The four numbers above My Outreach. */
-.stats { margin: 0 0 18px; padding: 0; }
+
 
 /* Who a swept-up contact came from, and where they'd got to. */
 .poc-taken {
@@ -2445,3 +2445,107 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   font-size: 10.5px;
   color: var(--amber-ink);
 }
+
+/* ── The four numbers above My Outreach ──────────────────────────────────── */
+/* These had no styling at all, so they collapsed into a column of loose text. */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 20px;
+  padding: 0;
+}
+
+.stats .stat {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
+}
+
+.stats .stat-label {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats .stat-value {
+  margin: 6px 0 2px;
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+
+.stats .stat-note { margin: 0; font-size: 11.5px; color: var(--ink-soft); }
+
+/* A number worth acting on shouldn't look like one that isn't. */
+.stats .stat.is-urgent { border-color: rgba(219, 154, 49, .5); background: var(--amber-tint); }
+.stats .stat.is-urgent .stat-value,
+.stats .stat.is-urgent .stat-note { color: var(--amber-ink); }
+.stats .stat.is-late { border-color: rgba(201, 99, 63, .45); background: var(--coral-tint); }
+.stats .stat.is-late .stat-value,
+.stats .stat.is-late .stat-note { color: var(--coral); }
+
+@media (max-width: 860px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ── Release reason: six words, full text on click ───────────────────────── */
+
+.release-note-btn {
+  display: block;
+  max-width: 100%;
+  border: none;
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  margin-top: 3px;
+  font-family: var(--body);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  white-space: normal;
+}
+.release-note-btn:hover { background: rgba(219, 154, 49, .28); }
+.release-note-btn .more { font-family: var(--mono); font-size: 9.5px; text-decoration: underline; }
+
+.note-pop {
+  position: absolute;
+  z-index: 80;
+  width: 280px;
+  max-width: 88vw;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 12px 14px;
+}
+.note-pop p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
+
+/* ── The pinned Claim column stays white with its row ────────────────────── */
+/* It was painted sunk grey, so scrolling sideways showed the row change
+   colour halfway across. It should be invisible, not a visible seam. */
+.ct-row .ct-actions,
+.ct-head .ct-actions,
+.people-row .col-actions,
+.people-head .col-actions { background: var(--surface); }
+
+.ct-head .ct-actions,
+.people-head .col-actions { background: var(--surface-sunk); }
+
+.ct-row:hover .ct-actions,
+.people-row:hover .col-actions { background: var(--surface); }
+
+.db-contacts, .ct-table { background: var(--surface); }
+.ct-head { background: var(--surface-sunk); }
