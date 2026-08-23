@@ -852,7 +852,7 @@ function contactRow(c) {
               ? `<span class="lock-note">Locked</span>`
               : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
           }
-          <span class="claim-count">${Number(c.claim_count) > 0 ? `Claimed ${c.claim_count}x before` : "Never claimed"}</span>
+          <span class="claim-count">${Number(c.claim_count) > 0 ? `Claimed ${c.claim_count} time${c.claim_count === 1 ? "" : "s"} before` : "Never claimed"}</span>
         </span>
       </span>
     </div>`;
@@ -1097,6 +1097,35 @@ const KIND_LABEL = { call: "Call", email: "Email", linkedin: "LinkedIn", meeting
  * Leads. They were sub-tabs once, which let a count of 2 sit over an empty
  * page because the claims were in the tab nobody clicked. Nothing hides now.
  */
+/**
+ * The four numbers, shown only above My Outreach.
+ *
+ * They're all about your own workload — what's yours, what's nearly out of
+ * time, what you've closed — so they belong on your page and nowhere else.
+ */
+function outreachSlabs(contacts, leads) {
+  const soon = [...contacts, ...leads].filter(
+    (x) => x.countdown && !x.countdown.overdue && x.countdown.days <= 3
+  ).length;
+  const overdue = [...contacts, ...leads].filter((x) => x.countdown && x.countdown.overdue).length;
+  const closed = [...contacts, ...leads].filter((x) => x.closed_at || x.fresh_closed_at).length;
+
+  const slab = (label, value, note) => `
+    <div class="stat">
+      <p class="stat-label">${esc(label)}</p>
+      <p class="stat-value">${value}</p>
+      <p class="stat-note">${esc(note)}</p>
+    </div>`;
+
+  return `
+    <div class="stats">
+      ${slab("Open right now", contacts.length + leads.length - closed, "claimed and not closed")}
+      ${slab("Due within 3 days", soon, "act on these first")}
+      ${slab("Overdue", overdue, overdue ? "past the deadline" : "nothing late")}
+      ${slab("Closed by me", closed, "done and dusted")}
+    </div>`;
+}
+
 async function renderMyPeople(opts = {}) {
   const content = $("#content");
 
@@ -1161,7 +1190,7 @@ async function renderMyPeople(opts = {}) {
       : `<div class="mylead-grid">${list.map((l) => outreachCard(l, "fresh")).join("")}</div>`
     : `<div class="empty"><h2>${esc(empty[0])}</h2><p>${esc(empty[1])}</p></div>`;
 
-  content.innerHTML = actionBar() + subtabs + body;
+  content.innerHTML = actionBar() + outreachSlabs(contacts, leads) + subtabs + body;
 
   wireListActions();
   if (view === "all") for (const c of list) loadContactLog(c.id);
@@ -1268,7 +1297,7 @@ function myPersonCard(c) {
 /** News on a company you already have. Claimable, no Inspect. */
 function freshCard(lead) {
   return `
-    <div class="mylead-card" data-lead="${lead.id}">
+    <div class="mylead-card is-static">
       <div class="mylead-top">
         <div class="mylead-heading">
           <div class="company-name">${esc(lead.company)}</div>
@@ -2056,6 +2085,9 @@ async function onCardClick(e) {
   // Rows in All Leads expand rather than open a drawer; everywhere else the
   // card opens the detail panel.
   if (state.tab === "all") return;
+  // The side panel is a My Outreach thing: it's for working a lead you hold,
+  // not for browsing Fresh Leads.
+  if (state.tab !== "mine") return;
   const row = e.target.closest("[data-lead]");
   if (row) openDrawer(row.dataset.lead);
 }
@@ -2247,6 +2279,26 @@ function drawerHtml(lead) {
     }
 
     <section class="block">
+      <h3>Log outreach</h3>
+      <div class="log-tabs" id="d-kinds">
+        <button class="chip is-on" data-kind="note">Note</button>
+        <button class="chip" data-kind="email">Email</button>
+        <button class="chip" data-kind="call">Call</button>
+        <button class="chip" data-kind="linkedin">LinkedIn</button>
+        <button class="chip" data-kind="meeting">Meeting</button>
+      </div>
+      <label class="field">
+        <textarea id="d-note" placeholder="What did you send, and what came back?"></textarea>
+      </label>
+      <div class="grid-2">
+        <label class="field"><span>Set next follow-up</span><input type="date" id="d-nextdate" /></label>
+        <div style="display:flex;align-items:flex-end">
+          <button class="btn btn-primary btn-block" id="d-log">Log it</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
       <h3>Ownership</h3>
       <div class="grid-2">
         <label class="field"><span>Status</span><select id="d-status">${statusOptions}</select></label>
@@ -2273,25 +2325,7 @@ function drawerHtml(lead) {
       <button class="btn btn-ghost" id="d-add-poc">Add to directory</button>
     </section>
 
-    <section class="block">
-      <h3>Log outreach</h3>
-      <div class="log-tabs" id="d-kinds">
-        <button class="chip is-on" data-kind="note">Note</button>
-        <button class="chip" data-kind="email">Email</button>
-        <button class="chip" data-kind="call">Call</button>
-        <button class="chip" data-kind="linkedin">LinkedIn</button>
-        <button class="chip" data-kind="meeting">Meeting</button>
-      </div>
-      <label class="field">
-        <textarea id="d-note" placeholder="What did you send, and what came back?"></textarea>
-      </label>
-      <div class="grid-2">
-        <label class="field"><span>Set next follow-up</span><input type="date" id="d-nextdate" /></label>
-        <div style="display:flex;align-items:flex-end">
-          <button class="btn btn-primary btn-block" id="d-log">Log it</button>
-        </div>
-      </div>
-    </section>
+
 
     <section class="block">
       <h3>Activity</h3>
@@ -2384,6 +2418,13 @@ async function loadContacts(lead) {
       </div>
 
       ${c.role ? `<p class="poc-role">${esc(c.role)}</p>` : ""}
+      ${
+        c.taken_from_name
+          ? `<p class="poc-taken">Was with ${esc(c.taken_from_name)}${
+              c.taken_from_status ? ` · ${esc(stageLabel(c.taken_from_status))}` : ""
+            }</p>`
+          : ""
+      }
 
       <p class="poc-reach">
         ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}

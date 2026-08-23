@@ -1,5 +1,6 @@
 const cron = require("node-cron");
 const { runPipeline, isRunning } = require("./pipeline");
+const freshClock = require("../lib/freshClock");
 
 /**
  * Two schedules, because Fresh Leads is two lists on two clocks.
@@ -51,6 +52,15 @@ function schedule(expression, mode, label) {
 }
 
 function start() {
+  // The Fresh Leads checkpoints are time-based, so they need a heartbeat as
+  // well as the on-request check — a lead should be released twelve hours
+  // after it went quiet, not the next time somebody happens to load a page.
+  cron.schedule(
+    process.env.FRESH_CLOCK_CRON || "*/30 * * * *",
+    () => freshClock.runChecks().catch((err) => console.error("[freshClock]", err.message)),
+    { timezone: process.env.TZ_NAME || "Asia/Kolkata" }
+  );
+
   // Serverless has no always-on process, so an in-process cron would never
   // fire. GitHub Actions runs both schedules for the deployed app instead.
   if (process.env.VERCEL) return;

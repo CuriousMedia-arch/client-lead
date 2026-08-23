@@ -2417,3 +2417,31 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   z-index: 121;
   animation: fadeIn .15s ease;
 }
+
+/* ── Owner column: a release note is one line, never a paragraph ─────────── */
+.ct-owner, .cr-owner { min-width: 0; }
+.release-note-inline,
+.ct-owner .release-note-inline {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--amber-ink);
+}
+
+/* Fresh Lead cards are read-only: the side panel belongs to My Outreach. */
+.mylead-card.is-static { cursor: default; }
+.mylead-card.is-static:hover { box-shadow: none; }
+
+/* The four numbers above My Outreach. */
+.stats { margin: 0 0 18px; padding: 0; }
+
+/* Who a swept-up contact came from, and where they'd got to. */
+.poc-taken {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--amber-ink);
+}

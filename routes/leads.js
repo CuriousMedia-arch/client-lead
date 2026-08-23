@@ -3,6 +3,7 @@ const db = require("../db");
 const { requireAuth } = require("../lib/auth");
 const playbook = require("../lib/triggers");
 const lifecycle = require("../lib/lifecycle");
+const freshClock = require("../lib/freshClock");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -125,6 +126,7 @@ async function queryLeads(params, user) {
             l.claimed_at, l.claim_source, l.deadline_at, l.closed_at, l.release_note,
             l.fresh_owner_id, l.fresh_claimed_at, l.fresh_deadline_at, l.fresh_closed_at,
             l.in_newspaper, l.fresh_from_newspaper, l.fresh_release_note,
+            l.fresh_last_activity_at,
             l.contact_name, l.contact_role, l.contact_email, l.contact_phone,
             l.last_contacted_at, l.next_followup_at, l.last_signal_at,
             c.name AS company, c.id AS company_id,
@@ -287,6 +289,7 @@ router.get("/", async (req, res, next) => {
     // Always settle expired claims before answering, so nobody sees a lead as
     // owned when its clock ran out an hour ago.
     await lifecycle.sweepExpired();
+    await freshClock.runChecks().catch(() => {});
     const leads = await queryLeads(req.query, req.user);
     // The client needs to know whether asking for more is worth a round trip.
     const limit = Math.min(Number(req.query.limit) || 50, 200);
@@ -377,9 +380,11 @@ router.get("/:id/people", async (req, res, next) => {
     if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
 
     const contacts = await db.all(
-      `SELECT cc.*, u.display_name AS owner_name, vu.display_name AS verified_by_name
+      `SELECT cc.*, u.display_name AS owner_name,
+              tf.display_name AS taken_from_name, vu.display_name AS verified_by_name
          FROM company_contacts cc
          LEFT JOIN users u  ON u.id  = cc.owner_id
+         LEFT JOIN users tf ON tf.id = cc.taken_from
          LEFT JOIN users vu ON vu.id = cc.verified_by
         WHERE lower(cc.company) = lower($1) AND cc.deleted_at IS NULL
         ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
@@ -595,7 +600,10 @@ router.post("/:id/claim", async (req, res, next) => {
         });
       }
 
-      const released = await lifecycle.release(lead.id, source);
+      const released =
+        source === "fresh"
+          ? await freshClock.releaseFresh(lead.id, { note })
+          : await lifecycle.release(lead.id, source);
       await db.run(
         `UPDATE leads SET ${source === "fresh" ? "fresh_release_note" : "release_note"} = $1
           WHERE id = $2`,
@@ -754,6 +762,11 @@ function timeAgo(iso) {
   if (days < 30) return `${days} days ago`;
   const months = Math.round(days / 30);
   return months === 1 ? "last month" : `${months} months ago`;
+}
+
+/** Anything the owner does resets the idle clock on their Fresh claim. */
+function touchFresh(leadId) {
+  return freshClock.touch(leadId).catch(() => {});
 }
 
 function logActivity(leadId, userId, kind, body) {

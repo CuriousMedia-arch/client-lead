@@ -235,18 +235,22 @@ router.post("/:id/claim", async (req, res, next) => {
             WHERE id = $1 RETURNING *`,
           [req.params.id, note]
         )
-      : await db.one(
+      : await (async () => {
+          await db.run(
+            `INSERT INTO contact_claims (contact_id, user_id)
+             VALUES ($1, $2) ON CONFLICT (contact_id, user_id) DO NOTHING`,
+            [req.params.id, req.user.id]
+          );
+          return db.one(
           // claim_count is "how many distinct people have claimed this,"
           // not "how many times." contact_claims has one row per
           // (contact, user), so a person releasing and re-claiming the same
           // contact only ever counts once — the INSERT is a no-op the
           // second time round.
-          `WITH ins AS (
-             INSERT INTO contact_claims (contact_id, user_id)
-             VALUES ($3, $1)
-             ON CONFLICT (contact_id, user_id) DO NOTHING
-           )
-           UPDATE company_contacts
+          // The INSERT has to be its own statement: a data-modifying CTE isn't
+          // visible to the rest of the statement it sits in, so counting inside
+          // the same query always returned the tally from before this claim.
+          `UPDATE company_contacts
               SET owner_id = $1, claimed_at = now(),
                   deadline_at = now() + ($2 || ' days')::interval,
                   closed_at = NULL,
@@ -254,8 +258,9 @@ router.post("/:id/claim", async (req, res, next) => {
                   claim_count = (SELECT COUNT(*) FROM contact_claims WHERE contact_id = $3),
                   status = CASE WHEN status = 'new' THEN 'working' ELSE status END
             WHERE id = $3 RETURNING *`,
-          [req.user.id, CLAIM_DAYS, req.params.id]
-        );
+            [req.user.id, CLAIM_DAYS, req.params.id]
+          );
+        })();
 
     if (!row) return res.status(404).json({ error: "That contact no longer exists." });
 
@@ -367,6 +372,16 @@ router.post("/people/:id/activity", async (req, res, next) => {
     } else if (kind !== "note" && contact.status === "new") {
       await db.run("UPDATE company_contacts SET status = 'contacted' WHERE id = $1", [req.params.id]);
     }
+
+    // Working a contact is working the company: it resets the Fresh claim's
+    // idle clock, so someone genuinely busy is never auto-released.
+    await db.run(
+      `UPDATE leads SET fresh_last_activity_at = now(), fresh_warned_at = NULL
+        WHERE fresh_owner_id IS NOT NULL
+          AND company_id = (SELECT id FROM companies
+                             WHERE lower(name) = (SELECT lower(company) FROM company_contacts WHERE id = $1))`,
+      [req.params.id]
+    ).catch(() => {});
 
     const [activity, fresh] = await Promise.all([
       db.all(
