@@ -2241,8 +2241,11 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   overflow: visible !important;
 }
 
+/* The header's pinned ends take the header's colour, not the rows'. Forcing
+   white here is what left a seam: the grey band stopped dead where the pinned
+   column began. */
 .ct-head > span:first-child,
-.ct-head > span:last-child { background: var(--surface); }
+.ct-head > span:last-child { background: var(--surface-sunk); }
 
 /* ── Verified / Unverified ───────────────────────────────────────────────── */
 
