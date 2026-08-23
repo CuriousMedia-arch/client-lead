@@ -54,10 +54,31 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, "public")));
+/**
+ * Static files, revalidated on every request.
+ *
+ * express.static's default lets a browser hold app.js and styles.css
+ * indefinitely, so a deployed fix can sit on the server while everyone keeps
+ * running the old copy — a bug that looks like the fix didn't work. `no-cache`
+ * doesn't mean "don't cache": the file is still stored and still sent as a 304
+ * when unchanged, it just has to ask first. The cost is one small request per
+ * file per load; the alternative is shipping fixes nobody sees.
+ */
+app.use(
+  express.static(path.join(__dirname, "public"), {
+    etag: true,
+    lastModified: true,
+    setHeaders(res, filePath) {
+      if (/\.(html|js|css)$/.test(filePath)) {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  })
+);
 
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Unknown endpoint." });
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 

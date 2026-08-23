@@ -2564,7 +2564,7 @@ function wireDrawer(lead) {
     const name = $("#d-cname").value.trim();
     if (!name) return toast("Type a name first.", true);
     try {
-      await api("/api/contacts", {
+      const added = await api("/api/contacts", {
         method: "POST",
         body: {
           company: lead.company,
@@ -2574,8 +2574,13 @@ function wireDrawer(lead) {
           phone: $("#d-cphone").value,
         },
       });
-      toast("Added to the directory");
+      toast(
+        added.companyCreated
+          ? `Added — ${added.company} is now in All Leads too`
+          : "Added to the directory"
+      );
       loadContacts(lead);
+      loadStats();
     } catch (err) { toast(err.message, true); }
   });
 

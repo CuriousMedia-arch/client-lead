@@ -600,10 +600,20 @@ router.post("/:id/claim", async (req, res, next) => {
         });
       }
 
+      // Releasing a Fresh claim hands its contacts back too — they came with
+      // the company, so they leave with it rather than being stranded with
+      // someone who has just given up the lead.
+      const cascade =
+        source !== "all"
+          ? await lifecycle.releaseCascade(lead.id, req.user.id, note).catch(() => ({ released: [] }))
+          : { released: [] };
+
       const released =
-        source === "fresh"
+        source !== "all"
           ? await freshClock.releaseFresh(lead.id, { note })
           : await lifecycle.release(lead.id, source);
+
+      released.released_contacts = cascade.released ? cascade.released.length : 0;
       await db.run(
         `UPDATE leads SET ${source === "fresh" ? "fresh_release_note" : "release_note"} = $1
           WHERE id = $2`,

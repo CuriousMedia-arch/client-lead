@@ -44,6 +44,40 @@ router.post("/", async (req, res, next) => {
 
     const clean = (v) => (String(v || "").trim() || null);
 
+    // A contact typed against a company nobody has imported means the company
+    // is missing from the database, not that the contact is invalid. Create
+    // both, approved, so it appears in All Leads — a person you're already
+    // ringing belongs in the database, not in a side note on one lead.
+    const known = await db.one("SELECT id, approval FROM companies WHERE lower(name) = lower($1)", [
+      company,
+    ]);
+
+    let companyCreated = false;
+    if (!known) {
+      const made = await db.one(
+        `INSERT INTO companies (name, keywords, active, origin, approval)
+         VALUES ($1, $2::jsonb, true, 'watchlist', 'approved')
+         ON CONFLICT (lower(name)) DO NOTHING
+         RETURNING id`,
+        [company, JSON.stringify([company])]
+      );
+      companyCreated = Boolean(made);
+
+      if (made) {
+        await db.run(
+          "INSERT INTO leads (company_id) VALUES ($1) ON CONFLICT (company_id) DO NOTHING",
+          [made.id]
+        );
+      }
+    } else if (known.approval !== "approved") {
+      // Discovered by the sweep but never approved. Someone working it by hand
+      // is the approval.
+      await db.run("UPDATE companies SET approval = 'approved', active = true WHERE id = $1", [
+        known.id,
+      ]);
+      companyCreated = true;
+    }
+
     const contact = await db.one(
       `INSERT INTO company_contacts (company, name, role, email, phone, is_primary)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -56,7 +90,13 @@ router.post("/", async (req, res, next) => {
       [company, name, clean(b.role), clean(b.email), clean(b.phone), Boolean(b.is_primary)]
     );
 
-    res.json({ contact });
+    await db.run(
+      `INSERT INTO contact_originals (contact_id, company, name, role, email, phone)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (contact_id) DO NOTHING`,
+      [contact.id, company, name, clean(b.role), clean(b.email), clean(b.phone)]
+    );
+
+    res.json({ contact, companyCreated, company });
   } catch (err) {
     next(err);
   }
