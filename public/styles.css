@@ -2536,16 +2536,17 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 /* ── The pinned Claim column stays white with its row ────────────────────── */
 /* It was painted sunk grey, so scrolling sideways showed the row change
    colour halfway across. It should be invisible, not a visible seam. */
-.ct-row .ct-actions,
+/* The pinned column takes the background of whatever row it sits in: grey in
+   the header, white in a row. Painted one way for both, it showed as a seam
+   halfway across when you scrolled sideways. */
 .ct-head .ct-actions,
-.people-row .col-actions,
-.people-head .col-actions { background: var(--surface); }
+.ct-actions-head {
+  background: var(--surface-sunk);
+  z-index: 3;
+}
 
-.ct-head .ct-actions,
-.people-head .col-actions { background: var(--surface-sunk); }
-
-.ct-row:hover .ct-actions,
-.people-row:hover .col-actions { background: var(--surface); }
+.ct-row .ct-actions { background: var(--surface); }
+.ct-row:hover .ct-actions { background: var(--surface-sunk); }
 
 .db-contacts, .ct-table { background: var(--surface); }
 .ct-head { background: var(--surface-sunk); }

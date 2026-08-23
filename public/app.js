@@ -798,7 +798,13 @@ const CONTACT_COLUMNS = [
 ];
 
 function contactHead() {
-  return `<div class="ct-head">${CONTACT_COLUMNS.map((h) => `<span>${esc(h)}</span>`).join("")}</div>`;
+  // The last heading sits over the pinned Claim column, so it has to be
+  // pinned too — otherwise the header's grey stops where that column starts
+  // and the row underneath shows through as a seam.
+  return `<div class="ct-head">${CONTACT_COLUMNS.map(
+    (h, i) =>
+      `<span class="${i === CONTACT_COLUMNS.length - 1 ? "ct-actions ct-actions-head" : ""}">${esc(h)}</span>`
+  ).join("")}</div>`;
 }
 
 /** "City, State" — or whichever half the row actually has. */
