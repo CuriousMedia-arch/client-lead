@@ -530,3 +530,17 @@
 .stage-meeting     { background: var(--violet-tint); color: var(--violet); }
 .stage-proposal    { background: var(--violet-tint); color: var(--violet); }
 .stage-negotiation { background: var(--amber-tint);  color: var(--amber-ink); }
+
+/* ── Bell entries for outreach work ───────────────────────────────────────── */
+
+/*
+ * A coloured spine on each bell row so the list is scannable without reading:
+ * red is a claim you are about to lose, green is a client waiting on a reply.
+ * Same palette as the cards, so the bell and the Today screen agree.
+ */
+.bell-expiring { border-left: 3px solid var(--coral); }
+.bell-reply    { border-left: 3px solid var(--green); }
+.bell-meeting  { border-left: 3px solid var(--amber); }
+.bell-followup { border-left: 3px solid var(--teal); }
+.bell-stalled  { border-left: 3px solid var(--violet); }
+.bell-approval { border-left: 3px solid var(--cold); }

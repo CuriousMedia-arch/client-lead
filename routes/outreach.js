@@ -428,6 +428,124 @@ router.post("/sync", async (req, res, next) => {
   }
 });
 
+/**
+ * What should be nagging me right now.
+ *
+ * This is the half of item 18 that was missing. The follow-up table knew a
+ * step was due on day 3 and nothing ever said so — the number only moved if
+ * you happened to open the tab and look, which is not what "automated" means.
+ *
+ * The topbar bell already polls every 60 seconds for expiring claims, so this
+ * feeds the same bell rather than inventing a second notification system.
+ * Ordered by how much it costs to ignore: a claim you're about to lose, then a
+ * reply sitting unanswered, then a meeting today, then the drip.
+ */
+router.get("/alerts", async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT o.id, o.company, o.stage, o.next_action, o.approval_status,
+              o.last_reply_at, o.last_contacted_at,
+              cc.name AS contact_name,
+              COALESCE(cc.deadline_at, l.fresh_deadline_at) AS deadline_at,
+              (SELECT MIN(f.due_at) FROM opportunity_followups f
+                WHERE f.opportunity_id = o.id AND f.status = 'due'
+                  AND f.due_at <= CURRENT_DATE)          AS followup_due,
+              (SELECT MIN(f.step) FROM opportunity_followups f
+                WHERE f.opportunity_id = o.id AND f.status = 'due'
+                  AND f.due_at <= CURRENT_DATE)          AS followup_step,
+              (SELECT MIN(m.scheduled_at) FROM opportunity_meetings m
+                WHERE m.opportunity_id = o.id
+                  AND m.scheduled_at::date = CURRENT_DATE) AS meeting_at,
+              EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600 AS hours_idle
+         FROM opportunities o
+         LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+         LEFT JOIN leads            l  ON l.id  = o.lead_id
+        WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')`,
+      [req.user.id]
+    );
+
+    // How long a claimed lead may sit untouched before it nags. Admin-editable
+    // in Pricing, because the right number is a sales-management decision, not
+    // a constant someone should have to redeploy to change.
+    const cadence = await pricing.followupCadence();
+    const nudgeAfter = Number(cadence.nudge_after_hours) || 24;
+
+    const items = [];
+
+    for (const r of rows) {
+      const c = countdown({ contact_deadline: r.deadline_at });
+
+      // One alert per opportunity, not one per condition. Three bell entries
+      // for the same company is noise, and noise is how a bell gets ignored.
+      if (c && (c.overdue || c.urgent)) {
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "expiring", urgency: 1,
+          text: c.overdue ? "Claim has expired" : `Claim ${c.label}`,
+          action: r.next_action || "Open it before you lose it",
+        });
+      } else if (r.last_reply_at && (!r.last_contacted_at || r.last_reply_at > r.last_contacted_at)) {
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "reply", urgency: 2,
+          text: "Replied — waiting on you",
+          action: r.next_action || "Read the reply and respond",
+        });
+      } else if (r.meeting_at) {
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "meeting", urgency: 3,
+          text: `Meeting today at ${new Date(r.meeting_at).toLocaleTimeString("en-IN", {
+            hour: "numeric", minute: "2-digit",
+          })}`,
+          action: "Prep, and file the notes afterwards",
+        });
+      } else if (r.followup_due) {
+        const late = Math.round((Date.now() - new Date(r.followup_due).getTime()) / 864e5);
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "followup", urgency: 4,
+          text:
+            late > 0
+              ? `Follow-up ${r.followup_step} was due ${late} day${late === 1 ? "" : "s"} ago`
+              : `Follow-up ${r.followup_step} is due today`,
+          action: "Draft it from the sequence",
+        });
+      } else if (r.stage === "new" && !r.last_contacted_at && r.hours_idle >= nudgeAfter) {
+        // Nothing has ever been sent on this one. The follow-up sequence
+        // cannot help — it only starts after a first message — so without
+        // this branch a freshly claimed lead can sit silently until its claim
+        // expires, which is exactly the gap that made the bell look dead.
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "stalled", urgency: 4,
+          text:
+            r.hours_idle >= 48
+              ? `Claimed ${Math.floor(r.hours_idle / 24)} days ago, still not contacted`
+              : `Claimed ${Math.floor(r.hours_idle)} hours ago, still not contacted`,
+          action: "Generate the pitch and send it",
+        });
+      } else if (r.approval_status === "pending") {
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "approval", urgency: 5,
+          text: "Quote waiting on manager approval",
+          action: "Chase it, or re-price above the floor",
+        });
+      }
+    }
+
+    items.sort((a, b) => a.urgency - b.urgency);
+
+    res.json({ items, count: items.length });
+  } catch (err) {
+    // The bell is a convenience. If this throws, the rest of the portal should
+    // not notice — an empty list is a better failure than a broken topbar.
+    console.warn("[outreach] alerts failed:", err.message);
+    res.json({ items: [], count: 0 });
+  }
+});
+
 /* ── item 3: the Opportunity Workspace ────────────────────────────────────── */
 
 /** Everything the workspace renders, in one round trip. */
@@ -614,12 +732,16 @@ router.post("/:id/service", async (req, res, next) => {
 
 router.get("/meta/rate-card", async (req, res, next) => {
   try {
-    const [card, model, rules] = await Promise.all([
+    const [card, model, rules, cadence] = await Promise.all([
       pricing.rateCard(),
       pricing.costModel(),
       pricing.guardrail(),
+      pricing.followupCadence(),
     ]);
-    res.json({ rate_card: card, cost_model: model, guardrail: rules, services: ai.SERVICES });
+    res.json({
+      rate_card: card, cost_model: model, guardrail: rules,
+      cadence, services: ai.SERVICES,
+    });
   } catch (err) {
     next(err);
   }
@@ -870,12 +992,18 @@ async function scheduleFollowups(oppId) {
   );
   if (existing.length) return;
 
+  const cadence = await pricing.followupCadence();
+
   for (const plan of ai.FOLLOWUP_PLAN) {
+    // The brief specified day 3 / 7 / 14 / 30, but that is a policy, not a
+    // law — so the days come from settings and fall back to the brief's
+    // numbers if nobody has changed them.
+    const days = Number(cadence[`step${plan.step}_days`]) || plan.days;
     await db.run(
       `INSERT INTO opportunity_followups (opportunity_id, step, kind, due_at)
        VALUES ($1, $2, $3, CURRENT_DATE + $4::int)
        ON CONFLICT (opportunity_id, step) DO NOTHING`,
-      [oppId, plan.step, plan.kind, plan.days]
+      [oppId, plan.step, plan.kind, days]
     );
   }
 }
@@ -1330,7 +1458,7 @@ router.put("/meta/rate-card", requireAdmin, async (req, res, next) => {
       );
     }
 
-    for (const key of ["cost_model", "guardrail"]) {
+    for (const key of ["cost_model", "guardrail", "followup_cadence"]) {
       if (!req.body[key]) continue;
       await db.run(
         `INSERT INTO pricing_settings (key, value, updated_by, updated_at)

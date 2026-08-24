@@ -167,6 +167,7 @@ const state = {
   lastRun: null,
   alertPoll: null,
   alerts: { expiring: [], myPendingRequests: 0, pendingReview: 0 },
+  outreachAlerts: [],
   reviewQueue: [],
   // Last completed sync per cadence — the two lists move on different clocks,
   // so one "last synced" line would be wrong for one of them.
@@ -631,12 +632,11 @@ async function renderContent(opts = {}) {
 
   content.innerHTML = actionBar() + filterBar() + body;
 
-  // Fresh Leads works the whole company, so it needs to show who already holds
-  // which contact — and what they've said — or two people ring the same person.
-
-  // Fresh Leads is worked at company level, so each card carries its people:
-  // who holds them, and why anyone handed one back.
-  if (state.tab === "fresh" && leads.length) loadFreshContacts(leads.map((l) => l.id));
+  // Fresh Leads cards used to carry the company's contact list — who held
+  // whom, and their last two log entries. That has moved to My Outreach, which
+  // is where a person is actually worked; Fresh Leads is now purely the
+  // company-and-signal view it reads as. The batch fetch is gone with it,
+  // which also removes a request per render of this tab.
 
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
@@ -1398,12 +1398,10 @@ function freshCard(lead) {
 
       ${signalsByType(lead.signals, null, true)}
 
-      <div class="fresh-people" id="fp-${lead.id}"></div>
-
       <div class="mylead-actions">
         ${
           lead.fresh_owner_id === state.user.id
-            ? `<span class="muted">Yours — see My Outreach → From Fresh Leads</span>
+            ? `<span class="muted">Yours — work it in My Outreach</span>
                <button class="btn btn-sm" data-act="release" data-source="fresh" data-id="${lead.id}">Release</button>`
             : `<span class="muted">24h to show progress, then 15 days to close</span>
                <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
@@ -1711,68 +1709,6 @@ function newspaperCard(lead) {
 
 // Order the groups the same way the playbook orders priority: hottest first.
 const TYPE_ORDER = ["capital", "brand_launch", "retail_expansion", "leadership", "crisis", "none"];
-
-/** Contacts for every visible Fresh card, in one request. */
-async function loadFreshContacts(ids) {
-  let byLead = {};
-  try {
-    ({ byLead } = await api(`/api/leads/people/batch?ids=${ids.join(",")}`));
-  } catch {
-    return;
-  }
-
-  for (const id of ids) {
-    const box = $(`#fp-${id}`);
-    const list = byLead[id] || [];
-    if (!box || !list.length) continue;
-
-    box.innerHTML = `
-      <div class="fp-label">Contacts at this company</div>
-      ${list
-        .map(
-          (c) => `
-        <div class="fp-row">
-          <div class="fp-top">
-            <span class="fp-name">${esc(c.name)}</span>
-            <span class="fp-role">${esc(c.role || "—")}</span>
-            ${
-              c.owner_id
-                ? `<span class="fp-owner">${esc(c.owner_name)}${
-                    c.owner_id === state.user.id ? " (you)" : ""
-                  }</span>
-                   <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>`
-                : ""
-            }
-          </div>
-          ${
-            !c.owner_id && c.release_note
-              ? `<div class="release-note">
-                   <span class="mono-label">Handed back</span>${esc(c.release_note)}
-                 </div>`
-              : ""
-          }
-          ${
-            c.activity && c.activity.length
-              ? `<div class="fp-log">
-                   ${c.activity
-                     .slice(0, 2)
-                     .map(
-                       (a) => `<div class="fp-log-item">
-                         <span>${esc(KIND_LABEL[a.kind] || a.kind)} · ${esc(timeAgo(a.created_at))} · ${esc(
-                         a.user_name || "Someone"
-                       )}</span>
-                         <p>${esc(a.body)}</p>
-                       </div>`
-                     )
-                     .join("")}
-                 </div>`
-              : ""
-          }
-        </div>`
-        )
-        .join("")}`;
-  }
-}
 
 function signalsByType(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);
@@ -3284,7 +3220,20 @@ async function loadAlerts() {
       state.reviewQueue = [];
     }
 
-    const total = (data.expiring ? data.expiring.length : 0) + (data.pendingReview || 0);
+    // Outreach work rides the same 60-second poll rather than a second timer.
+    // The follow-up table has always known a step was due; until this call
+    // existed nothing told you, which made "automated follow-ups" a schedule
+    // you had to remember to go and read.
+    try {
+      state.outreachAlerts = (await api("/api/outreach/alerts")).items || [];
+    } catch {
+      state.outreachAlerts = [];
+    }
+
+    const total =
+      (data.expiring ? data.expiring.length : 0) +
+      (data.pendingReview || 0) +
+      state.outreachAlerts.length;
     $("#bell-dot").hidden = total === 0;
 
     if (!$("#bell-panel").hidden) renderBellPanel();
@@ -3296,6 +3245,25 @@ async function loadAlerts() {
 function renderBellPanel() {
   const panel = $("#bell-panel");
   const { expiring } = state.alerts;
+
+  // Outreach first: these are things that go stale today. An expiring claim
+  // five days out can wait until you have read them.
+  const outreach = state.outreachAlerts || [];
+  const outreachHtml = outreach.length
+    ? `<h4 class="bell-section">Needs you now</h4>
+       ${outreach
+         .map(
+           (a) => `
+        <div class="bell-item bell-${esc(a.kind)}">
+          <div class="bell-item-main">
+            <b>${esc(a.company)}</b>${a.contact_name ? ` · ${esc(a.contact_name)}` : ""}
+            <span class="bell-item-sub">${esc(a.text)} — ${esc(a.action)}</span>
+          </div>
+          <button class="btn btn-sm btn-primary" data-bell-opp="${a.id}">Open</button>
+        </div>`
+         )
+         .join("")}`
+    : "";
 
   const expiringHtml = expiring && expiring.length
     ? expiring.map((c) => `
@@ -3329,12 +3297,29 @@ function renderBellPanel() {
     : "";
 
   panel.innerHTML = `
+    ${outreachHtml}
     <h4 class="bell-section">Expiring soon</h4>
     ${expiringHtml}
     ${reviewHtml}`;
 }
 
 document.addEventListener("click", async (e) => {
+  // Jumping to the opportunity from the bell has to switch tabs too, or the
+  // workspace opens over whatever list you happened to be looking at and
+  // closing it drops you somewhere unrelated.
+  const oppBtn = e.target.closest("[data-bell-opp]");
+  if (oppBtn) {
+    e.stopPropagation();
+    $("#bell-panel").hidden = true;
+    if (state.tab !== "mine") {
+      state.tab = "mine";
+      $$(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.tab === "mine"));
+      await renderContent();
+    }
+    openWorkspace(oppBtn.dataset.bellOpp);
+    return;
+  }
+
   const reqBtn = e.target.closest("[data-request-ext]");
   if (reqBtn) {
     e.stopPropagation();

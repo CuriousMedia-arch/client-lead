@@ -477,6 +477,7 @@ async function renderPricing() {
   const rows = data.rate_card.flatMap((g) => g.plans);
   const g = data.guardrail;
   const m = data.cost_model;
+  const cad = data.cadence || {};
 
   body.innerHTML = `
     <section class="intel-block">
@@ -538,6 +539,26 @@ async function renderPricing() {
           g.max_discount_pct
         )}" /></label>
       </div>
+    </section>
+
+    <section class="intel-block">
+      <h3>Follow-up cadence</h3>
+      <p class="hint">When each step of the sequence comes due, counted from the day the first pitch is logged as sent. The last field is different: it's how long a claimed lead may sit with nothing sent at all before the bell starts nagging.</p>
+      <div class="grid-3">
+        ${[1, 2, 3, 4]
+          .map(
+            (n) => `
+          <label class="field">
+            <span>Follow-up ${n} — day</span>
+            <input type="number" min="1" id="cad-${n}" value="${Number(cad[`step${n}_days`] || 0)}" />
+          </label>`
+          )
+          .join("")}
+        <label class="field">
+          <span>Nag if untouched after (hours)</span>
+          <input type="number" min="1" id="cad-nudge" value="${Number(cad.nudge_after_hours || 24)}" />
+        </label>
+      </div>
       <button class="btn btn-primary" id="save-pricing">Save pricing</button>
     </section>`;
 
@@ -565,6 +586,13 @@ async function renderPricing() {
         healthy_margin_pct: Number($("#gr-healthy").value),
         min_margin_pct: Number($("#gr-min").value),
         max_discount_pct: Number($("#gr-discount").value),
+      },
+      followup_cadence: {
+        step1_days: Number($("#cad-1").value),
+        step2_days: Number($("#cad-2").value),
+        step3_days: Number($("#cad-3").value),
+        step4_days: Number($("#cad-4").value),
+        nudge_after_hours: Number($("#cad-nudge").value),
       },
     };
 
