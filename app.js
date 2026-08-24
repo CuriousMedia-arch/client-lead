@@ -42,6 +42,7 @@ app.use("/api/leads", require("./routes/leads"));
 app.use("/api/signals", require("./routes/signals"));
 app.use("/api/contacts", require("./routes/contacts"));
 app.use("/api/admin", require("./routes/admin"));
+app.use("/api/outreach", require("./routes/outreach"));
 
 // Cheap way to confirm a deploy can reach the database.
 app.get("/api/health", async (req, res) => {

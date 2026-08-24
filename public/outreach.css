@@ -1,0 +1,532 @@
+/* ===========================================================================
+   My Outreach.
+
+   Same visual system as styles.css — sage ground, teal ink, mono for anything
+   numeric. Kept in its own file for the same reason outreach.js is: styles.css
+   is already 2,600 lines and this is a whole tab's worth of surface.
+   =========================================================================== */
+
+/* ── Today: the six counts ────────────────────────────────────────────────── */
+
+.today-slabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.today-group { margin-bottom: 26px; }
+
+.today-group-head {
+  font-family: var(--display);
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.today-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+/* ── One opportunity, as a card ───────────────────────────────────────────── */
+
+.opp-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  box-shadow: var(--shadow-sm);
+}
+
+.opp-card-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.opp-card-meta { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.opp-card-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+
+/* The next action is the point of the card, so it gets the box, not the chips. */
+.opp-next {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.opp-next .mono-label { display: block; margin-bottom: 3px; }
+
+.tag-soft {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--ink-soft);
+}
+
+.tag-warn {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  background: var(--amber-tint);
+  border: 1px solid var(--amber);
+  color: var(--amber-ink);
+  border-radius: 999px;
+  padding: 3px 8px;
+  display: inline-block;
+}
+
+.chip.is-static { cursor: default; }
+.chip.is-static:hover { border-color: var(--line-strong); color: var(--ink-soft); }
+
+/* ── Pipeline table ───────────────────────────────────────────────────────── */
+
+.pipe-head, .pipe-row {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 1.4fr) minmax(120px, 1.1fr) 118px
+    minmax(130px, 1.1fr) 90px 80px 100px 80px;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 16px;
+}
+
+.pipe-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  background: var(--surface-sunk);
+  border-bottom: 1px solid var(--line);
+}
+
+.pipe-row { border-bottom: 1px solid var(--line); font-size: 13px; }
+.pipe-row:last-child { border-bottom: 0; }
+.pipe-row:hover { background: var(--surface-sunk); }
+.pipe-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.num { font-family: var(--mono); font-size: 12px; }
+.num-good { color: var(--green); }
+.num-warn { color: var(--amber-ink); }
+.num-bad  { color: var(--coral); }
+
+/* ── Intelligence ─────────────────────────────────────────────────────────── */
+
+.intel-block {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.intel-block h3 {
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+
+.intel-block .hint { margin: 0 0 14px; }
+
+.funnel { display: flex; flex-direction: column; gap: 8px; }
+
+.funnel-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 190px) 1fr 52px 62px;
+  gap: 12px;
+  align-items: center;
+  font-size: 12.5px;
+}
+
+.funnel-label { color: var(--ink-soft); }
+
+/* A track that is always full width, with the bar inside it, so two rows at
+   40% and 41% are actually distinguishable — bars sized to their own content
+   make small differences invisible. */
+.funnel-bar {
+  height: 9px;
+  background: var(--surface-sunk);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.funnel-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--teal);
+  border-radius: 999px;
+  transition: width .3s ease;
+}
+.funnel-bar > i.bar-warm { background: var(--coral); }
+
+.funnel-pct { font-family: var(--mono); font-size: 12px; text-align: right; }
+.funnel-n { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); text-align: right; }
+
+/* ── Rate card editor ─────────────────────────────────────────────────────── */
+
+.rate-table { overflow-x: auto; }
+
+.rate-head, .rate-row {
+  display: grid;
+  grid-template-columns: 165px 90px 120px 120px 90px 120px 190px;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 0;
+  min-width: 920px;
+}
+
+.rate-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--line);
+}
+
+.rate-row { border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.rate-row input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  background: var(--surface-sunk);
+}
+.rate-row input:focus { background: #fff; outline: 1px solid var(--teal); }
+
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0 14px; }
+
+/* ── The workspace panel ──────────────────────────────────────────────────── */
+
+/* Wider than the existing drawer: this holds a plan builder, a composer and a
+   loss interview, and squeezing those into the 440px lead drawer would mean
+   scrolling past everything to reach anything. */
+.ws-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: min(760px, 100vw);
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.ws-head h2 {
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 4px 0 0;
+}
+
+.ws-body { overflow-y: auto; padding: 16px 22px 60px; }
+
+.ws-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+
+.ws-section h3 {
+  font-family: var(--display);
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 10px;
+}
+
+.ws-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ws-strong { font-weight: 600; margin: 2px 0; font-size: 14px; }
+
+.ws-contact { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.ws-contact-main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  flex: 1;
+}
+.ws-contact-side { flex-shrink: 0; }
+.ws-channels { display: flex; flex-direction: column; gap: 4px; }
+.ws-chan { font-size: 12.5px; color: var(--teal); text-decoration: none; }
+.ws-chan:hover { text-decoration: underline; }
+
+/* ── Service recommendation ───────────────────────────────────────────────── */
+
+.rec-box {
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--violet);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.rec-box.is-accepted { border-left-color: var(--green); }
+.rec-line { display: flex; gap: 8px; align-items: baseline; font-size: 13px; margin-bottom: 4px; }
+.rec-line .mono-label { min-width: 72px; }
+.rec-why { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+.rec-why .mono-label { display: block; margin-bottom: 2px; }
+
+/* ── Plans ────────────────────────────────────────────────────────────────── */
+
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.plan-card {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color .12s, background .12s;
+}
+.plan-card:hover { border-color: var(--teal); }
+.plan-card.is-on { border-color: var(--teal); background: var(--teal-tint); }
+
+.plan-price { font-family: var(--mono); font-size: 18px; font-weight: 600; color: var(--ink); }
+.plan-label { font-weight: 600; font-size: 13px; }
+.plan-detail { font-size: 11.5px; color: var(--ink-soft); }
+
+/* ── Item 7: the guardrail ────────────────────────────────────────────────── */
+
+.guardrail {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  padding: 12px 14px;
+  margin: 12px 0;
+}
+.gr-good { background: var(--green-tint); border-color: rgba(62, 156, 92, .35); }
+.gr-warn { background: var(--amber-tint); border-color: rgba(219, 154, 49, .4); }
+.gr-bad  { background: var(--coral-tint); border-color: rgba(201, 99, 63, .4); }
+
+.gr-verdict { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.gr-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
+.gr-warn .gr-dot { background: var(--amber); }
+.gr-bad .gr-dot { background: var(--coral); }
+.gr-margin { font-family: var(--mono); font-size: 12px; margin-left: auto; }
+
+.gr-lines {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.gr-lines > span { font-family: var(--mono); font-size: 12.5px; }
+.gr-lines .mono-label { display: block; margin-bottom: 2px; }
+
+.gr-reasons { margin: 10px 0 0; padding-left: 18px; font-size: 12.5px; }
+.gr-approval { margin: 8px 0 0; font-size: 12.5px; }
+
+/* ── Pitch composer ───────────────────────────────────────────────────────── */
+
+.pitch-box { margin-top: 12px; }
+.pitch-box .chips { margin-bottom: 12px; }
+
+/* ── Replies ──────────────────────────────────────────────────────────────── */
+
+.reply-box {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cold);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--surface-sunk);
+}
+.reply-positive { border-left-color: var(--green); }
+.reply-negative { border-left-color: var(--coral); }
+.reply-neutral  { border-left-color: var(--amber); }
+
+.reply-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; }
+.reply-verdict {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink);
+}
+.reply-body { margin: 6px 0; font-size: 13px; white-space: pre-wrap; }
+.reply-action { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+.reply-action .mono-label { display: block; margin-bottom: 2px; }
+
+/* ── Follow-ups ───────────────────────────────────────────────────────────── */
+
+.fu-list { display: flex; flex-direction: column; }
+
+.fu-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 78px 78px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.fu-row:last-child { border-bottom: 0; }
+.fu-done, .fu-cancelled { opacity: .5; }
+
+.fu-step {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface-sunk);
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+}
+.fu-kind { color: var(--ink); }
+.fu-due, .fu-status { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+
+.fu-suggestion {
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  margin: 0 0 10px;
+}
+
+/* ── Meetings ─────────────────────────────────────────────────────────────── */
+
+.meet-box {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.meet-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.meet-notes { font-size: 12.5px; color: var(--ink-soft); white-space: pre-wrap; margin: 8px 0 0; }
+
+/* ── Proposal versions ────────────────────────────────────────────────────── */
+
+.ver-list { display: flex; flex-direction: column; margin-bottom: 12px; }
+
+.ver-row {
+  display: grid;
+  grid-template-columns: 44px 90px 74px minmax(120px, 1fr) minmax(120px, 1.4fr);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.ver-row:last-child { border-bottom: 0; }
+
+.ver-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--ink);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  text-align: center;
+}
+.ver-price { font-family: var(--mono); font-weight: 600; }
+.ver-delta { font-family: var(--mono); font-size: 11px; color: var(--coral); }
+.ver-note { color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Timeline ─────────────────────────────────────────────────────────────── */
+
+.tl { display: flex; flex-direction: column; }
+
+.tl-row {
+  display: grid;
+  grid-template-columns: 62px 16px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 12.5px;
+}
+.tl-date { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+.tl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); justify-self: center; }
+.tl-claim { background: var(--violet); }
+.tl-email, .tl-linkedin, .tl-whatsapp { background: var(--teal); }
+.tl-reply { background: var(--green); }
+.tl-meeting { background: var(--amber); }
+.tl-proposal { background: var(--violet); }
+.tl-stage { background: var(--cold); }
+.tl-call { background: var(--teal-dark); }
+.tl-note { background: var(--line-strong); }
+.tl-text { color: var(--ink-soft); }
+
+/* ── Won / lost ───────────────────────────────────────────────────────────── */
+
+.ws-won { border-left: 3px solid var(--green); }
+.ws-lost { border-left: 3px solid var(--coral); }
+.ws-won p, .ws-lost p { font-size: 13px; margin: 4px 0; }
+.ws-won .mono-label, .ws-lost .mono-label { display: inline-block; min-width: 150px; }
+
+@media (max-width: 720px) {
+  .ws-panel { width: 100vw; }
+  .ws-contact { flex-direction: column; }
+  .pipe-head { display: none; }
+  .pipe-row { grid-template-columns: 1fr; row-gap: 4px; }
+  .funnel-row { grid-template-columns: 1fr 44px; }
+  .funnel-bar, .funnel-n { display: none; }
+}
+
+/* ── Classes styles.css leaves undefined ──────────────────────────────────── */
+
+/*
+ * .mono-label is used all over app.js with no base rule — every use there is
+ * plain inline text with a scoped override or nothing at all. Rather than add
+ * a global rule and change four existing tabs, this is scoped to the surfaces
+ * this module owns.
+ */
+.opp-card .mono-label,
+.ws-panel .mono-label,
+.intel-block .mono-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  margin-right: 6px;
+}
+
+/*
+ * The funnel adds three stages the old status dropdown never had, so
+ * .stage-meeting, .stage-proposal and .stage-negotiation had no colour and
+ * rendered as bare grey chips. .stage-new was missing too.
+ *
+ * Colour runs cool-to-warm along the funnel so a glance at a card says how far
+ * along it is without reading the word.
+ */
+.stage-new         { background: var(--cold-tint);   color: var(--ink-soft); }
+.stage-meeting     { background: var(--violet-tint); color: var(--violet); }
+.stage-proposal    { background: var(--violet-tint); color: var(--violet); }
+.stage-negotiation { background: var(--amber-tint);  color: var(--amber-ink); }

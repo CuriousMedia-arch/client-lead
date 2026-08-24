@@ -600,9 +600,14 @@ async function renderContent(opts = {}) {
   if (state.tab === "admin") return renderAdmin();
   // All Leads is the people table now — one row per contact, not per company.
   if (state.tab === "all") return renderPeople(opts);
-  // Claims made in All Leads are on people, so that half of My Outreach is a
-  // people list. The Fresh half stays company-level.
-  if (state.tab === "mine") return renderMyPeople(opts);
+  // My Outreach is its own module now — see outreach.js. It is no longer a
+  // list of claims; it is a Today screen backed by opportunities, and it was
+  // large enough to be worth keeping out of this file.
+  //
+  // renderMyPeople is kept below rather than deleted: All Leads still renders
+  // contact rows through the same helpers, and the card is a useful reference
+  // for the claim/release wiring the workspace reuses.
+  if (state.tab === "mine") return renderOutreach();
 
   let leads;
   try {
