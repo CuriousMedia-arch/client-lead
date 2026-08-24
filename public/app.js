@@ -917,7 +917,15 @@ function contactRow(c) {
               ? `<span class="lock-note">Locked</span>`
               : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
           }
-          <span class="claim-count">${Number(c.claim_count) > 0 ? `Claimed ${c.claim_count} time${c.claim_count === 1 ? "" : "s"} before` : "Never claimed"}</span>
+          <!-- The Claim column is pinned and overflows visibly, so anything
+               too wide for it paints on top of Owner instead of clipping.
+               "Claimed 3 times before" was ~123px in a ~100px cell; the long
+               form moves to the tooltip. -->
+          <span class="claim-count" title="${
+            Number(c.claim_count) > 0
+              ? `Claimed ${c.claim_count} time${Number(c.claim_count) === 1 ? "" : "s"} before`
+              : "Never claimed"
+          }">${Number(c.claim_count) > 0 ? `Claimed ${c.claim_count}\u00D7` : "Never claimed"}</span>
         </span>
       </span>
     </div>`;

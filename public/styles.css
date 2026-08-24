@@ -2165,7 +2165,23 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   gap: 12px;
   align-items: center;
   padding: 9px 16px;
-  min-width: 1588px;
+
+  /* The tracks above are all fixed px, so the row's real width is a fixed
+     number (1847px at present). It used to be written out by hand as
+     `min-width: 1588px`, and column widths were changed afterwards without
+     anyone re-adding them up — leaving the row's own box 259px narrower than
+     the cells inside it.
+     
+     That gap is what broke the pinned Claim column. `position: sticky` is
+     clamped to its containing block, which is this row — so once you scrolled
+     past ~390px, Claim hit the end of a box that stopped short of the table
+     and got left behind mid-row, with Owner and Country running out from under
+     it. The header's grey band stopped 259px early for the same reason.
+     
+     max-content makes the box measure itself, so it can never fall behind the
+     tracks again; min-width keeps it filling the table on a wide screen. */
+  width: max-content;
+  min-width: 100%;
 }
 
 .ct-head {
