@@ -52,6 +52,13 @@ function answer(sql, params = []) {
     return [{ id: 1, username: "vihith", display_name: "Vihith", role: "admin", active: true,
               expires_at: new Date(Date.now() + 864e5).toISOString() }];
   if (/FROM opportunities o/i.test(s) && /o\.id = /i.test(s)) return [OPP];
+  if (/hours_idle/i.test(s))
+    return [{
+      id: 1, company: "Zepto", stage: "contacted", next_action: "Send the deck.",
+      approval_status: null, last_reply_at: NOW, last_contacted_at: null,
+      contact_name: "Rahul Sharma", deadline_at: SOON,
+      followup_due: null, followup_step: null, meeting_at: null, hours_idle: 40,
+    }];
   if (/FROM opportunities/i.test(s) && /COUNT/i.test(s))
     return [{ total: 12, won: 3, lost: 4, won_value: 2500000, n: 2 }];
   if (/FROM opportunities/i.test(s)) return [OPP];
@@ -171,6 +178,15 @@ async function boot() {
     problems.push(`unhandled rejection: ${e.reason && e.reason.message}`)
   );
 
+  // Inject the real stylesheets. jsdom has no resource loader here, so the
+  // <link> tags never resolve — and without them a stacking-order bug like the
+  // backdrop sitting on top of the workspace panel is invisible to this test.
+  for (const sheet of ["styles.css", "outreach.css"]) {
+    const st = window.document.createElement("style");
+    st.textContent = fs.readFileSync(path.join(__dirname, "..", "public", sheet), "utf8");
+    window.document.head.appendChild(st);
+  }
+
   for (const file of ["app.js", "outreach.js"]) {
     const el = window.document.createElement("script");
     el.textContent = fs.readFileSync(path.join(__dirname, "..", "public", file), "utf8");
@@ -265,10 +281,24 @@ async function drive(window) {
 
   const panel = $("#ws-panel");
   check("Workspace opens", () => (panel && !panel.hidden ? "panel visible" : false));
+
+  // The bug this guards: .drawer-backdrop is z-index 100 in styles.css. The
+  // panel was 60, so the dimmer covered it — greyed out, unscrollable, every
+  // button swallowed by the backdrop's click-to-close.
+  check("Panel sits above its own backdrop", () => {
+    const pz = Number(window.getComputedStyle(panel).zIndex);
+    const bz = Number(window.getComputedStyle($("#ws-backdrop")).zIndex);
+    return pz > bz ? `panel ${pz} over backdrop ${bz}` : `panel ${pz} UNDER backdrop ${bz}`;
+  });
+  check("Panel body can scroll", () => {
+    const body = $(".ws-body");
+    const ov = window.getComputedStyle(body).overflowY;
+    return ov === "auto" || ov === "scroll" ? ov : `overflow-y is "${ov}"`;
+  });
   check("Workspace has all sections", () => {
     const heads = $$(".ws-section h3").map((h) => h.textContent.trim());
-    const want = ["Recommended solution", "Plan & pricing", "Pitch", "Replies",
-                  "Follow-up sequence", "Meetings", "Proposal", "Timeline"];
+    const want = ["What we should sell them", "Package", "Message to send", "Replies",
+                  "Reminder schedule", "Meetings", "Proposal", "History"];
     const missing = want.filter((w) => !heads.some((h) => h.startsWith(w)));
     return missing.length ? `missing ${missing.join(", ")}` : `${heads.length} sections`;
   });
@@ -354,6 +384,20 @@ async function drive(window) {
   check("Rate card is editable", () => `${$$(".rate-row input").length} inputs`);
   check("Guardrail thresholds are editable", () =>
     $("#gr-healthy") && $("#gr-min") && $("#gr-discount") ? true : false);
+
+  check("Cadence is editable", () =>
+    $("#cad-1") && $("#cad-4") && $("#cad-nudge")
+      ? `steps ${$("#cad-1").value}/${$("#cad-2").value}/${$("#cad-3").value}/${$("#cad-4").value}, nag after ${$("#cad-nudge").value}h`
+      : false);
+
+  // The bell is the whole point of the alerts endpoint — check it actually
+  // renders a row and that the row can jump into the workspace.
+  click($("#bell-btn"));
+  await wait(200);
+  check("Bell shows outreach work", () => {
+    const rows = $$("#bell-panel [data-bell-opp]");
+    return rows.length ? `${rows.length} entry` : "no outreach entries in the bell";
+  });
 
   check("Still no unrendered template literals", () => {
     // Scan the rendered surfaces only — body.innerHTML also contains the

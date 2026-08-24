@@ -481,15 +481,15 @@ router.get("/alerts", async (req, res, next) => {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
           kind: "expiring", urgency: 1,
-          text: c.overdue ? "Claim has expired" : `Claim ${c.label}`,
+          text: c.overdue ? "Your time on this has run out" : `${c.label} to close this`,
           action: r.next_action || "Open it before you lose it",
         });
       } else if (r.last_reply_at && (!r.last_contacted_at || r.last_reply_at > r.last_contacted_at)) {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
           kind: "reply", urgency: 2,
-          text: "Replied — waiting on you",
-          action: r.next_action || "Read the reply and respond",
+          text: "They wrote back — waiting for you",
+          action: r.next_action || "Read what they said and write back",
         });
       } else if (r.meeting_at) {
         items.push({
@@ -498,7 +498,7 @@ router.get("/alerts", async (req, res, next) => {
           text: `Meeting today at ${new Date(r.meeting_at).toLocaleTimeString("en-IN", {
             hour: "numeric", minute: "2-digit",
           })}`,
-          action: "Prep, and file the notes afterwards",
+          action: "Write your notes straight after",
         });
       } else if (r.followup_due) {
         const late = Math.round((Date.now() - new Date(r.followup_due).getTime()) / 864e5);
@@ -507,9 +507,9 @@ router.get("/alerts", async (req, res, next) => {
           kind: "followup", urgency: 4,
           text:
             late > 0
-              ? `Follow-up ${r.followup_step} was due ${late} day${late === 1 ? "" : "s"} ago`
-              : `Follow-up ${r.followup_step} is due today`,
-          action: "Draft it from the sequence",
+              ? `Reminder ${r.followup_step} was due ${late} day${late === 1 ? "" : "s"} ago`
+              : `Reminder ${r.followup_step} is due today`,
+          action: "Open it and we'll write the message for you",
         });
       } else if (r.stage === "new" && !r.last_contacted_at && r.hours_idle >= nudgeAfter) {
         // Nothing has ever been sent on this one. The follow-up sequence
@@ -523,14 +523,14 @@ router.get("/alerts", async (req, res, next) => {
             r.hours_idle >= 48
               ? `Claimed ${Math.floor(r.hours_idle / 24)} days ago, still not contacted`
               : `Claimed ${Math.floor(r.hours_idle)} hours ago, still not contacted`,
-          action: "Generate the pitch and send it",
+          action: "Open it and send your first message",
         });
       } else if (r.approval_status === "pending") {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
           kind: "approval", urgency: 5,
-          text: "Quote waiting on manager approval",
-          action: "Chase it, or re-price above the floor",
+          text: "Price is with your manager",
+          action: "Give them a nudge, or raise the price and resend",
         });
       }
     }

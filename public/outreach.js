@@ -126,8 +126,8 @@ async function renderOutreach() {
 function outreachNav() {
   const views = [
     ["today", "Today"],
-    ["pipeline", "Pipeline"],
-    ["intel", "Intelligence"],
+    ["pipeline", "All my leads"],
+    ["intel", "What's working"],
   ];
   if (state.user.role === "admin") views.push(["pricing", "Pricing"]);
 
@@ -171,22 +171,25 @@ async function renderToday() {
   outreach.today = data;
 
   const c = data.counts;
+  // Every caption says what to DO, in words a salesperson uses out loud.
+  // "the drip is waiting on you" was the sort of thing that reads fine to
+  // whoever wrote it and means nothing to the person using it at 10am.
   const slabs = [
-    ["High priority", c.urgent, "claim expiring or overdue", c.urgent ? "is-late" : ""],
-    ["Follow-ups due", c.followup, "the drip is waiting on you", c.followup ? "is-urgent" : ""],
-    ["New opportunities", c.new, "not contacted yet", ""],
-    ["Replies received", c.replied, "they answered — you haven't", c.replied ? "is-urgent" : ""],
-    ["Meetings today", c.meeting, "on the calendar", ""],
-    ["Proposals pending", c.proposal, "sent or awaiting approval", ""],
+    ["Do these first", c.urgent, "time is running out on these", c.urgent ? "is-late" : ""],
+    ["Time to follow up", c.followup, "you said you'd check back", c.followup ? "is-urgent" : ""],
+    ["Not started", c.new, "you haven't contacted them yet", ""],
+    ["They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
+    ["Meetings today", c.meeting, "happening today", ""],
+    ["Waiting on price approval", c.proposal, "sent, or with your manager", ""],
   ];
 
   const groups = [
-    ["urgent", "🔥 Urgent", data.buckets.urgent],
-    ["replied", "🟢 Replied", data.buckets.replied],
-    ["meeting", "📅 Meeting today", data.buckets.meeting],
-    ["followup", "🟠 Follow-up due", data.buckets.followup],
-    ["proposal", "📄 Proposal / approval", data.buckets.proposal],
-    ["new", "⚪ Not started", data.buckets.new],
+    ["urgent", "🔥 Do these first", data.buckets.urgent],
+    ["replied", "🟢 They replied — answer them", data.buckets.replied],
+    ["meeting", "📅 Meetings today", data.buckets.meeting],
+    ["followup", "🟠 Time to follow up", data.buckets.followup],
+    ["proposal", "📄 Quote sent — waiting", data.buckets.proposal],
+    ["new", "⚪ Not contacted yet", data.buckets.new],
   ].filter(([, , list]) => list && list.length);
 
   body.innerHTML = `
@@ -215,8 +218,8 @@ async function renderToday() {
             )
             .join("")
         : `<div class="empty">
-             <h2>Nothing needs you right now</h2>
-             <p>Claim something in All Leads or Fresh Leads and it turns up here as an opportunity.</p>
+             <h2>You're all caught up</h2>
+             <p>Nothing needs you right now. Pick up a lead from All Leads or Fresh Leads and it will show up here.</p>
            </div>`
     }`;
 
@@ -234,17 +237,25 @@ function todayCard(o, bucket) {
   const action =
     o.next_action ||
     {
-      urgent: o.stage === "new" ? "Send first pitch — the claim is running out" : "Push this before the claim expires",
-      replied: "Read the reply and respond",
-      meeting: "Meeting today — prep and add notes after",
-      followup: o.due_followup ? `Follow-up ${o.due_followup.step} is due` : "Follow up",
-      proposal: o.approval_status === "pending" ? "Waiting on manager approval" : "Chase the proposal",
-      new: "Send first pitch",
+      urgent:
+        o.stage === "new"
+          ? "Send your first message — you're about to lose this lead"
+          : "Move this forward today, or you lose the lead",
+      replied: "Read what they wrote and reply",
+      meeting: "Meeting today — after it, write down what was said",
+      followup: o.due_followup
+        ? `Time to check back (message ${o.due_followup.step} of 4)`
+        : "Time to check back with them",
+      proposal:
+        o.approval_status === "pending"
+          ? "Your manager is checking the price"
+          : "Chase the quote you sent",
+      new: "Send your first message",
     }[bucket];
 
   const clock = o.countdown
     ? `<span class="clock ${o.countdown.overdue ? "clock-over" : o.countdown.urgent ? "clock-soon" : ""}">${esc(
-        o.countdown.overdue ? "Claim expired" : `Claim: ${o.countdown.label}`
+        o.countdown.overdue ? "Time's up" : `${o.countdown.label} to close this`
       )}</span>`
     : "";
 
@@ -254,7 +265,7 @@ function todayCard(o, bucket) {
         <div>
           <div class="company-name">${esc(o.company)}</div>
           <div class="opp-card-meta">
-            ${o.contact_name ? esc(o.contact_name) : "Company-level"}${
+            ${o.contact_name ? esc(o.contact_name) : "No specific person yet"}${
     o.contact_role ? ` · ${esc(o.contact_role)}` : ""
   }
           </div>
@@ -268,14 +279,14 @@ function todayCard(o, bucket) {
         ${o.quoted_price ? `<span class="tag-soft">${inrShort(o.quoted_price)}</span>` : ""}
         ${
           o.approval_status === "pending"
-            ? `<span class="tag-warn">Approval pending</span>`
+            ? `<span class="tag-warn">Price needs approval</span>`
             : ""
         }
       </div>
 
-      <p class="opp-next"><span class="mono-label">Next action</span>${esc(action)}</p>
+      <p class="opp-next"><span class="mono-label">What to do next</span>${esc(action)}</p>
 
-      <button class="btn btn-sm btn-primary" data-open-opp="${o.id}">Open opportunity</button>
+      <button class="btn btn-sm btn-primary" data-open-opp="${o.id}">Open</button>
     </article>`;
 }
 
@@ -293,21 +304,21 @@ async function renderPipeline() {
   try {
     data = await api("/api/outreach");
   } catch (err) {
-    body.innerHTML = `<div class="empty"><h2>Couldn't load the pipeline</h2><p>${esc(err.message)}</p></div>`;
+    body.innerHTML = `<div class="empty"><h2>Couldn't load your leads</h2><p>${esc(err.message)}</p></div>`;
     return;
   }
 
   const rows = data.opportunities;
   if (!rows.length) {
-    body.innerHTML = `<div class="empty"><h2>No opportunities yet</h2><p>Claim a lead and it appears here.</p></div>`;
+    body.innerHTML = `<div class="empty"><h2>Nothing here yet</h2><p>Pick up a lead from All Leads or Fresh Leads and it will show up here.</p></div>`;
     return;
   }
 
   body.innerHTML = `
     <div class="db-table">
       <div class="pipe-head">
-        <span>Company</span><span>Contact</span><span>Stage</span>
-        <span>Service</span><span>Value</span><span>Margin</span><span>Claim</span><span></span>
+        <span>Company</span><span>Person</span><span>Where it stands</span>
+        <span>What we're selling</span><span>Deal size</span><span>Profit</span><span>Time left</span><span></span>
       </div>
       ${rows
         .map(
@@ -355,7 +366,7 @@ async function renderIntel() {
   try {
     data = await api(`/api/outreach/meta/intelligence${state.user.role === "admin" ? "?scope=team" : ""}`);
   } catch (err) {
-    body.innerHTML = `<div class="empty"><h2>Couldn't load intelligence</h2><p>${esc(err.message)}</p></div>`;
+    body.innerHTML = `<div class="empty"><h2>Couldn't load this</h2><p>${esc(err.message)}</p></div>`;
     return;
   }
   outreach.intel = data;
@@ -364,21 +375,21 @@ async function renderIntel() {
 
   body.innerHTML = `
     <div class="stats today-slabs">
-      <div class="stat"><p class="stat-label">Opportunities</p><p class="stat-value">${t.total}</p><p class="stat-note">${
-    data.scope === "team" ? "across the team" : "yours"
+      <div class="stat"><p class="stat-label">Total leads</p><p class="stat-value">${t.total}</p><p class="stat-note">${
+    data.scope === "team" ? "whole team" : "yours"
   }</p></div>
       <div class="stat"><p class="stat-label">Won</p><p class="stat-value">${t.won}</p><p class="stat-note">${inrShort(
     t.won_value
-  )} booked</p></div>
-      <div class="stat"><p class="stat-label">Lost</p><p class="stat-value">${t.lost}</p><p class="stat-note">with a reason on file</p></div>
-      <div class="stat"><p class="stat-label">Win rate</p><p class="stat-value">${
+  )} earned</p></div>
+      <div class="stat"><p class="stat-label">Lost</p><p class="stat-value">${t.lost}</p><p class="stat-note">and we know why</p></div>
+      <div class="stat"><p class="stat-label">Deals we win</p><p class="stat-value">${
         t.won + t.lost ? Math.round((t.won / (t.won + t.lost)) * 100) : 0
-      }%</p><p class="stat-note">of closed deals</p></div>
+      }%</p><p class="stat-note">out of every 100 closed</p></div>
     </div>
 
     <section class="intel-block">
-      <h3>Where opportunities fail</h3>
-      <p class="hint">Stage-to-stage conversion. A low number here is a process problem — and it's a different problem at each step.</p>
+      <h3>Where deals fall apart</h3>
+      <p class="hint">Out of every 100 leads that reach one step, how many make it to the next. A low number tells you which step to fix — getting meetings and closing deals are two different problems.</p>
       ${
         data.funnel.some((f) => f.reached)
           ? `<div class="funnel">
@@ -394,15 +405,15 @@ async function renderIntel() {
                 )
                 .join("")}
              </div>`
-          : `<p class="muted">Nothing has moved through a stage yet.</p>`
+          : `<p class="muted">No deals have moved forward yet, so there's nothing to measure.</p>`
       }
     </section>
 
     <section class="intel-block">
-      <h3>Why we lose business</h3>
-      <p class="hint">From the loss interview. ${
+      <h3>Why we lose deals</h3>
+      <p class="hint">Taken from the questions you answer when a deal is lost. ${
         data.loss_total
-          ? `${data.loss_total} closed-lost opportunit${data.loss_total === 1 ? "y" : "ies"}.`
+          ? `Based on ${data.loss_total} lost deal${data.loss_total === 1 ? "" : "s"}.`
           : "Nothing filed yet."
       }</p>
       ${
@@ -420,14 +431,14 @@ async function renderIntel() {
                 )
                 .join("")}
              </div>`
-          : `<p class="muted">No losses recorded yet — the breakdown appears once opportunities start closing.</p>`
+          : `<p class="muted">No lost deals recorded yet. This fills in as deals close.</p>`
       }
     </section>
 
     ${
       data.died_at && data.died_at.length
         ? `<section class="intel-block">
-             <h3>Stage they died in</h3>
+             <h3>The step where we lost them</h3>
              <div class="chips">${data.died_at
                .map((d) => `<span class="chip is-static">${esc(STAGE_LABEL[d.stage] || d.stage)} · ${d.n}</span>`)
                .join("")}</div>
@@ -438,15 +449,15 @@ async function renderIntel() {
     ${
       data.reapproach && data.reapproach.length
         ? `<section class="intel-block">
-             <h3>Due to re-approach</h3>
-             <p class="hint">Lost deals where the interview said come back. This is the part that makes the interview worth filling in.</p>
+             <h3>Worth trying again</h3>
+             <p class="hint">Deals you lost but said were worth another try, now due. This is the payoff for filling in those questions.</p>
              <div class="today-cards">
                ${data.reapproach
                  .map(
                    (r) => `
                  <article class="opp-card">
                    <div class="company-name">${esc(r.company)}</div>
-                   <div class="opp-card-meta">Lost on ${esc(r.primary_reason.replace(/_/g, " "))} · revisit ${esc(
+                   <div class="opp-card-meta">Lost because of ${esc(r.primary_reason.replace(/_/g, " "))} · try again ${esc(
                      dateOnly(r.reapproach_at)
                    )}</div>
                    <button class="btn btn-sm" data-open-opp="${r.id}">Open</button>
@@ -481,8 +492,8 @@ async function renderPricing() {
 
   body.innerHTML = `
     <section class="intel-block">
-      <h3>Rate card</h3>
-      <p class="hint">These are placeholders. Overwrite them with the real numbers — nothing in the portal hardcodes a price, it all reads from here.</p>
+      <h3>Standard packages and prices</h3>
+      <p class="hint">These are made-up numbers so the screens work. Type your real prices over them — every price in the portal comes from this table.</p>
       <div class="rate-table">
         <div class="rate-head">
           <span>Service</span><span>Tier</span><span>Label</span><span>Price ₹</span>
@@ -506,8 +517,8 @@ async function renderPricing() {
     </section>
 
     <section class="intel-block">
-      <h3>Cost model</h3>
-      <p class="hint">What one creator costs us, before geography and deliverable multipliers.</p>
+      <h3>What things cost us</h3>
+      <p class="hint">What we pay one creator. The custom package builder starts from these and adjusts for region, language and what they produce.</p>
       <div class="grid-3">
         ${["nano", "micro", "macro"]
           .map(
@@ -519,43 +530,43 @@ async function renderPricing() {
           )
           .join("")}
         <label class="field">
-          <span>Internal cost %</span>
+          <span>Our overhead %</span>
           <input type="number" id="cm-internal" value="${Number(m.internal_cost_pct || 0)}" />
         </label>
       </div>
     </section>
 
     <section class="intel-block">
-      <h3>Margin guardrail</h3>
-      <p class="hint">Below the floor, or past the discount cap, and the quote needs manager approval before it can be booked as won.</p>
+      <h3>Profit rules</h3>
+      <p class="hint">If a price makes too little profit, or the discount is too big, it goes to a manager before the deal can be marked won.</p>
       <div class="grid-3">
-        <label class="field"><span>Healthy margin %</span><input type="number" id="gr-healthy" value="${Number(
+        <label class="field"><span>Good profit %</span><input type="number" id="gr-healthy" value="${Number(
           g.healthy_margin_pct
         )}" /></label>
-        <label class="field"><span>Minimum margin % (floor)</span><input type="number" id="gr-min" value="${Number(
+        <label class="field"><span>Lowest profit we allow %</span><input type="number" id="gr-min" value="${Number(
           g.min_margin_pct
         )}" /></label>
-        <label class="field"><span>Max discount %</span><input type="number" id="gr-discount" value="${Number(
+        <label class="field"><span>Biggest discount allowed %</span><input type="number" id="gr-discount" value="${Number(
           g.max_discount_pct
         )}" /></label>
       </div>
     </section>
 
     <section class="intel-block">
-      <h3>Follow-up cadence</h3>
-      <p class="hint">When each step of the sequence comes due, counted from the day the first pitch is logged as sent. The last field is different: it's how long a claimed lead may sit with nothing sent at all before the bell starts nagging.</p>
+      <h3>Reminder timing</h3>
+      <p class="hint">How many days after your first message each reminder appears. The last box is different: if you pick up a lead and send nothing at all, that is how long before we start reminding you.</p>
       <div class="grid-3">
         ${[1, 2, 3, 4]
           .map(
             (n) => `
           <label class="field">
-            <span>Follow-up ${n} — day</span>
+            <span>Reminder ${n} — day</span>
             <input type="number" min="1" id="cad-${n}" value="${Number(cad[`step${n}_days`] || 0)}" />
           </label>`
           )
           .join("")}
         <label class="field">
-          <span>Nag if untouched after (hours)</span>
+          <span>Remind me if nothing sent after (hours)</span>
           <input type="number" min="1" id="cad-nudge" value="${Number(cad.nudge_after_hours || 24)}" />
         </label>
       </div>
@@ -749,40 +760,40 @@ function wsServiceBlock(d) {
 
   return `
     <section class="ws-section">
-      <h3>Recommended solution</h3>
+      <h3>What we should sell them</h3>
       ${
         o.service_primary
           ? `<div class="rec-box ${o.service_accepted ? "is-accepted" : ""}">
-               <div class="rec-line"><span class="mono-label">Primary</span><strong>${esc(o.service_primary)}</strong></div>
-               ${o.service_secondary ? `<div class="rec-line"><span class="mono-label">Secondary</span>${esc(o.service_secondary)}</div>` : ""}
-               ${o.service_optional ? `<div class="rec-line"><span class="mono-label">Optional</span>${esc(o.service_optional)}</div>` : ""}
+               <div class="rec-line"><span class="mono-label">Main</span><strong>${esc(o.service_primary)}</strong></div>
+               ${o.service_secondary ? `<div class="rec-line"><span class="mono-label">Add on</span>${esc(o.service_secondary)}</div>` : ""}
+               ${o.service_optional ? `<div class="rec-line"><span class="mono-label">If they want</span>${esc(o.service_optional)}</div>` : ""}
                ${
                  o.service_rationale
                    ? `<p class="rec-why"><span class="mono-label">Why</span>${esc(o.service_rationale)}
-                        ${o.service_source === "rules" ? `<span class="tag-soft">playbook, not AI</span>` : ""}</p>`
+                        ${o.service_source === "rules" ? `<span class="tag-soft">standard suggestion</span>` : ""}</p>`
                    : ""
                }
                ${
                  o.service_accepted
-                   ? `<p class="muted">Accepted.</p>`
+                   ? `<p class="muted">Decided.</p>`
                    : `<div class="ws-actions">
-                        <button class="btn btn-sm btn-primary" id="accept-service">Accept recommendation</button>
-                        <button class="btn btn-sm" id="change-service">Change service</button>
+                        <button class="btn btn-sm btn-primary" id="accept-service">Yes, sell this</button>
+                        <button class="btn btn-sm" id="change-service">Pick something else</button>
                       </div>`
                }
              </div>`
-          : `<p class="muted">Nothing recommended yet.</p>
-             <button class="btn btn-sm btn-primary" id="recommend-service">Recommend a service</button>`
+          : `<p class="muted">Not decided yet.</p>
+             <button class="btn btn-sm btn-primary" id="recommend-service">Suggest what to sell</button>`
       }
 
       <div id="service-picker" hidden>
         <label class="field">
-          <span>Primary service</span>
+          <span>What are we selling?</span>
           <select id="svc-primary">${services
             .map((s) => `<option ${s === o.service_primary ? "selected" : ""}>${esc(s)}</option>`)
             .join("")}</select>
         </label>
-        <button class="btn btn-sm btn-primary" id="save-service">Save service</button>
+        <button class="btn btn-sm btn-primary" id="save-service">Save</button>
       </div>
     </section>`;
 }
@@ -799,12 +810,12 @@ function wsPlanBlock(d) {
   const price = outreach.pendingPrice != null ? outreach.pendingPrice : Number(o.quoted_price || 0);
 
   if (!o.service_primary) {
-    return `<section class="ws-section"><h3>Plan &amp; pricing</h3><p class="muted">Pick a service first.</p></section>`;
+    return `<section class="ws-section"><h3>Package &amp; price</h3><p class="muted">First decide what you're selling them, above.</p></section>`;
   }
 
   return `
     <section class="ws-section">
-      <h3>Plan &amp; pricing</h3>
+      <h3>Package &amp; price</h3>
 
       ${
         group
@@ -822,10 +833,10 @@ function wsPlanBlock(d) {
                  )
                  .join("")}
              </div>`
-          : `<p class="muted">No rate card for ${esc(o.service_primary)} yet — build a custom plan below.</p>`
+          : `<p class="muted">No standard packages for ${esc(o.service_primary)} yet. Build one below.</p>`
       }
 
-      <button class="btn btn-sm" id="toggle-builder">Build custom plan</button>
+      <button class="btn btn-sm" id="toggle-builder">Build a custom package</button>
 
       <div id="plan-builder" ${outreach.builderOpen || tier === "custom" ? "" : "hidden"}>
         <div class="grid-3">
@@ -837,11 +848,11 @@ function wsPlanBlock(d) {
             <select id="pb-lang">${["Hindi", "English", "Tamil", "Telugu", "Marathi", "Bengali", "Kannada"]
               .map((g) => `<option ${cfg.language === g ? "selected" : ""}>${g}</option>`)
               .join("")}</select></label>
-          <label class="field"><span>View commitment (millions)</span>
+          <label class="field"><span>Views promised (in millions)</span>
             <input type="number" id="pb-views" value="${Number(cfg.views_m || 0)}" /></label>
         </div>
 
-        <span class="mono-label">Creator mix</span>
+        <span class="mono-label">How many creators</span>
         <div class="grid-3">
           ${["nano", "micro", "macro"]
             .map(
@@ -852,7 +863,7 @@ function wsPlanBlock(d) {
             .join("")}
         </div>
 
-        <span class="mono-label">Deliverables</span>
+        <span class="mono-label">What they get</span>
         <div class="chips" id="pb-deliverables">
           ${["Reels", "YouTube", "Stories", "Static post"]
             .map(
@@ -866,17 +877,17 @@ function wsPlanBlock(d) {
       </div>
 
       <div class="grid-3">
-        <label class="field"><span>Client budget ₹</span>
+        <label class="field"><span>What the client can spend ₹</span>
           <input type="number" id="pb-budget" value="${Number(o.client_budget || 0)}" /></label>
-        <label class="field"><span>Price we quote ₹</span>
+        <label class="field"><span>What we'll charge ₹</span>
           <input type="number" id="pb-price" value="${price}" /></label>
         <div class="field"><span class="mono-label">&nbsp;</span>
-          <button class="btn btn-sm" id="run-quote">Recalculate</button></div>
+          <button class="btn btn-sm" id="run-quote">Check the profit</button></div>
       </div>
 
       ${guardrailBox(q, o)}
 
-      <button class="btn btn-primary" id="save-plan">Save plan &amp; price</button>
+      <button class="btn btn-primary" id="save-plan">Save</button>
     </section>`;
 }
 
@@ -894,13 +905,17 @@ function guardrailBox(q, o) {
         revenue: o.quoted_price, vendor_cost: o.vendor_cost, internal_cost: o.internal_cost,
         margin_amount: o.margin_amount, margin_pct: o.margin_pct,
         status: o.approval_status === "pending" ? "blocked" : o.margin_pct >= 35 ? "healthy" : "thin",
-        label: o.approval_status === "pending" ? "Manager approval required" : o.margin_pct >= 35 ? "Healthy" : "Thin but allowed",
+        label: o.approval_status === "pending"
+          ? "Needs your manager's approval"
+          : o.margin_pct >= 35
+          ? "Good deal — go ahead"
+          : "Tight, but you can sell it",
         reasons: o.approval_reason ? [o.approval_reason] : [],
       }
     : null);
 
   if (!source) {
-    return `<p class="muted">Enter a price and hit Recalculate to see the margin.</p>`;
+    return `<p class="muted">Put in a price and press "Check the profit" to see if this deal is worth doing.</p>`;
   }
 
   const tone =
@@ -911,13 +926,13 @@ function guardrailBox(q, o) {
       <div class="gr-verdict">
         <span class="gr-dot"></span>
         <strong>${esc(source.label)}</strong>
-        <span class="gr-margin">${source.margin_pct == null ? "—" : `${Number(source.margin_pct).toFixed(1)}% margin`}</span>
+        <span class="gr-margin">${source.margin_pct == null ? "—" : `we keep ${Number(source.margin_pct).toFixed(1)}%`}</span>
       </div>
       <div class="gr-lines">
-        <span><span class="mono-label">Client pays</span>${inr(source.revenue)}</span>
-        <span><span class="mono-label">Vendor / creator</span>${inr(source.vendor_cost)}</span>
-        <span><span class="mono-label">Internal</span>${inr(source.internal_cost)}</span>
-        <span><span class="mono-label">Margin</span>${inr(source.margin_amount)}</span>
+        <span><span class="mono-label">They pay us</span>${inr(source.revenue)}</span>
+        <span><span class="mono-label">Creators cost</span>${inr(source.vendor_cost)}</span>
+        <span><span class="mono-label">Our costs</span>${inr(source.internal_cost)}</span>
+        <span><span class="mono-label">We keep</span>${inr(source.margin_amount)}</span>
       </div>
       ${
         source.reasons && source.reasons.length
@@ -926,9 +941,11 @@ function guardrailBox(q, o) {
       }
       ${
         o.approval_status
-          ? `<p class="gr-approval">Approval: <strong>${esc(o.approval_status)}</strong>${
-              o.approval_note ? ` — ${esc(o.approval_note)}` : ""
-            }</p>`
+          ? `<p class="gr-approval">Manager: <strong>${esc(
+              { pending: "still checking", approved: "said yes", rejected: "said no" }[
+                o.approval_status
+              ] || o.approval_status
+            )}</strong>${o.approval_note ? ` — ${esc(o.approval_note)}` : ""}</p>`
           : ""
       }
     </div>`;
@@ -941,14 +958,14 @@ function wsPitchBlock(d) {
 
   return `
     <section class="ws-section">
-      <h3>Pitch</h3>
-      <p class="hint">Built from the company, the signal, the designation, the service and the plan — so it isn't a template with a name dropped in.</p>
-      <button class="btn btn-sm btn-primary" id="gen-pitch">Generate pitch</button>
+      <h3>Message to send</h3>
+      <p class="hint">We write this using their company, their recent news, the job title of your contact, and what you are selling — so it does not read like a template.</p>
+      <button class="btn btn-sm btn-primary" id="gen-pitch">Write my message</button>
 
       ${
         p
           ? `<div class="pitch-box">
-               ${p.source === "rules" ? `<p class="tag-warn">Written from the playbook — Gemini isn't configured, so this is a template you should edit.</p>` : ""}
+               ${p.source === "rules" ? `<p class="tag-warn">Our AI writer is switched off, so this is a standard template. Please edit it before you send.</p>` : ""}
                <div class="chips" id="pitch-tabs">
                  ${CHANNELS.map(
                    ([k, label], i) =>
@@ -969,7 +986,7 @@ function wsPitchBlock(d) {
                  <button class="btn btn-sm" id="copy-pitch">Copy</button>
                  <button class="btn btn-sm btn-primary" id="log-sent">Mark as sent</button>
                </div>
-               <p class="hint">Copy it into your mail client, then Mark as sent — that starts the follow-up sequence and puts it on the timeline.</p>
+               <p class="hint">Copy this, paste it into your email or WhatsApp, send it, then click Mark as sent. That schedules your reminders and adds it to the history below.</p>
              </div>`
           : ""
       }
@@ -1007,8 +1024,8 @@ function wsReplyBlock(d) {
         <span>Paste what they wrote back</span>
         <textarea id="reply-body" rows="3" placeholder="e.g. Sounds interesting, send me your deck"></textarea>
       </label>
-      <button class="btn btn-sm btn-primary" id="log-reply">Log reply &amp; classify</button>
-      <p class="hint">Logging a reply cancels every pending follow-up — nobody wants "just following up" landing after the client has already answered.</p>
+      <button class="btn btn-sm btn-primary" id="log-reply">Save their reply</button>
+      <p class="hint">Saving a reply switches off your pending reminders, so you never send "just following up" after they have already written back.</p>
     </section>`;
 }
 
@@ -1017,19 +1034,19 @@ function wsReplyBlock(d) {
 function wsFollowupBlock(d) {
   const f = d.followups;
   if (!f.length) {
-    return `<section class="ws-section"><h3>Follow-ups</h3><p class="muted">The sequence is laid down when the first pitch goes out.</p></section>`;
+    return `<section class="ws-section"><h3>Reminder schedule</h3><p class="muted">Your reminders get scheduled as soon as you send the first message.</p></section>`;
   }
 
   const KIND = {
-    reminder: "Gentle reminder",
-    value: "Add value — case study",
-    angle: "Different angle",
-    nurture: "Move to nurture",
+    reminder: "A gentle nudge",
+    value: "Share something useful",
+    angle: "Try a different angle",
+    nurture: "Stop chasing, stay in touch",
   };
 
   return `
     <section class="ws-section">
-      <h3>Follow-up sequence</h3>
+      <h3>Reminder schedule</h3>
       <div class="fu-list">
         ${f
           .map(
@@ -1134,7 +1151,7 @@ function wsProposalBlock(d) {
           : `<p class="muted">No versions yet.</p>`
       }
 
-      <button class="btn btn-sm btn-primary" id="gen-proposal">Generate proposal</button>
+      <button class="btn btn-sm btn-primary" id="gen-proposal">Write the proposal</button>
 
       ${
         draft
@@ -1168,7 +1185,7 @@ function wsTimelineBlock(d) {
   if (!d.timeline.length) return "";
   return `
     <section class="ws-section">
-      <h3>Timeline</h3>
+      <h3>History</h3>
       <div class="tl">
         ${d.timeline
           .map(
@@ -1202,7 +1219,7 @@ function wsCloseBlock(d) {
         ${l.note ? `<p><span class="mono-label">Note</span>${esc(l.note)}</p>` : ""}
         ${l.competitor_name ? `<p><span class="mono-label">Went to</span>${esc(l.competitor_name)}</p>` : ""}
         ${l.could_have_changed ? `<p><span class="mono-label">What would have changed it</span>${esc(l.could_have_changed)}</p>` : ""}
-        ${l.reapproach_at ? `<p><span class="mono-label">Re-approach</span>${esc(dateOnly(l.reapproach_at))}</p>` : ""}
+        ${l.reapproach_at ? `<p><span class="mono-label">Try again on</span>${esc(dateOnly(l.reapproach_at))}</p>` : ""}
       </section>`;
   }
 
@@ -1210,19 +1227,19 @@ function wsCloseBlock(d) {
 
   return `
     <section class="ws-section">
-      <h3>Close this opportunity</h3>
+      <h3>Close this deal</h3>
       <div class="ws-actions">
-        <button class="btn btn-sm btn-primary" id="mark-won">Mark won</button>
-        <button class="btn btn-sm btn-danger" id="open-lost">Mark lost</button>
+        <button class="btn btn-sm btn-primary" id="mark-won">We won this</button>
+        <button class="btn btn-sm btn-danger" id="open-lost">We lost this</button>
       </div>
       ${
         o.approval_status === "pending"
-          ? `<p class="tag-warn">Can't be booked as won until a manager clears the margin.</p>`
+          ? `<p class="tag-warn">You cannot mark this won until a manager approves the price.</p>`
           : ""
       }
 
       <div id="lost-form" hidden>
-        <p class="hint">Every question here turns a dead lead into something the company can act on. It takes a minute.</p>
+        <p class="hint">A minute here tells the whole company why deals are being lost. Please fill it in properly.</p>
 
         <label class="field"><span>1. What happened? *</span>
           <select id="ls-primary">
@@ -1230,7 +1247,7 @@ function wsCloseBlock(d) {
             ${reasons.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}
           </select></label>
 
-        <label class="field"><span>Secondary reason</span>
+        <label class="field"><span>Any other reason</span>
           <select id="ls-secondary">
             <option value="">None</option>
             ${reasons.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}
@@ -1257,11 +1274,11 @@ function wsCloseBlock(d) {
         <label class="field"><span>5. What could have changed the outcome?</span>
           <textarea id="ls-changed" rows="2"></textarea></label>
 
-        <label class="field"><span>Salesperson note</span>
+        <label class="field"><span>Your notes</span>
           <textarea id="ls-note" rows="2" placeholder="e.g. Client liked the concept but budget was ₹5L against ₹8L proposed"></textarea></label>
 
         <div class="grid-2">
-          <label class="field"><span>6. Should we re-approach?</span>
+          <label class="field"><span>6. Should we try again later?</span>
             <select id="ls-reapproach"><option value="">No</option><option value="yes">Yes</option></select></label>
           <label class="field"><span>7. When?</span>
             <select id="ls-days"><option value="">—</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select></label>
@@ -1410,7 +1427,7 @@ function wireWorkspace() {
       outreach.quote = quote;
       toast(
         quote.requires_approval
-          ? "Saved — sent to a manager for approval"
+          ? "Saved — your manager has to approve this price"
           : `Saved — ${quote.margin_pct}% margin`,
         quote.requires_approval
       );
@@ -1557,7 +1574,7 @@ function wireWorkspace() {
       });
       outreach.proposalDraft = null;
       toast(
-        quote.requires_approval ? "Saved — that discount needs manager approval" : "Proposal saved",
+        quote.requires_approval ? "Saved — that discount needs your manager's approval" : "Proposal saved",
         quote.requires_approval
       );
       await reloadWorkspace();

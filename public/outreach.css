@@ -223,7 +223,15 @@
   background: var(--bg);
   border-left: 1px solid var(--line);
   box-shadow: var(--shadow-md);
-  z-index: 60;
+
+  /*
+   * Must sit ABOVE .drawer-backdrop, which styles.css sets to z-index 100.
+   * This was 60, which put the dimmer on top of the panel: it looked greyed
+   * out, would not scroll, and every button was swallowed by the backdrop's
+   * own click-to-close handler. 110 clears the backdrop and the existing lead
+   * drawer (101) while staying under the modal at 120.
+   */
+  z-index: 110;
   display: flex;
   flex-direction: column;
 }
