@@ -629,6 +629,10 @@ async function renderContent(opts = {}) {
   // Fresh Leads works the whole company, so it needs to show who already holds
   // which contact — and what they've said — or two people ring the same person.
 
+  // Fresh Leads is worked at company level, so each card carries its people:
+  // who holds them, and why anyone handed one back.
+  if (state.tab === "fresh" && leads.length) loadFreshContacts(leads.map((l) => l.id));
+
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
   if ($("#f-sort")) $("#f-sort").value = state.sort;
@@ -1370,14 +1374,25 @@ function freshCard(lead) {
         ${tierBadge(lead.tier, lead.tier_note)}
       </div>
 
+      ${
+        !lead.fresh_owner_id && lead.fresh_release_note
+          ? `<div class="release-note">
+               <span class="mono-label">Handed back</span>
+               ${esc(lead.fresh_release_note)}
+             </div>`
+          : ""
+      }
+
       ${signalsByType(lead.signals, null, true)}
+
+      <div class="fresh-people" id="fp-${lead.id}"></div>
 
       <div class="mylead-actions">
         ${
           lead.fresh_owner_id === state.user.id
             ? `<span class="muted">Yours — see My Outreach → From Fresh Leads</span>
                <button class="btn btn-sm" data-act="release" data-source="fresh" data-id="${lead.id}">Release</button>`
-            : `<span class="muted">10 days to close once claimed</span>
+            : `<span class="muted">24h to show progress, then 15 days to close</span>
                <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
                  Claim
                </button>`
@@ -1683,6 +1698,68 @@ function newspaperCard(lead) {
 
 // Order the groups the same way the playbook orders priority: hottest first.
 const TYPE_ORDER = ["capital", "brand_launch", "retail_expansion", "leadership", "crisis", "none"];
+
+/** Contacts for every visible Fresh card, in one request. */
+async function loadFreshContacts(ids) {
+  let byLead = {};
+  try {
+    ({ byLead } = await api(`/api/leads/people/batch?ids=${ids.join(",")}`));
+  } catch {
+    return;
+  }
+
+  for (const id of ids) {
+    const box = $(`#fp-${id}`);
+    const list = byLead[id] || [];
+    if (!box || !list.length) continue;
+
+    box.innerHTML = `
+      <div class="fp-label">Contacts at this company</div>
+      ${list
+        .map(
+          (c) => `
+        <div class="fp-row">
+          <div class="fp-top">
+            <span class="fp-name">${esc(c.name)}</span>
+            <span class="fp-role">${esc(c.role || "—")}</span>
+            ${
+              c.owner_id
+                ? `<span class="fp-owner">${esc(c.owner_name)}${
+                    c.owner_id === state.user.id ? " (you)" : ""
+                  }</span>
+                   <span class="stage-chip stage-${esc(c.status || "new")}">${esc(stageLabel(c.status))}</span>`
+                : ""
+            }
+          </div>
+          ${
+            !c.owner_id && c.release_note
+              ? `<div class="release-note">
+                   <span class="mono-label">Handed back</span>${esc(c.release_note)}
+                 </div>`
+              : ""
+          }
+          ${
+            c.activity && c.activity.length
+              ? `<div class="fp-log">
+                   ${c.activity
+                     .slice(0, 2)
+                     .map(
+                       (a) => `<div class="fp-log-item">
+                         <span>${esc(KIND_LABEL[a.kind] || a.kind)} · ${esc(timeAgo(a.created_at))} · ${esc(
+                         a.user_name || "Someone"
+                       )}</span>
+                         <p>${esc(a.body)}</p>
+                       </div>`
+                     )
+                     .join("")}
+                 </div>`
+              : ""
+          }
+        </div>`
+        )
+        .join("")}`;
+  }
+}
 
 function signalsByType(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);

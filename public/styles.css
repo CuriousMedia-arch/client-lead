@@ -2564,3 +2564,23 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 
 .db-contacts, .ct-table { background: var(--surface); }
 .ct-head { background: var(--surface-sunk); }
+
+/* ── Header band: last word ──────────────────────────────────────────────────
+   Six earlier rules paint parts of this header, three of them white, and each
+   fix so far added a seventh that had to out-rank all of them. This targets
+   every direct child instead of naming particular cells, so a pinned cell
+   can't miss out on the band colour however the markup changes. */
+.ct-head { background: var(--surface-sunk); }
+.ct-head > * { background: var(--surface-sunk); }
+
+/* Rows are the other way round: white, including the pinned ends, and
+   unchanged on hover so the pinned cell never becomes a floating grey block. */
+.ct-row { background: var(--surface); }
+.ct-row > .ct-tools,
+.ct-row > .ct-actions,
+.ct-row:hover > .ct-tools,
+.ct-row:hover > .ct-actions { background: var(--surface); }
+
+/* Why something was handed back, wherever it can be picked up again. */
+.release-note .mono-label { display: block; margin-bottom: 2px; color: var(--amber-ink); opacity: .75; }
+.fresh-people { display: flex; flex-direction: column; gap: 7px; margin-top: 11px; }
