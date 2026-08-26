@@ -785,6 +785,7 @@ function paintWorkspace() {
       ${wsFollowupBlock(d)}
       ${wsMeetingBlock(d)}
       ${wsProposalBlock(d)}
+      ${wsHistoryBlock(d)}
       ${wsTimelineBlock(d)}
       ${wsCloseBlock(d)}
     </div>`;
@@ -797,7 +798,19 @@ function paintWorkspace() {
 
 function wsContactBlock(d) {
   const o = d.opportunity;
-  const primary = d.contacts.find((c) => c.id === o.contact_id) || d.contacts[0];
+
+  // Two kinds of opportunity, one block.
+  //
+  //   A claim on a PERSON (from All Leads) has exactly one contact and there is
+  //   nothing to choose.
+  //
+  //   A claim on a COMPANY (from Fresh Leads) borrowed that company's people
+  //   for the news window. There is one thing to sell and one price, but
+  //   several people who could receive it — so this one gets a picker.
+  const companyLevel = Boolean(o.lead_id);
+  const primary =
+    d.contacts.find((c) => c.id === (o.focus_contact_id || o.contact_id)) ||
+    (companyLevel ? null : d.contacts[0]);
 
   const clock = o.countdown
     ? `<span class="clock ${o.countdown.overdue ? "clock-over" : o.countdown.urgent ? "clock-soon" : ""}">${esc(
@@ -814,9 +827,26 @@ function wsContactBlock(d) {
           <p class="muted">${[o.industry, o.employees].filter(Boolean).map(esc).join(" · ") || "—"}</p>
         </div>
         <div>
-          <span class="mono-label">Contact</span>
-          <p class="ws-strong">${esc(primary ? primary.name : "No contact selected")}</p>
-          <p class="muted">${esc((primary && primary.role) || "—")}</p>
+          <span class="mono-label">${companyLevel ? "Who we're writing to" : "Contact"}</span>
+          ${
+            companyLevel
+              ? `<select id="focus-pick" class="focus-pick">
+                   <option value="">Choose a person…</option>
+                   ${d.contacts
+                     .map(
+                       (c) =>
+                         `<option value="${c.id}" ${
+                           c.id === o.focus_contact_id ? "selected" : ""
+                         }>${esc(c.name)}${c.role ? ` — ${esc(c.role)}` : ""}</option>`
+                     )
+                     .join("")}
+                 </select>
+                 <p class="hint">${d.contacts.length} ${
+                   d.contacts.length === 1 ? "person" : "people"
+                 } came with this company for the news window.</p>`
+              : `<p class="ws-strong">${esc(primary ? primary.name : "No contact on file")}</p>
+                 <p class="muted">${esc((primary && primary.role) || "—")}</p>`
+          }
         </div>
         <div class="ws-channels">
           ${primary && primary.phone ? `<a class="ws-chan" href="tel:${esc(primary.phone)}">📞 ${esc(primary.phone)}</a>` : ""}
@@ -1260,6 +1290,49 @@ function deltaLabel(newer, older) {
   return `${pct > 0 ? "+" : ""}${pct.toFixed(0)}%`;
 }
 
+/**
+ * What was already tried at this company, on earlier claims.
+ *
+ * A Fresh window closing hands the account back to the pool, so the next
+ * person to pick it up starts from scratch — unless they can see that someone
+ * pitched the same service in March and lost it on price. Without this the
+ * company gets the identical approach twice and notices.
+ */
+function wsHistoryBlock(d) {
+  const past = d.history || [];
+  if (!past.length) return "";
+
+  return `
+    <section class="ws-section ws-history">
+      <h3>Tried before at this company</h3>
+      <p class="hint">Earlier attempts, by you or anyone else. Worth a look before you pitch.</p>
+      ${past
+        .map(
+          (h) => `
+        <div class="hist-row hist-${esc(h.stage)}">
+          <span class="hist-when">${esc(dateOnly(h.created_at))}</span>
+          <span class="hist-who">${esc(h.owner_name || "Someone")}</span>
+          <span class="hist-what">
+            ${esc(h.service_primary || "No service chosen")}${
+            h.quoted_price ? ` · ${inrShort(h.quoted_price)}` : ""
+          }
+          </span>
+          <span class="hist-result">
+            ${
+              h.stage === "won"
+                ? "Won"
+                : h.stage === "lost"
+                ? `Lost — ${esc((h.lost_reason || "no reason given").replace(/_/g, " "))}`
+                : esc(STAGE_LABEL[h.stage] || h.stage)
+            }
+          </span>
+          <span class="hist-effort">${h.sent_count || 0} sent · ${h.meeting_count || 0} met</span>
+        </div>`
+        )
+        .join("")}
+    </section>`;
+}
+
 /* --- item 16: the timeline --- */
 
 function wsTimelineBlock(d) {
@@ -1422,6 +1495,20 @@ function wireWorkspace() {
         method: "POST",
         body: { primary: $("#svc-primary", panel).value },
       });
+      await reloadWorkspace();
+    })
+  );
+
+  /* who the pitch goes to, on a company-level claim */
+  on("#focus-pick", "change", () =>
+    guard(async () => {
+      await api(`/api/outreach/${id}/focus`, {
+        method: "POST",
+        body: { contact_id: $("#focus-pick", panel).value || null },
+      });
+      // Repaint: the pitch is written for whoever is selected, so a draft on
+      // screen is now addressed to the wrong person.
+      outreach.pitch = null;
       await reloadWorkspace();
     })
   );

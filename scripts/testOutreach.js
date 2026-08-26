@@ -46,8 +46,13 @@ let sweepDue = false;
 const released = [];
 
 function answer(sql) {
+  // Log the RAW statement, newlines intact. Collapsing whitespace first turned
+  // every `-- comment` in a query into one that swallowed the rest of the
+  // statement, so the SQL validator reported syntax errors in SQL that is
+  // perfectly valid as written.
+  fs.appendFileSync(SQL_LOG, sql + "\n;;;\n");
+
   const s = sql.replace(/\s+/g, " ").trim();
-  fs.appendFileSync(SQL_LOG, s + "\n;;;\n");
   released.push(s);
 
   if (/FROM sessions/i.test(s))

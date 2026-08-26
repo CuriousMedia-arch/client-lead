@@ -134,6 +134,7 @@ function answer(sql, params = []) {
       in_newspaper: true, last_signal_at: NOW, fresh_released_at: NOW,
     }];
   if (/alerts_seen_at/i.test(s)) return [{ alerts_seen_at: null }];
+  if (/sent\.opportunity_id/i.test(s)) return [];   // prior attempts at this company
   if (/silent_until IS NOT NULL/i.test(s)) return [];
   if (/FROM company_blocklist/i.test(s)) return [];
   if (/FROM users/i.test(s)) return [{ n: 1 }];

@@ -65,6 +65,11 @@ const OPP_SELECT = `
          cc.phone                 AS contact_phone,
          cc.phone2                AS contact_phone2,
          cc.linkedin              AS contact_linkedin,
+         fc.name                  AS focus_name,
+         fc.role                  AS focus_role,
+         fc.email                 AS focus_email,
+         fc.phone                 AS focus_phone,
+         fc.linkedin              AS focus_linkedin,
          cc.deadline_at           AS contact_deadline,
          cc.closed_at             AS contact_closed,
          l.fresh_deadline_at      AS lead_deadline,
@@ -73,6 +78,7 @@ const OPP_SELECT = `
     FROM opportunities o
     LEFT JOIN users            u  ON u.id  = o.owner_id
     LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+    LEFT JOIN company_contacts fc ON fc.id = o.focus_contact_id
     LEFT JOIN leads            l  ON l.id  = o.lead_id
     LEFT JOIN companies        c  ON lower(c.name) = lower(o.company)`;
 
@@ -132,8 +138,11 @@ async function contextFor(opp) {
     company: opp.company,
     industry: opp.industry,
     employees: opp.employees,
-    contact_name: opp.contact_name,
-    contact_role: opp.contact_role,
+    // On a company-level claim the recipient is whoever was picked; on a
+    // personal claim it is the person claimed. Same field either way, so the
+    // prompts don't have to know which kind of opportunity this is.
+    contact_name: opp.focus_name || opp.contact_name,
+    contact_role: opp.focus_role || opp.contact_role,
     signal_title: signal && signal.title,
     signal_summary: signal && (signal.summary || signal.why_it_matters),
     signal_type: signal && signal.signal_type,
@@ -419,9 +428,25 @@ router.post("/open", async (req, res, next) => {
         [contactId]
       );
       if (!c) return res.status(404).json({ error: "That contact no longer exists." });
+
+      // A swept contact has no opportunity of its own — the company's does.
+      // Hand back that one instead of creating a rival card for the same work.
+      if (c.claim_source === "fresh") {
+        const parent = await db.one(
+          `${OPP_SELECT}
+            WHERE o.lead_id IS NOT NULL AND lower(o.company) = lower($1) AND o.owner_id = $2`,
+          [c.company, c.owner_id]
+        );
+        if (parent) {
+          parent.countdown = countdown(parent);
+          parent.can_edit = parent.owner_id === req.user.id || req.user.role === "admin";
+          return res.json({ opportunity: parent, created: false, redirected: true });
+        }
+      }
+
       company = c.company;
       ownerId = c.owner_id;
-      source = c.claim_source === "fresh" ? "fresh" : "all";
+      source = "all";
     } else {
       const l = await db.one(
         `SELECT c.name AS company, l.fresh_owner_id, l.fresh_from_newspaper
@@ -472,18 +497,35 @@ router.post("/open", async (req, res, next) => {
  * new. Cheap and idempotent: the inserts are guarded by the same partial
  * uniques that stop a claim having two opportunities.
  */
+/*
+ * Notes on the query below, kept OUT of the SQL string on purpose: a `--`
+ * comment survives only as long as the newline after it does, and anything
+ * that collapses whitespace — a logger, a query formatter — turns it into a
+ * comment that swallows the rest of the statement.
+ *
+ *   claim_source <> 'fresh'  Only people claimed from All Leads get their own
+ *                            opportunity. A contact held because a Fresh claim
+ *                            swept up the company belongs to that company's
+ *                            opportunity; without this filter, one Fresh
+ *                            company with five contacts puts six cards on
+ *                            Today.
+ *
+ *   LEFT JOIN ... IS NULL    "Rows with no opportunity yet". Same result as
+ *                            NOT EXISTS and reads closer to the intent.
+ */
 router.post("/sync", async (req, res, next) => {
   try {
     const created = await db.one(
       `WITH ins_contacts AS (
          INSERT INTO opportunities (contact_id, company, owner_id, source, stage, silent_until)
-         SELECT cc.id, cc.company, cc.owner_id,
-                CASE WHEN cc.claim_source = 'fresh' THEN 'fresh' ELSE 'all' END, 'new',
+         SELECT cc.id, cc.company, cc.owner_id, 'all', 'new',
                 now() + ($2 || ' hours')::interval
            FROM company_contacts cc
+           LEFT JOIN opportunities o ON o.contact_id = cc.id
           WHERE cc.owner_id = $1
             AND cc.deleted_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.contact_id = cc.id)
+            AND COALESCE(cc.claim_source, 'all') <> 'fresh'
+            AND o.id IS NULL
          RETURNING id
        ), ins_leads AS (
          INSERT INTO opportunities (lead_id, company, owner_id, source, stage, silent_until)
@@ -492,8 +534,9 @@ router.post("/sync", async (req, res, next) => {
                 now() + ($2 || ' hours')::interval
            FROM leads l
            JOIN companies c ON c.id = l.company_id
+           LEFT JOIN opportunities o ON o.lead_id = l.id
           WHERE l.fresh_owner_id = $1
-            AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.lead_id = l.id)
+            AND o.id IS NULL
          RETURNING id
        )
        SELECT (SELECT COUNT(*) FROM ins_contacts)::int
@@ -505,9 +548,10 @@ router.post("/sync", async (req, res, next) => {
     // counts them as having reached 'new' rather than starting life invisible.
     await db.run(
       `INSERT INTO opportunity_stages (opportunity_id, to_stage, user_id)
-       SELECT o.id, 'new', $1 FROM opportunities o
-        WHERE o.owner_id = $1
-          AND NOT EXISTS (SELECT 1 FROM opportunity_stages s WHERE s.opportunity_id = o.id)`,
+       SELECT o.id, 'new', $1::bigint
+         FROM opportunities o
+         LEFT JOIN opportunity_stages s ON s.opportunity_id = o.id
+        WHERE o.owner_id = $1 AND s.id IS NULL`,
       [req.user.id]
     );
 
@@ -553,6 +597,7 @@ router.get("/alerts", async (req, res, next) => {
               EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600  AS hours_idle
          FROM opportunities o
          LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+    LEFT JOIN company_contacts fc ON fc.id = o.focus_contact_id
          LEFT JOIN leads            l  ON l.id  = o.lead_id
         WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')`,
       [req.user.id]
@@ -680,7 +725,8 @@ router.get("/:id", async (req, res, next) => {
     const opp = await loadOpp(req.params.id, req.user);
     if (!opp) return res.status(404).json({ error: "No such opportunity." });
 
-    const [messages, followups, meetings, proposals, stages, loss, contacts] = await Promise.all([
+    const [messages, followups, meetings, proposals, stages, loss, history, contacts] =
+      await Promise.all([
       db.all(
         `SELECT m.*, u.display_name AS user_name
            FROM opportunity_messages m
@@ -714,6 +760,40 @@ router.get("/:id", async (req, res, next) => {
         [opp.id]
       ),
       db.one(`SELECT * FROM opportunity_loss WHERE opportunity_id = $1`, [opp.id]),
+      // What was already tried at this company, by anyone, on any earlier
+      // claim. A Fresh window closing hands the account back — the next person
+      // to pick it up should not open with a pitch the client already turned
+      // down six weeks ago.
+      db.all(
+        `SELECT o.id, o.stage, o.service_primary, o.quoted_price,
+                o.won_at, o.lost_at, o.created_at,
+                u.display_name AS owner_name,
+                ol.primary_reason AS lost_reason,
+                COALESCE(sent.n, 0)  AS sent_count,
+                COALESCE(mtg.n, 0)   AS meeting_count
+           FROM opportunities o
+           LEFT JOIN users u ON u.id = o.owner_id
+           LEFT JOIN opportunity_loss ol ON ol.opportunity_id = o.id
+           -- Pre-aggregated rather than correlated subqueries: one pass over
+           -- each child table instead of two per row.
+           LEFT JOIN (
+             SELECT opportunity_id, COUNT(*)::int AS n
+               FROM opportunity_messages WHERE direction = 'out'
+              GROUP BY opportunity_id
+           ) sent ON sent.opportunity_id = o.id
+           LEFT JOIN (
+             SELECT opportunity_id, COUNT(*)::int AS n
+               FROM opportunity_meetings GROUP BY opportunity_id
+           ) mtg ON mtg.opportunity_id = o.id
+          WHERE lower(o.company) = lower($1)
+            AND o.id <> $2
+            -- Only ones where something actually happened; an untouched
+            -- duplicate tells the next person nothing.
+            AND (o.last_contacted_at IS NOT NULL OR o.stage IN ('won','lost'))
+          ORDER BY o.created_at DESC
+          LIMIT 10`,
+        [opp.company, opp.id]
+      ),
       // Item 3 wants the contact block. For a Fresh claim there is no single
       // contact, so send the company's people and let the UI pick.
       db.all(
@@ -734,6 +814,7 @@ router.get("/:id", async (req, res, next) => {
       stages,
       loss: loss || null,
       contacts,
+      history,
       timeline: buildTimeline({ opp, messages, meetings, proposals, stages }),
       loss_reasons: LOSS_REASONS,
     });
@@ -846,6 +927,43 @@ router.post("/:id/service", async (req, res, next) => {
         req.body.optional || null,
         Boolean(req.body.accepted_ai),
       ]
+    );
+
+    res.json({ opportunity: await loadOpp(opp.id, req.user) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Who we're currently talking to on a company-level opportunity.
+ *
+ * A Fresh claim is one thing to sell to one company — one service, one plan,
+ * one price — but there may be five people who could receive it. So the pitch
+ * and the price stay on the opportunity and only the recipient changes here.
+ */
+router.post("/:id/focus", async (req, res, next) => {
+  try {
+    const opp = await loadOpp(req.params.id, req.user);
+    if (!opp) return res.status(404).json({ error: "No such opportunity." });
+    if (!assertOwner(opp, req.user, res)) return;
+
+    const contactId = req.body.contact_id ? Number(req.body.contact_id) : null;
+
+    if (contactId) {
+      // Has to be someone at this company — a stray id would quietly point the
+      // pitch at a person from an unrelated account.
+      const ok = await db.one(
+        `SELECT id FROM company_contacts
+          WHERE id = $1 AND lower(company) = lower($2) AND deleted_at IS NULL`,
+        [contactId, opp.company]
+      );
+      if (!ok) return res.status(400).json({ error: "That person isn't at this company." });
+    }
+
+    await db.run(
+      `UPDATE opportunities SET focus_contact_id = $2, updated_at = now() WHERE id = $1`,
+      [opp.id, contactId]
     );
 
     res.json({ opportunity: await loadOpp(opp.id, req.user) });

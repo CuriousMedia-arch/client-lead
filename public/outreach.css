@@ -639,3 +639,43 @@
 /* A live conversation with nothing due today. Calm on purpose — it is the one
    group on Today that is not asking for anything. */
 .stage-working { background: var(--cold-tint); color: var(--cold); }
+
+/* ── Company-level claims ─────────────────────────────────────────────────── */
+
+.focus-pick {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--surface);
+}
+.focus-pick:focus { outline: 1px solid var(--teal); }
+
+/* What was tried here before. Muted on purpose — it is background, not a task,
+   and it sits between the live work and the timeline. */
+.ws-history { border-left: 3px solid var(--line-strong); }
+
+.hist-row {
+  display: grid;
+  grid-template-columns: 62px minmax(80px, 1fr) minmax(120px, 1.3fr) minmax(110px, 1.2fr) 92px;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.hist-row:last-child { border-bottom: 0; }
+.hist-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hist-when { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+.hist-who { color: var(--ink-soft); }
+.hist-effort { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); text-align: right; }
+.hist-won .hist-result { color: var(--green); }
+.hist-lost .hist-result { color: var(--coral); }
+
+@media (max-width: 720px) {
+  .hist-row { grid-template-columns: 1fr 1fr; row-gap: 3px; }
+  .hist-effort { text-align: left; }
+}

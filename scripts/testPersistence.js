@@ -70,7 +70,7 @@ create table opportunities (
   next_action text, next_action_at timestamptz,
   last_contacted_at timestamptz, last_reply_at timestamptz,
   won_at timestamptz, lost_at timestamptz, won_value numeric,
-  silent_until timestamptz,
+  silent_until timestamptz, focus_contact_id int,
   created_at timestamptz default now(), updated_at timestamptz
 );
 create table opportunity_stages (
@@ -108,6 +108,9 @@ create table rate_card (
   creators int, views text, deliverables text, active boolean default true, sort int default 0
 );
 create table pricing_settings (key text primary key, value jsonb, updated_by int, updated_at timestamptz);
+create unique index idx_fu_step on opportunity_followups (opportunity_id, step);
+create unique index idx_opp_contact on opportunities (contact_id);
+create unique index idx_opp_lead on opportunities (lead_id);
 create table contact_activity (
   id serial primary key, contact_id int, user_id int, kind text, body text,
   stage text, created_at timestamptz default now()
@@ -181,6 +184,88 @@ function call(method, path, body) {
 }
 
 let pass = 0, fail = 0;
+/**
+ * The model: an All Leads claim is a claim on a PERSON; a Fresh claim is a
+ * claim on a COMPANY whose contacts come along for the news window and go back
+ * when it closes. One Fresh company must be ONE thing to work.
+ */
+async function freshClaimScenario() {
+  console.log("\n  --- a Fresh claim, with four contacts at the company ---\n");
+
+  mem.public.none(`
+    insert into companies (name, industry) values ('Boat','Consumer tech');
+    insert into leads (company_id, status, fresh_owner_id, fresh_claimed_at, fresh_deadline_at)
+      values (2,'new',1, now(), now() + interval '10 days');
+    insert into company_contacts (company, name, role, email, owner_id, claim_source, deadline_at, status)
+      values
+      ('Boat','Aman Gupta','Co-founder','aman@boat.in',1,'fresh', now() + interval '10 days','working'),
+      ('Boat','Priya N','Brand Head','priya@boat.in',1,'fresh', now() + interval '10 days','working'),
+      ('Boat','Rohit K','Marketing','rohit@boat.in',1,'fresh', now() + interval '10 days','working'),
+      ('Boat','Sana M','Digital','sana@boat.in',1,'fresh', now() + interval '10 days','working');
+  `);
+
+  await call("POST", "/api/outreach/sync");
+
+  const boat = mem.public.many(
+    "select id, contact_id, lead_id from opportunities where company = 'Boat'"
+  );
+  check("One Fresh company makes ONE opportunity, not one per contact",
+    boat.length === 1, `${boat.length} opportunities for Boat`);
+  check("That opportunity is company-level, not pinned to a person",
+    boat.length === 1 && boat[0].lead_id && !boat[0].contact_id,
+    boat.length === 1 ? `lead_id=${boat[0].lead_id}, contact_id=${boat[0].contact_id}` : "n/a");
+
+  if (boat.length !== 1) return;
+  const boatId = boat[0].id;
+
+  // Opening a swept contact must land on the company's opportunity, not spawn
+  // a rival card for the same work.
+  const swept = mem.public.many("select id from company_contacts where company='Boat' limit 1")[0];
+  const opened = await call("POST", "/api/outreach/open", { contact_id: swept.id });
+  check("Opening a swept contact redirects to the company's opportunity",
+    opened.status === 200 && opened.json.opportunity.id === boatId,
+    opened.status === 200 ? `landed on #${opened.json.opportunity.id}` : opened.raw);
+
+  const stillOne = mem.public.many("select id from opportunities where company = 'Boat'");
+  check("…and did not create a second one", stillOne.length === 1, `${stillOne.length} now`);
+
+  // All four people are offered as recipients of the one pitch.
+  const ws = await call("GET", `/api/outreach/${boatId}`);
+  check("All the company's people are available to pitch to",
+    (ws.json.contacts || []).length === 4, `${(ws.json.contacts || []).length} contacts listed`);
+
+  const pick = ws.json.contacts[1];
+  const focused = await call("POST", `/api/outreach/${boatId}/focus`, { contact_id: pick.id });
+  check("Can choose who the pitch goes to",
+    focused.status === 200 && focused.json.opportunity.focus_name === pick.name,
+    focused.status === 200 ? `pitching to ${focused.json.opportunity.focus_name}` : focused.raw);
+
+  const stranger = mem.public.many("select id from company_contacts where company='Zepto' limit 1")[0];
+  const bad = await call("POST", `/api/outreach/${boatId}/focus`, { contact_id: stranger.id });
+  check("Can't point the pitch at someone from another company", bad.status === 400,
+    `returned ${bad.status}`);
+
+  // Today must show one card for the account, not four.
+  const today = await call("GET", "/api/outreach/today");
+  const boatCards = Object.values(today.json.buckets)
+    .flat()
+    .filter((o) => o.company === "Boat");
+  check("Today shows one card for the account", boatCards.length === 1,
+    `${boatCards.length} Boat cards on Today`);
+
+  // And the next person to hold this account sees what was already tried.
+  await call("POST", `/api/outreach/${boatId}/sent`, {
+    channel: "email", subject: "Boat x Curious", body: "First approach.",
+  });
+  const zeptoWs = await call("GET", `/api/outreach/1`);
+  check("Earlier work on a company is visible to whoever holds it next",
+    Array.isArray(zeptoWs.json.history), `history array present`);
+
+  const boatWs2 = await call("GET", `/api/outreach/${boatId}`);
+  check("A company's own past attempts don't list itself",
+    !(boatWs2.json.history || []).some((h) => h.id === boatId), "self excluded");
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -272,6 +357,8 @@ async function run() {
   check("Auto-release does not delete a lead with a meeting on it",
     survived.status === 200,
     survived.status === 200 ? "still there" : "IT WAS DELETED along with all its history");
+
+  await freshClaimScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();
