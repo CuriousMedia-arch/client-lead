@@ -635,3 +635,7 @@
 }
 .np-choices .hint { margin: 0; font-size: 11.5px; }
 .np-choices .btn-danger .hint { color: rgba(255, 255, 255, .85); }
+
+/* A live conversation with nothing due today. Calm on purpose — it is the one
+   group on Today that is not asking for anything. */
+.stage-working { background: var(--cold-tint); color: var(--cold); }

@@ -187,6 +187,7 @@ async function renderToday() {
     ["replied", "They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
     ["meeting", "Meetings today", c.meeting, "happening today", ""],
     ["proposal", "Waiting on price approval", c.proposal, "sent, or with your manager", ""],
+    ["working", "In progress", c.working || 0, "live conversations, nothing due", ""],
   ];
 
   const groups = [
@@ -196,6 +197,7 @@ async function renderToday() {
     ["followup", "🟠 Time to follow up", data.buckets.followup],
     ["proposal", "📄 Quote sent — waiting", data.buckets.proposal],
     ["new", "⚪ Not contacted yet", data.buckets.new],
+    ["working", "🔵 In progress", data.buckets.working],
   ]
     .filter(([, , list]) => list && list.length)
     // Drilling into a slab hides the other groups rather than scrolling to
@@ -282,6 +284,9 @@ function todayCard(o, bucket) {
           ? "Your manager is checking the price"
           : "Chase the quote you sent",
       new: "Send your first message",
+      working: o.next_meeting_at
+        ? `Meeting booked for ${dateOnly(o.next_meeting_at)} — nothing due until then`
+        : "Keep this moving — set up a meeting or send a proposal",
     }[bucket];
 
   const clock = o.countdown

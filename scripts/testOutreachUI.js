@@ -304,7 +304,7 @@ async function drive(window) {
   /* Slabs drill down (new) */
   check("Slabs are clickable", () => {
     const n = $$("[data-slab]").length;
-    return n === 6 ? "6 clickable counts" : `${n} slabs`;
+    return n === 7 ? "7 clickable counts" : `${n} slabs`;
   });
 
   const liveSlab = $$("[data-slab]").find((b) => !b.disabled);

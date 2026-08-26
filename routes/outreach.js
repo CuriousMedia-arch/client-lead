@@ -148,6 +148,26 @@ async function contextFor(opp) {
  * a hop. Item 13 depends on that history being complete — a funnel with gaps
  * reports the wrong bottleneck, which is worse than reporting none.
  */
+/**
+ * Outreach stages don't map one-to-one onto the status a contact carries in
+ * All Leads — there are eight of one and seven of the other, named differently
+ * because they were designed for different jobs.
+ *
+ * Anything past first contact but not yet closed reads as 'qualified' on the
+ * contact: from All Leads' point of view "there's a live conversation here" is
+ * the whole message, and the detail lives in the opportunity.
+ */
+const STAGE_TO_STATUS = {
+  new: "new",
+  contacted: "contacted",
+  replied: "replied",
+  meeting: "qualified",
+  proposal: "qualified",
+  negotiation: "qualified",
+  won: "won",
+  lost: "lost",
+};
+
 async function moveStage(oppId, toStage, userId, q = null) {
   const run = q || ((text, params) => db.pool.query(text, params));
   const { rows } = await run("SELECT stage FROM opportunities WHERE id = $1", [oppId]);
@@ -168,6 +188,24 @@ async function moveStage(oppId, toStage, userId, q = null) {
      VALUES ($1, $2, $3, $4)`,
     [oppId, from || null, toStage, userId]
   );
+
+  // Keep All Leads in step. Until this existed, a contact could be mid-
+  // negotiation in My Outreach and still show as "new" to everyone browsing
+  // All Leads — which is how two people end up ringing the same person.
+  const status = STAGE_TO_STATUS[toStage];
+  if (status) {
+    await run(
+      `UPDATE company_contacts SET status = $2
+        WHERE id = (SELECT contact_id FROM opportunities WHERE id = $1)`,
+      [oppId, status]
+    );
+    await run(
+      `UPDATE leads SET status = $2, updated_at = now()
+        WHERE id = (SELECT lead_id FROM opportunities WHERE id = $1)`,
+      [oppId, status]
+    );
+  }
+
   return from;
 }
 
@@ -248,6 +286,18 @@ router.get("/today", async (req, res, next) => {
       [req.user.id]
     );
 
+    // Next meeting on each opportunity, whenever it is — the card needs to say
+    // "meeting on Friday" rather than leaving a mid-conversation lead looking
+    // idle.
+    const nextMeetings = await db.all(
+      `SELECT DISTINCT ON (m.opportunity_id) m.opportunity_id, m.scheduled_at
+         FROM opportunity_meetings m
+         JOIN opportunities o ON o.id = m.opportunity_id
+        WHERE o.owner_id = $1 AND m.scheduled_at >= now()
+        ORDER BY m.opportunity_id, m.scheduled_at ASC`,
+      [req.user.id]
+    );
+
     const meetingsToday = await db.all(
       `SELECT m.*, o.company, o.id AS opportunity_id
          FROM opportunity_meetings m
@@ -260,15 +310,27 @@ router.get("/today", async (req, res, next) => {
 
     const followupBy = new Map();
     for (const f of dueFollowups) if (!followupBy.has(f.opportunity_id)) followupBy.set(f.opportunity_id, f);
+    const nextBy = new Map();
+    for (const m of nextMeetings) nextBy.set(m.opportunity_id, m);
+
     const meetingBy = new Map();
     for (const m of meetingsToday) if (!meetingBy.has(m.opportunity_id)) meetingBy.set(m.opportunity_id, m);
 
-    const buckets = { urgent: [], replied: [], meeting: [], followup: [], proposal: [], new: [] };
+    // `working` is the catch-all and it is not optional. Without it, a lead at
+    // meeting or negotiation stage — with no meeting TODAY, no unanswered
+    // reply and no follow-up due — matched none of the branches below and
+    // silently vanished from Today. The salesperson's own conclusion was that
+    // the work had been lost, because the only way back to it was the Pipeline
+    // tab they had no reason to open.
+    const buckets = {
+      urgent: [], replied: [], meeting: [], followup: [], proposal: [], new: [], working: [],
+    };
 
     for (const o of mine) {
       o.countdown = countdown(o);
       o.due_followup = followupBy.get(o.id) || null;
       o.meeting_today = meetingBy.get(o.id) || null;
+      o.next_meeting_at = (nextBy.get(o.id) || {}).scheduled_at || null;
 
       // Order matters. A claim about to expire outranks everything: lose it and
       // the rest of the list is moot.
@@ -279,6 +341,7 @@ router.get("/today", async (req, res, next) => {
       else if (o.approval_status === "pending" || o.stage === "proposal") buckets.proposal.push(o);
       else if (o.due_followup) buckets.followup.push(o);
       else if (o.stage === "new") buckets.new.push(o);
+      else buckets.working.push(o);
     }
 
     res.json({
@@ -290,6 +353,7 @@ router.get("/today", async (req, res, next) => {
         replied: buckets.replied.length,
         meeting: buckets.meeting.length,
         proposal: buckets.proposal.length,
+        working: buckets.working.length,
         open: mine.length,
       },
     });
