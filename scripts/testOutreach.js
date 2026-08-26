@@ -70,13 +70,14 @@ function answer(sql) {
       deadline_at: new Date(Date.now() + 6 * 36e5).toISOString(),   // 6h left
       followup_due: new Date(Date.now() - 2 * 864e5).toISOString(),
       followup_step: 1, meeting_at: null, hours_idle: 96,
-      silent_until: null, updated_at: NOW, hours_to_release: null,
+      silent_until: null, deadline_at: null, deadline_kind: null,
+      updated_at: NOW, hours_to_release: null,
     }];
   if (/FROM opportunities/i.test(s) && /COUNT/i.test(s))
     return [{ total: 12, won: 3, lost: 4, won_value: 2500000, n: 2 }];
   // sweepSilent's own query — return nothing so the sweep is a no-op here and
   // the other cases aren't fighting a delete they didn't ask for.
-  if (/silent_until IS NOT NULL/i.test(s))
+  if (/deadline_at IS NOT NULL/i.test(s))
     return sweepDue
       ? [{ id: 1, contact_id: 7, lead_id: null, source: "all", company: "Zepto" }]
       : [];

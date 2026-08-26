@@ -75,7 +75,8 @@ function answer(sql, params = []) {
       approval_status: null, last_reply_at: NOW, last_contacted_at: null,
       contact_name: "Rahul Sharma", deadline_at: SOON,
       followup_due: null, followup_step: null, meeting_at: null, hours_idle: 40,
-      silent_until: null, updated_at: NOW, hours_to_release: null,
+      silent_until: null, deadline_at: null, deadline_kind: null,
+      updated_at: NOW, hours_to_release: null,
     }];
   if (/FROM opportunities/i.test(s) && /COUNT/i.test(s))
     return [{ total: 12, won: 3, lost: 4, won_value: 2500000, n: 2 }];
@@ -135,7 +136,7 @@ function answer(sql, params = []) {
     }];
   if (/alerts_seen_at/i.test(s)) return [{ alerts_seen_at: null }];
   if (/sent\.opportunity_id/i.test(s)) return [];   // prior attempts at this company
-  if (/silent_until IS NOT NULL/i.test(s)) return [];
+  if (/deadline_at IS NOT NULL/i.test(s)) return [];
   if (/FROM company_blocklist/i.test(s)) return [];
   if (/FROM users/i.test(s)) return [{ n: 1 }];
   if (/FROM companies/i.test(s)) return [{ id: 1, name: "Zepto" }];
