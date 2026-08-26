@@ -278,6 +278,10 @@ router.post("/alerts/seen", async (req, res, next) => {
  */
 router.get("/today", async (req, res, next) => {
   try {
+    // Pick up anything claimed since the last look, then expire anything that
+    // ran out. In that order: a lead claimed and abandoned inside the same
+    // window should still get its opportunity created before being judged.
+    await ensureOpportunities(req.user.id);
     await sweeps.sweepSilent();
 
     const mine = await db.all(
@@ -341,9 +345,22 @@ router.get("/today", async (req, res, next) => {
       o.meeting_today = meetingBy.get(o.id) || null;
       o.next_meeting_at = (nextBy.get(o.id) || {}).scheduled_at || null;
 
+      // A lead nobody has written to yet belongs under "Not contacted", which
+      // is where a salesperson looks for it. It only jumps the queue into
+      // "Do these first" once the clock is genuinely nearly out.
+      //
+      // This distinction matters because a Fresh claim starts on a 24-hour
+      // probation, and the flat 48-hour urgency test made EVERY new claim
+      // instantly urgent — so "Not contacted" always read zero and "Do these
+      // first" filled up with leads that had a full day left.
+      const neverContacted = o.stage === "new" && !o.last_contacted_at;
+      const nearlyOut = o.countdown
+        ? o.countdown.overdue || (neverContacted ? o.countdown.hours <= 6 : o.countdown.urgent)
+        : false;
+
       // Order matters. A claim about to expire outranks everything: lose it and
       // the rest of the list is moot.
-      if (o.countdown && (o.countdown.overdue || o.countdown.urgent)) buckets.urgent.push(o);
+      if (nearlyOut) buckets.urgent.push(o);
       else if (o.meeting_today) buckets.meeting.push(o);
       else if (o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at))
         buckets.replied.push(o);
@@ -374,6 +391,8 @@ router.get("/today", async (req, res, next) => {
 /** Everything of mine, including closed — the pipeline list behind Today. */
 router.get("/", async (req, res, next) => {
   try {
+    await ensureOpportunities(req.user.id);
+
     const all = req.query.all === "1" && req.user.role === "admin";
     const rows = await db.all(
       `${OPP_SELECT} ${all ? "" : "WHERE o.owner_id = $1"}
@@ -513,7 +532,7 @@ router.post("/open", async (req, res, next) => {
  *   LEFT JOIN ... IS NULL    "Rows with no opportunity yet". Same result as
  *                            NOT EXISTS and reads closer to the intent.
  */
-router.post("/sync", async (req, res, next) => {
+async function ensureOpportunities(userId) {
   try {
     const created = await db.one(
       `WITH ins_contacts AS (
@@ -541,7 +560,7 @@ router.post("/sync", async (req, res, next) => {
        )
        SELECT (SELECT COUNT(*) FROM ins_contacts)::int
             + (SELECT COUNT(*) FROM ins_leads)::int AS n`,
-      [req.user.id, String(Number((await pricing.followupCadence()).release_after_hours) || 24)]
+      [userId, String(Number((await pricing.followupCadence()).release_after_hours) || 24)]
     );
 
     // Seed the stage history for anything just created, so the funnel report
@@ -552,10 +571,30 @@ router.post("/sync", async (req, res, next) => {
          FROM opportunities o
          LEFT JOIN opportunity_stages s ON s.opportunity_id = o.id
         WHERE o.owner_id = $1 AND s.id IS NULL`,
-      [req.user.id]
+      [userId]
     );
 
-    res.json({ created: created.n });
+    return created.n;
+  } catch (err) {
+    // Never let this break the screen it runs in front of. A failure here
+    // means a card is missing, which is bad; a failure that blanks Today
+    // entirely is worse.
+    console.error("[outreach] sync failed:", err.message);
+    return 0;
+  }
+}
+
+/**
+ * Kept as an endpoint for anything that wants to force it, but Today and the
+ * bell now call ensureOpportunities() directly. They have to: this used to run
+ * only from the browser, once per page load, so a lead claimed AFTER My
+ * Outreach had been opened got no opportunity and simply never appeared —
+ * the tab's own count went up while Today stayed empty, and only a full
+ * browser refresh fixed it.
+ */
+router.post("/sync", async (req, res, next) => {
+  try {
+    res.json({ created: await ensureOpportunities(req.user.id) });
   } catch (err) {
     next(err);
   }
@@ -575,6 +614,7 @@ router.post("/sync", async (req, res, next) => {
  */
 router.get("/alerts", async (req, res, next) => {
   try {
+    await ensureOpportunities(req.user.id);
     await sweeps.sweepSilent();
 
     const rows = await db.all(

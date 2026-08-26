@@ -29,7 +29,6 @@ const outreach = {
   pendingPrice: null,
   builderOpen: false,
   proposalDraft: null,
-  synced: false,
   // Which slab is being drilled into, or null for the normal grouped view.
   // Lives in state, not the DOM, so a repaint after any action keeps the
   // filter the user chose.
@@ -109,12 +108,10 @@ function dateOnly(iso) {
 async function renderOutreach() {
   const content = $("#content");
 
-  // One backfill per session — see the /sync comment on the server. Failing is
-  // survivable: the tab still renders, it just shows fewer opportunities.
-  if (!outreach.synced) {
-    outreach.synced = true;
-    try { await api("/api/outreach/sync", { method: "POST" }); } catch { /* non-fatal */ }
-  }
+  // No client-side backfill any more. It used to run once per page load, which
+  // meant a lead claimed AFTER this tab had been opened never got an
+  // opportunity and simply never appeared — only a browser refresh fixed it.
+  // The server now does it inside /today, so it cannot fall behind.
 
   content.innerHTML = `
     ${outreachNav()}

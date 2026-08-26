@@ -41,14 +41,19 @@ create table leads (
   fresh_closed_at timestamptz, fresh_released_at timestamptz, fresh_release_note text,
   in_newspaper boolean default false, fresh_from_newspaper boolean default false,
   deleted_at timestamptz, deleted_by int, delete_reason text,
-  tier int, tier_note text, updated_at timestamptz
+  fresh_last_activity_at timestamptz, fresh_warned_at timestamptz,
+  score numeric, tier int, tier_note text,
+  created_at timestamptz default now(), updated_at timestamptz
 );
 create table company_contacts (
   id serial primary key, company text, name text, role text, email text, phone text,
   phone2 text, linkedin text, owner_id int, claimed_at timestamptz, deadline_at timestamptz,
   closed_at timestamptz, claim_source text, status text default 'new',
   deleted_at timestamptz, is_primary boolean default false, release_note text,
-  claim_count int default 0
+  claim_count int default 0, taken_from int, taken_from_status text,
+  verified boolean default false, verified_by int, verified_at timestamptz,
+  seniority text, department text, city text, state text, country text,
+  created_at timestamptz default now()
 );
 create table signals (
   id serial primary key, lead_id int, company text, title text, summary text,
@@ -111,6 +116,14 @@ create table pricing_settings (key text primary key, value jsonb, updated_by int
 create unique index idx_fu_step on opportunity_followups (opportunity_id, step);
 create unique index idx_opp_contact on opportunities (contact_id);
 create unique index idx_opp_lead on opportunities (lead_id);
+create table activity (
+  id serial primary key, lead_id int, user_id int, kind text, body text,
+  created_at timestamptz default now()
+);
+create table contact_claims (
+  id serial primary key, contact_id int, user_id int, source text,
+  claimed_at timestamptz default now(), released_at timestamptz, release_note text
+);
 create table contact_activity (
   id serial primary key, contact_id int, user_id int, kind text, body text,
   stage text, created_at timestamptz default now()
@@ -266,6 +279,54 @@ async function freshClaimScenario() {
     !(boatWs2.json.history || []).some((h) => h.id === boatId), "self excluded");
 }
 
+/**
+ * Claim a New Lead (the discovery sweep's find, company approval = 'pending')
+ * through the real claim endpoint, then look for it on Today.
+ */
+async function newLeadScenario() {
+  console.log("\n  --- claiming a New Lead, the way the tab does it ---\n");
+
+  mem.public.none(`
+    insert into companies (name, industry, approval) values ('Snitch','Fashion','pending');
+    insert into leads (company_id, status) values (3,'new');
+    insert into signals (lead_id, company, title, signal_type, published, created_at)
+      values (3,'Snitch','Snitch raises Series A','capital', now(), now());
+  `);
+
+  const leadId = mem.public.many("select id from leads where company_id = 3")[0].id;
+
+  const claimed = await call("POST", `/api/leads/${leadId}/claim`, { source: "fresh" });
+  check("New Lead claims", claimed.status === 200, claimed.status === 200 ? null : claimed.raw);
+
+  const today = await call("GET", "/api/outreach/today");
+  const counts = today.json.counts;
+  const buckets = today.json.buckets;
+
+  const onScreen = Object.entries(buckets)
+    .filter(([, list]) => list.some((o) => o.company === "Snitch"))
+    .map(([k]) => k);
+
+  const bucketTotal = Object.values(buckets).reduce((n, l) => n + l.length, 0);
+
+  check("A claimed New Lead has an opportunity",
+    mem.public.many("select id from opportunities where company='Snitch'").length === 1,
+    `${mem.public.many("select id from opportunities where company='Snitch'").length} found`);
+
+  check("It appears in a bucket on Today", onScreen.length > 0,
+    onScreen.length ? `in "${onScreen.join(", ")}"` : "in NO bucket");
+
+  // A freshly claimed lead has a full probation window left. It belongs under
+  // "Not contacted", not "Do these first" — otherwise every new claim is
+  // urgent and the urgent list means nothing.
+  check("A brand new claim reads as 'not contacted', not urgent",
+    onScreen.includes("new"), `landed in "${onScreen.join(", ")}"`);
+
+  check("Every open opportunity is on screen somewhere", bucketTotal === counts.open,
+    `${bucketTotal} cards vs ${counts.open} open — ${counts.open - bucketTotal} missing`);
+
+  console.log(`      counts: ${JSON.stringify(counts)}`);
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -359,6 +420,7 @@ async function run() {
     survived.status === 200 ? "still there" : "IT WAS DELETED along with all its history");
 
   await freshClaimScenario();
+  await newLeadScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();
