@@ -18,6 +18,7 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 const pricing = require("../lib/pricing");
+const sweeps = require("../lib/sweeps");
 const ai = require("../lib/outreachAI");
 
 const router = express.Router();
@@ -201,6 +202,23 @@ async function closeUnderlyingClaim(opp, outcome, q = null) {
   }
 }
 
+/**
+ * Mark everything currently outstanding as seen.
+ *
+ * Stamps a timestamp rather than storing dismissed ids. That is what makes a
+ * recurring problem behave correctly: if they reply again tomorrow, the new
+ * reply is newer than this stamp, so the dot lights up again — whereas a
+ * dismissed-id list would keep it permanently silenced.
+ */
+router.post("/alerts/seen", async (req, res, next) => {
+  try {
+    await db.run(`UPDATE users SET alerts_seen_at = now() WHERE id = $1`, [req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /* ── the Today screen (items 1 & 2) ───────────────────────────────────────── */
 
 /**
@@ -213,6 +231,8 @@ async function closeUnderlyingClaim(opp, outcome, q = null) {
  */
 router.get("/today", async (req, res, next) => {
   try {
+    await sweeps.sweepSilent();
+
     const mine = await db.all(
       `${OPP_SELECT} WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')
        ORDER BY o.updated_at DESC`,
@@ -358,11 +378,14 @@ router.post("/open", async (req, res, next) => {
       return res.status(403).json({ error: "Someone else holds this claim." });
     }
 
+    // How long they have to send the first message before it goes back.
+    const releaseHours = Number((await pricing.followupCadence()).release_after_hours) || 24;
+
     const created = await db.one(
-      `INSERT INTO opportunities (contact_id, lead_id, company, owner_id, source, stage)
-       VALUES ($1, $2, $3, $4, $5, 'new')
+      `INSERT INTO opportunities (contact_id, lead_id, company, owner_id, source, stage, silent_until)
+       VALUES ($1, $2, $3, $4, $5, 'new', now() + ($6 || ' hours')::interval)
        RETURNING id`,
-      [contactId, leadId, company, ownerId, source]
+      [contactId, leadId, company, ownerId, source, String(releaseHours)]
     );
     await db.run(
       `INSERT INTO opportunity_stages (opportunity_id, to_stage, user_id) VALUES ($1, 'new', $2)`,
@@ -389,18 +412,20 @@ router.post("/sync", async (req, res, next) => {
   try {
     const created = await db.one(
       `WITH ins_contacts AS (
-         INSERT INTO opportunities (contact_id, company, owner_id, source, stage)
+         INSERT INTO opportunities (contact_id, company, owner_id, source, stage, silent_until)
          SELECT cc.id, cc.company, cc.owner_id,
-                CASE WHEN cc.claim_source = 'fresh' THEN 'fresh' ELSE 'all' END, 'new'
+                CASE WHEN cc.claim_source = 'fresh' THEN 'fresh' ELSE 'all' END, 'new',
+                now() + ($2 || ' hours')::interval
            FROM company_contacts cc
           WHERE cc.owner_id = $1
             AND cc.deleted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM opportunities o WHERE o.contact_id = cc.id)
          RETURNING id
        ), ins_leads AS (
-         INSERT INTO opportunities (lead_id, company, owner_id, source, stage)
+         INSERT INTO opportunities (lead_id, company, owner_id, source, stage, silent_until)
          SELECT l.id, c.name, l.fresh_owner_id,
-                CASE WHEN l.fresh_from_newspaper THEN 'newspaper' ELSE 'fresh' END, 'new'
+                CASE WHEN l.fresh_from_newspaper THEN 'newspaper' ELSE 'fresh' END, 'new',
+                now() + ($2 || ' hours')::interval
            FROM leads l
            JOIN companies c ON c.id = l.company_id
           WHERE l.fresh_owner_id = $1
@@ -409,7 +434,7 @@ router.post("/sync", async (req, res, next) => {
        )
        SELECT (SELECT COUNT(*) FROM ins_contacts)::int
             + (SELECT COUNT(*) FROM ins_leads)::int AS n`,
-      [req.user.id]
+      [req.user.id, String(Number((await pricing.followupCadence()).release_after_hours) || 24)]
     );
 
     // Seed the stage history for anything just created, so the funnel report
@@ -442,6 +467,8 @@ router.post("/sync", async (req, res, next) => {
  */
 router.get("/alerts", async (req, res, next) => {
   try {
+    await sweeps.sweepSilent();
+
     const rows = await db.all(
       `SELECT o.id, o.company, o.stage, o.next_action, o.approval_status,
               o.last_reply_at, o.last_contacted_at,
@@ -456,7 +483,10 @@ router.get("/alerts", async (req, res, next) => {
               (SELECT MIN(m.scheduled_at) FROM opportunity_meetings m
                 WHERE m.opportunity_id = o.id
                   AND m.scheduled_at::date = CURRENT_DATE) AS meeting_at,
-              EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600 AS hours_idle
+              o.silent_until,
+              o.updated_at,
+              EXTRACT(EPOCH FROM (o.silent_until - now())) / 3600 AS hours_to_release,
+              EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600  AS hours_idle
          FROM opportunities o
          LEFT JOIN company_contacts cc ON cc.id = o.contact_id
          LEFT JOIN leads            l  ON l.id  = o.lead_id
@@ -467,8 +497,21 @@ router.get("/alerts", async (req, res, next) => {
     // How long a claimed lead may sit untouched before it nags. Admin-editable
     // in Pricing, because the right number is a sales-management decision, not
     // a constant someone should have to redeploy to change.
+    // Start warning when there is less than this left on the clock. Warning
+    // the instant a lead is claimed would make the bell noise; warning only
+    // once it has already gone would be useless.
     const cadence = await pricing.followupCadence();
-    const nudgeAfter = Number(cadence.nudge_after_hours) || 24;
+    const nudgeAfter = Number(cadence.nudge_after_hours) || 12;
+
+    // When each alert became true. The bell dot compares this against the
+    // user's alerts_seen_at, so an alert they have already looked at stops
+    // lighting it up — and a problem that comes back lights it up again.
+    // Read straight from the table, not from req.user: sessions are cached for
+    // SESSION_CACHE_MS, so a cached user object would still hold the OLD
+    // timestamp right after they mark everything read — and the dot would
+    // stubbornly stay lit until the cache expired.
+    const seenRow = await db.one("SELECT alerts_seen_at FROM users WHERE id = $1", [req.user.id]);
+    const seenAt = seenRow && seenRow.alerts_seen_at ? new Date(seenRow.alerts_seen_at) : null;
 
     const items = [];
 
@@ -480,21 +523,21 @@ router.get("/alerts", async (req, res, next) => {
       if (c && (c.overdue || c.urgent)) {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "expiring", urgency: 1,
+          kind: "expiring", urgency: 1, since: r.deadline_at,
           text: c.overdue ? "Your time on this has run out" : `${c.label} to close this`,
           action: r.next_action || "Open it before you lose it",
         });
       } else if (r.last_reply_at && (!r.last_contacted_at || r.last_reply_at > r.last_contacted_at)) {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "reply", urgency: 2,
+          kind: "reply", urgency: 2, since: r.last_reply_at,
           text: "They wrote back — waiting for you",
           action: r.next_action || "Read what they said and write back",
         });
       } else if (r.meeting_at) {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "meeting", urgency: 3,
+          kind: "meeting", urgency: 3, since: r.meeting_at,
           text: `Meeting today at ${new Date(r.meeting_at).toLocaleTimeString("en-IN", {
             hour: "numeric", minute: "2-digit",
           })}`,
@@ -504,31 +547,38 @@ router.get("/alerts", async (req, res, next) => {
         const late = Math.round((Date.now() - new Date(r.followup_due).getTime()) / 864e5);
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "followup", urgency: 4,
+          kind: "followup", urgency: 4, since: r.followup_due,
           text:
             late > 0
               ? `Reminder ${r.followup_step} was due ${late} day${late === 1 ? "" : "s"} ago`
               : `Reminder ${r.followup_step} is due today`,
           action: "Open it and we'll write the message for you",
         });
-      } else if (r.stage === "new" && !r.last_contacted_at && r.hours_idle >= nudgeAfter) {
+      } else if (r.stage === "new" && !r.last_contacted_at && r.hours_to_release != null && r.hours_to_release <= nudgeAfter) {
         // Nothing has ever been sent on this one. The follow-up sequence
         // cannot help — it only starts after a first message — so without
         // this branch a freshly claimed lead can sit silently until its claim
         // expires, which is exactly the gap that made the bell look dead.
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "stalled", urgency: 4,
+          kind: "stalled", urgency: 4, since: r.silent_until,
+          // Counts DOWN to the consequence, not up since the claim. "Claimed
+          // 41 hours ago" tells a salesperson nothing they can act on; "goes
+          // back in 7 hours" tells them exactly what happens if they don't.
           text:
-            r.hours_idle >= 48
-              ? `Claimed ${Math.floor(r.hours_idle / 24)} days ago, still not contacted`
-              : `Claimed ${Math.floor(r.hours_idle)} hours ago, still not contacted`,
-          action: "Open it and send your first message",
+            r.hours_to_release <= 0
+              ? "About to go back to the pool"
+              : r.hours_to_release < 1
+              ? "Goes back to the pool within the hour"
+              : `Goes back to the pool in ${Math.floor(r.hours_to_release)} hour${
+                  Math.floor(r.hours_to_release) === 1 ? "" : "s"
+                }`,
+          action: "Send your first message to keep it",
         });
       } else if (r.approval_status === "pending") {
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "approval", urgency: 5,
+          kind: "approval", urgency: 5, since: r.updated_at,
           text: "Price is with your manager",
           action: "Give them a nudge, or raise the price and resend",
         });
@@ -537,7 +587,19 @@ router.get("/alerts", async (req, res, next) => {
 
     items.sort((a, b) => a.urgency - b.urgency);
 
-    res.json({ items, count: items.length });
+    // `unseen` is what turns the dot red. `count` is everything outstanding,
+    // which is what the panel lists — the two differ on purpose: work you have
+    // already looked at is still work, it just shouldn't keep shouting.
+    for (const it of items) {
+      it.unseen = !seenAt || !it.since || new Date(it.since) > seenAt;
+    }
+
+    res.json({
+      items,
+      count: items.length,
+      unseen: items.filter((i) => i.unseen).length,
+      seen_at: seenAt,
+    });
   } catch (err) {
     // The bell is a convenience. If this throws, the rest of the portal should
     // not notice — an empty list is a better failure than a broken topbar.
@@ -900,8 +962,12 @@ router.post("/:id/sent", async (req, res, next) => {
          VALUES ($1, 'out', $2, $3, $4, $5, now(), $6)`,
         [opp.id, channel, req.body.subject || null, body, Boolean(req.body.generated), req.user.id]
       );
+      // Clearing silent_until is what takes this off the auto-release list.
+      // They have made contact; from here the normal claim clock applies.
       await q(
-        `UPDATE opportunities SET last_contacted_at = now(), updated_at = now() WHERE id = $1`,
+        `UPDATE opportunities
+            SET last_contacted_at = now(), silent_until = NULL, updated_at = now()
+          WHERE id = $1`,
         [opp.id]
       );
       if (opp.stage === "new") await moveStage(opp.id, "contacted", req.user.id, q);

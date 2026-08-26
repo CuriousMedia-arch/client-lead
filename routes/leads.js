@@ -1,6 +1,6 @@
 const express = require("express");
 const db = require("../db");
-const { requireAuth } = require("../lib/auth");
+const { requireAuth, requireAdmin } = require("../lib/auth");
 const playbook = require("../lib/triggers");
 const lifecycle = require("../lib/lifecycle");
 const freshClock = require("../lib/freshClock");
@@ -37,6 +37,14 @@ async function queryLeads(params, user) {
   const where = [];
   const args = [];
   const bind = (v) => `$${args.push(v)}`;
+
+  // Deleted by an admin, and blocklisted companies, are gone from every tab.
+  // Applied here rather than per-tab so there is no list anyone can reach that
+  // shows a lead someone deliberately removed.
+  where.push("l.deleted_at IS NULL");
+  where.push(
+    "NOT EXISTS (SELECT 1 FROM company_blocklist b WHERE lower(b.company) = lower(c.name))"
+  );
 
   if (tab === "fresh") {
     // Unclaimed on the FRESH track specifically. Whether someone claimed this
@@ -787,6 +795,90 @@ function logActivity(leadId, userId, kind, body) {
     body,
   ]);
 }
+
+/**
+ * Admin-only: remove a lead from the Newspaper.
+ *
+ * Two levels, because they answer different problems:
+ *
+ *   hide      - this particular news item was junk. Soft delete, so nothing
+ *               referencing the row breaks and an admin can see what went.
+ *               If the scraper finds a genuine story about them later, the
+ *               company comes back, which is usually what you want.
+ *
+ *   blocklist - this company is never a customer. Also stops it returning,
+ *               which is the only thing that saves an admin deleting the same
+ *               name every week when the scraper re-finds it.
+ *
+ * Soft, not hard: a real DELETE would cascade into signals and any
+ * opportunity history, and "remove it from my screen" should never quietly
+ * destroy a record of work someone did.
+ */
+router.delete("/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const lead = await db.one(
+      `SELECT l.id, c.name AS company FROM leads l
+         JOIN companies c ON c.id = l.company_id
+        WHERE l.id = $1`,
+      [req.params.id]
+    );
+    if (!lead) return res.status(404).json({ error: "That lead no longer exists." });
+
+    const reason = (req.body && req.body.reason) || null;
+    const blocklist = Boolean(req.body && req.body.blocklist);
+
+    await db.run(
+      `UPDATE leads
+          SET deleted_at = now(), deleted_by = $2, delete_reason = $3, updated_at = now()
+        WHERE id = $1`,
+      [lead.id, req.user.id, reason]
+    );
+
+    if (blocklist) {
+      await db.run(
+        `INSERT INTO company_blocklist (company, reason, created_by)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (lower(company)) DO NOTHING`,
+        [lead.company, reason, req.user.id]
+      );
+    }
+
+    res.json({
+      ok: true,
+      company: lead.company,
+      blocklisted: blocklist,
+      message: blocklist
+        ? `${lead.company} removed and blocked — it won't come back.`
+        : `${lead.company} removed from the Newspaper.`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Admin-only: what's currently blocked, and a way to unblock it. */
+router.get("/meta/blocklist", requireAdmin, async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT b.*, u.display_name AS created_by_name
+         FROM company_blocklist b
+         LEFT JOIN users u ON u.id = b.created_by
+        ORDER BY b.created_at DESC`
+    );
+    res.json({ blocked: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/meta/blocklist/:id", requireAdmin, async (req, res, next) => {
+  try {
+    await db.run("DELETE FROM company_blocklist WHERE id = $1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;
 module.exports.STATUSES = STATUSES;

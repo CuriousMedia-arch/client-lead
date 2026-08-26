@@ -109,3 +109,50 @@ and password. Hand them the URL and their credentials.
 
 **Before sharing widely:** change any placeholder passwords. Anyone with the URL
 can reach the login page.
+
+---
+
+## Releasing overdue leads on time
+
+Claim clocks are checked whenever someone loads a page, so what a person is
+looking at is never stale. But that alone means a lead due back on Saturday
+sits claimed until somebody opens the portal on Monday. Something has to tick
+the clocks when nobody is logged in.
+
+**Which mechanism you need depends on where this runs.**
+
+### Render (or a plain Node host)
+
+`services/scheduler.js` runs an in-process timer every 15 minutes. Nothing to
+set up — but note that on Render's **free** plan an idle instance sleeps, and a
+sleeping instance runs no timer. Either move to a paid plan, or set up the
+GitHub Action below, whose request also wakes the instance.
+
+### Vercel
+
+There is no always-on process for a timer to live in, and Vercel Cron on the
+Hobby plan allows only one run a day. `vercel.json` includes an hourly cron
+entry which works on Pro; on Hobby, use the GitHub Action.
+
+### GitHub Action (works on any host)
+
+`.github/workflows/sweep.yml` calls `/api/cron/sweep` every 15 minutes.
+
+- [ ] Set `CRON_SECRET` on the app to a long random string
+      (`openssl rand -hex 32`). On Render this is generated for you by
+      `render.yaml`; copy the value out of the dashboard.
+- [ ] Add two **repository secrets** under
+      *Settings → Secrets and variables → Actions*:
+      - `APP_URL` — e.g. `https://leads.curiousmedia.in`
+      - `CRON_SECRET` — the same string
+- [ ] Actions tab → **Release overdue leads** → *Run workflow* to test it.
+
+**Check:** the run should be green and print a line like
+`{"leads":{"released":0,"toNewspaper":0},"contacts":0,"silent":0}`.
+A 401 means the two `CRON_SECRET` values don't match. If `CRON_SECRET` is unset
+on the app the endpoint refuses everything rather than running open — an
+unauthenticated route that releases other people's leads is not something to
+leave on by accident.
+
+Running the sweep twice at once is harmless: each query only selects rows that
+are genuinely overdue and then makes them not-overdue.

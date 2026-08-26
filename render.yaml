@@ -3,6 +3,12 @@
 #
 # Data lives in Supabase, not on disk, so the free instance type is fine —
 # there's nothing to persist locally and nothing to lose when it restarts.
+#
+# One caveat with `plan: free`: Render sleeps an idle instance, and a sleeping
+# instance runs no in-process cron, so claim deadlines would stall overnight.
+# The GitHub Actions sweep (.github/workflows/sweep.yml) covers that — its
+# request wakes the instance and ticks the clocks. On a paid plan the
+# in-process timer in services/scheduler.js is enough on its own.
 services:
   - type: web
     name: curious-lead-intelligence
@@ -23,5 +29,9 @@ services:
         value: "true"
       - key: TZ_NAME
         value: Asia/Kolkata
+      # Lets the GitHub Actions sweep call /api/cron/sweep. Without it that
+      # endpoint refuses every request rather than running unauthenticated.
+      - key: CRON_SECRET
+        generateValue: true
       - key: NODE_VERSION
         value: "20"

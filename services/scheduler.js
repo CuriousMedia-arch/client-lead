@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const { runPipeline, isRunning } = require("./pipeline");
 const freshClock = require("../lib/freshClock");
+const sweeps = require("../lib/sweeps");
 
 /**
  * Two schedules, because Fresh Leads is two lists on two clocks.
@@ -58,6 +59,27 @@ function start() {
   cron.schedule(
     process.env.FRESH_CLOCK_CRON || "*/30 * * * *",
     () => freshClock.runChecks().catch((err) => console.error("[freshClock]", err.message)),
+    { timezone: process.env.TZ_NAME || "Asia/Kolkata" }
+  );
+
+  // The claim clocks need the same treatment, and for the same reason: a lead
+  // due back on Saturday should come back on Saturday, not on Monday when
+  // somebody finally opens a page. Every 15 minutes, which is fine granularity
+  // for deadlines measured in hours and days, and cheap — three small UPDATEs
+  // that touch nothing when nothing is overdue.
+  //
+  // The routes still sweep on request too. That is not redundant: it keeps the
+  // page in front of a person truthful in the seconds between heartbeats.
+  cron.schedule(
+    process.env.SWEEP_CRON || "*/15 * * * *",
+    async () => {
+      const r = await sweeps.runAllSweeps();
+      // Only speak up when something actually moved, or the log becomes 96
+      // lines a day of "nothing happened" and nobody reads it.
+      const moved =
+        (r.leads && (r.leads.released || r.leads.toNewspaper)) || r.contacts || r.silent;
+      if (moved) console.log("[sweeps]", JSON.stringify(r));
+    },
     { timezone: process.env.TZ_NAME || "Asia/Kolkata" }
   );
 

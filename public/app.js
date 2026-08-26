@@ -168,6 +168,7 @@ const state = {
   alertPoll: null,
   alerts: { expiring: [], myPendingRequests: 0, pendingReview: 0 },
   outreachAlerts: [],
+  outreachUnseen: 0,
   reviewQueue: [],
   // Last completed sync per cadence — the two lists move on different clocks,
   // so one "last synced" line would be wrong for one of them.
@@ -361,11 +362,24 @@ function wireEvents() {
     if (e.key === "Escape" && !$("#modal-box").hidden) closeModal();
   });
 
-  $("#bell-btn").addEventListener("click", (e) => {
+  $("#bell-btn").addEventListener("click", async (e) => {
     e.stopPropagation();
     const panel = $("#bell-panel");
-    if (panel.hidden) { renderBellPanel(); panel.hidden = false; }
-    else panel.hidden = true;
+    if (!panel.hidden) { panel.hidden = true; return; }
+
+    renderBellPanel();
+    panel.hidden = false;
+
+    // Opening the bell IS reading it. Marking read here rather than behind a
+    // separate "mark all read" button means one less thing to explain, and
+    // there is nothing in the panel they could have missed by opening it.
+    $("#bell-dot").hidden = true;
+    state.outreachUnseen = 0;
+    try {
+      await api("/api/outreach/alerts/seen", { method: "POST" });
+    } catch {
+      // If the stamp fails the dot simply comes back on the next poll.
+    }
   });
   document.addEventListener("click", (e) => {
     const panel = $("#bell-panel");
@@ -1698,11 +1712,86 @@ function newspaperCard(lead) {
 
       <div class="mylead-actions">
         <span class="muted">Went unworked past its deadline · no clock on this one</span>
-        <button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper" data-id="${lead.id}">
-          Pick this up
-        </button>
+        <div class="np-buttons">
+          ${
+            state.user.role === "admin"
+              ? `<button class="btn btn-sm btn-ghost np-remove" data-remove-lead="${lead.id}"
+                         data-company="${esc(lead.company)}">Remove</button>`
+              : ""
+          }
+          <button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper" data-id="${lead.id}">
+            Pick this up
+          </button>
+        </div>
       </div>
     </div>`;
+}
+
+/**
+ * Admin-only: take a lead out of the Newspaper.
+ *
+ * Two choices, because they are genuinely different decisions. "Just remove"
+ * handles a junk story — if the company turns up in real news later, it comes
+ * back, which is usually right. "Remove and block" handles a company that is
+ * never going to be a customer, and is the only option that stops the scraper
+ * re-finding the same name every week.
+ */
+function confirmRemoveLead(id, company) {
+  const existing = $("#np-remove-dialog");
+  if (existing) existing.remove();
+
+  const box = document.createElement("div");
+  box.id = "np-remove-dialog";
+  box.className = "modal-backdrop";
+  box.innerHTML = `
+    <div class="modal-box">
+      <h3>Remove ${esc(company)}?</h3>
+      <p class="hint">This takes it off the Newspaper for everyone. Nothing is
+        permanently erased — you can see what was removed in the admin area.</p>
+
+      <label class="field">
+        <span>Why? (optional, so others know)</span>
+        <input id="np-reason" placeholder="e.g. not our kind of client" />
+      </label>
+
+      <div class="np-choices">
+        <button class="btn btn-block" data-np-choice="hide">
+          <strong>Just remove this one</strong>
+          <span class="hint">If real news about ${esc(company)} shows up later, it comes back.</span>
+        </button>
+        <button class="btn btn-block btn-danger" data-np-choice="block">
+          <strong>Remove and block this company</strong>
+          <span class="hint">${esc(company)} never appears again, in any tab.</span>
+        </button>
+      </div>
+
+      <button class="btn btn-sm" data-np-choice="cancel">Cancel</button>
+    </div>`;
+
+  document.body.appendChild(box);
+
+  box.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-np-choice]");
+    if (!btn) {
+      if (e.target === box) box.remove();
+      return;
+    }
+
+    const choice = btn.dataset.npChoice;
+    if (choice === "cancel") return box.remove();
+
+    try {
+      const res = await api(`/api/leads/${id}`, {
+        method: "DELETE",
+        body: { blocklist: choice === "block", reason: $("#np-reason", box).value || null },
+      });
+      box.remove();
+      toast(res.message);
+      refresh();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
 }
 
 /* ── Signals, grouped by type (Funding, Leadership, …) ───────────────────── */
@@ -3225,16 +3314,23 @@ async function loadAlerts() {
     // existed nothing told you, which made "automated follow-ups" a schedule
     // you had to remember to go and read.
     try {
-      state.outreachAlerts = (await api("/api/outreach/alerts")).items || [];
+      const out = await api("/api/outreach/alerts");
+      state.outreachAlerts = out.items || [];
+      state.outreachUnseen = out.unseen || 0;
     } catch {
       state.outreachAlerts = [];
+      state.outreachUnseen = 0;
     }
 
-    const total =
+    // The dot means "something you haven't looked at", not "you have work".
+    // A dot that is permanently red because there are always five follow-ups
+    // outstanding is a dot nobody reads — so once they open the bell, it goes
+    // out and stays out until something genuinely new turns up.
+    const unseen =
       (data.expiring ? data.expiring.length : 0) +
       (data.pendingReview || 0) +
-      state.outreachAlerts.length;
-    $("#bell-dot").hidden = total === 0;
+      state.outreachUnseen;
+    $("#bell-dot").hidden = unseen === 0;
 
     if (!$("#bell-panel").hidden) renderBellPanel();
   } catch {
@@ -3254,7 +3350,7 @@ function renderBellPanel() {
        ${outreach
          .map(
            (a) => `
-        <div class="bell-item bell-${esc(a.kind)}">
+        <div class="bell-item bell-${esc(a.kind)}${a.unseen ? " is-new" : ""}">
           <div class="bell-item-main">
             <b>${esc(a.company)}</b>${a.contact_name ? ` · ${esc(a.contact_name)}` : ""}
             <span class="bell-item-sub">${esc(a.text)} — ${esc(a.action)}</span>
@@ -3307,6 +3403,13 @@ document.addEventListener("click", async (e) => {
   // Jumping to the opportunity from the bell has to switch tabs too, or the
   // workspace opens over whatever list you happened to be looking at and
   // closing it drops you somewhere unrelated.
+  const rmBtn = e.target.closest("[data-remove-lead]");
+  if (rmBtn) {
+    e.stopPropagation();
+    confirmRemoveLead(rmBtn.dataset.removeLead, rmBtn.dataset.company);
+    return;
+  }
+
   const oppBtn = e.target.closest("[data-bell-opp]");
   if (oppBtn) {
     e.stopPropagation();

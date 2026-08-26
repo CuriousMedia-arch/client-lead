@@ -552,3 +552,86 @@
 .bell-followup { border-left: 3px solid var(--teal); }
 .bell-stalled  { border-left: 3px solid var(--violet); }
 .bell-approval { border-left: 3px solid var(--cold); }
+
+/* ── Clickable slabs ──────────────────────────────────────────────────────── */
+
+/*
+ * The counts are buttons now, so they need to look pressable without becoming
+ * six loud CTAs at the top of the screen. Cursor and a lift on hover is
+ * enough; a slab with nothing in it is disabled rather than hidden, so the
+ * row doesn't reflow every time a number hits zero.
+ */
+.stat-click {
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+.stat-click:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--teal);
+  box-shadow: var(--shadow-sm);
+}
+.stat-click:disabled { cursor: default; opacity: .55; }
+.stat-click.is-focused { border-color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal); }
+
+.focus-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--teal-tint);
+  border: 1px solid var(--teal);
+  border-radius: var(--radius-sm);
+  padding: 9px 14px;
+  margin-bottom: 18px;
+  font-size: 13px;
+}
+
+/* The AI is thinking; say so rather than showing an empty panel. */
+.rec-box.is-thinking { border-left-color: var(--line-strong); }
+.rec-box.is-thinking .muted { margin: 0; }
+
+/* ── Bell: what's new vs what's just outstanding ──────────────────────────── */
+
+/*
+ * A row you haven't seen gets a filled dot. Everything else stays in the list
+ * — still your work — but doesn't shout. Without this distinction the bell is
+ * permanently red for anyone with a healthy pipeline, and a permanently red
+ * bell is one nobody looks at.
+ */
+.bell-item.is-new { background: var(--surface-sunk); }
+.bell-item.is-new .bell-item-main b::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--coral);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* ── Admin: removing a Newspaper lead ─────────────────────────────────────── */
+
+.np-buttons { display: flex; gap: 8px; align-items: center; }
+.np-remove { color: var(--coral); }
+.np-remove:hover { background: var(--coral-tint); color: var(--coral); }
+
+/* Each choice is a block with its consequence written underneath, because the
+   difference between "remove" and "remove and block" is not obvious from two
+   button labels alone. */
+.np-choices { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.np-choices .btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+  padding: 12px 14px;
+  height: auto;
+  margin-top: 0;
+}
+.np-choices .hint { margin: 0; font-size: 11.5px; }
+.np-choices .btn-danger .hint { color: rgba(255, 255, 255, .85); }

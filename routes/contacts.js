@@ -122,19 +122,15 @@ router.delete("/:id", async (req, res, next) => {
 
 const CLAIM_DAYS = Number(process.env.CLAIM_DAYS_ALL || 30);
 
-/** Release every person claim whose clock has run out. */
-function sweepExpiredContacts() {
-  return db.run(
-    `UPDATE company_contacts
-        SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
-            claim_source = NULL, status = 'new'
-      WHERE owner_id IS NOT NULL
-        AND deleted_at IS NULL
-        AND closed_at IS NULL
-        AND deadline_at IS NOT NULL
-        AND deadline_at < now()`
-  );
-}
+/**
+ * Release every person claim whose clock has run out.
+ *
+ * The query itself moved to lib/sweeps.js when the background cron was added,
+ * so the scheduled run and the on-request run cannot drift apart. This wrapper
+ * stays because several handlers below call it by name.
+ */
+const sweeps = require("../lib/sweeps");
+const sweepExpiredContacts = sweeps.sweepExpiredContacts;
 
 function contactCountdown(row) {
   if (!row || !row.deadline_at || row.closed_at) return null;

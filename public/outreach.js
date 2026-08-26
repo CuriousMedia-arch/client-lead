@@ -30,6 +30,11 @@ const outreach = {
   builderOpen: false,
   proposalDraft: null,
   synced: false,
+  // Which slab is being drilled into, or null for the normal grouped view.
+  // Lives in state, not the DOM, so a repaint after any action keeps the
+  // filter the user chose.
+  focus: null,
+  recommending: false,
 };
 
 const STAGE_LABEL = {
@@ -174,13 +179,14 @@ async function renderToday() {
   // Every caption says what to DO, in words a salesperson uses out loud.
   // "the drip is waiting on you" was the sort of thing that reads fine to
   // whoever wrote it and means nothing to the person using it at 10am.
+  // First item is the bucket key: clicking a slab shows exactly that group.
   const slabs = [
-    ["Do these first", c.urgent, "time is running out on these", c.urgent ? "is-late" : ""],
-    ["Time to follow up", c.followup, "you said you'd check back", c.followup ? "is-urgent" : ""],
-    ["Not started", c.new, "you haven't contacted them yet", ""],
-    ["They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
-    ["Meetings today", c.meeting, "happening today", ""],
-    ["Waiting on price approval", c.proposal, "sent, or with your manager", ""],
+    ["urgent", "Do these first", c.urgent, "time is running out on these", c.urgent ? "is-late" : ""],
+    ["followup", "Time to follow up", c.followup, "you said you'd check back", c.followup ? "is-urgent" : ""],
+    ["new", "Not started", c.new, "you haven't contacted them yet", ""],
+    ["replied", "They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
+    ["meeting", "Meetings today", c.meeting, "happening today", ""],
+    ["proposal", "Waiting on price approval", c.proposal, "sent, or with your manager", ""],
   ];
 
   const groups = [
@@ -190,21 +196,40 @@ async function renderToday() {
     ["followup", "🟠 Time to follow up", data.buckets.followup],
     ["proposal", "📄 Quote sent — waiting", data.buckets.proposal],
     ["new", "⚪ Not contacted yet", data.buckets.new],
-  ].filter(([, , list]) => list && list.length);
+  ]
+    .filter(([, , list]) => list && list.length)
+    // Drilling into a slab hides the other groups rather than scrolling to
+    // one, so the screen shows only the job they picked.
+    .filter(([key]) => !outreach.focus || key === outreach.focus);
+
+  const focusedLabel = outreach.focus
+    ? (slabs.find(([k]) => k === outreach.focus) || [null, outreach.focus])[1]
+    : null;
 
   body.innerHTML = `
     <div class="stats today-slabs">
       ${slabs
         .map(
-          ([label, value, note, tone]) => `
-        <div class="stat ${value ? tone : ""}">
+          ([key, label, value, note, tone]) => `
+        <button class="stat stat-click ${value ? tone : ""} ${
+            outreach.focus === key ? "is-focused" : ""
+          }" data-slab="${key}" ${value ? "" : "disabled"}>
           <p class="stat-label">${esc(label)}</p>
           <p class="stat-value">${value}</p>
           <p class="stat-note">${esc(note)}</p>
-        </div>`
+        </button>`
         )
         .join("")}
     </div>
+
+    ${
+      outreach.focus
+        ? `<div class="focus-bar">
+             <span>Showing only <strong>${esc(focusedLabel)}</strong></span>
+             <button class="btn btn-sm" id="clear-focus">Show everything</button>
+           </div>`
+        : ""
+    }
 
     ${
       groups.length
@@ -217,6 +242,12 @@ async function renderToday() {
         </section>`
             )
             .join("")
+        : outreach.focus
+        ? `<div class="empty">
+             <h2>Nothing here right now</h2>
+             <p>No leads under "${esc(focusedLabel)}" at the moment.</p>
+             <button class="btn btn-sm" id="clear-focus-empty">Show everything</button>
+           </div>`
         : `<div class="empty">
              <h2>You're all caught up</h2>
              <p>Nothing needs you right now. Pick up a lead from All Leads or Fresh Leads and it will show up here.</p>
@@ -293,6 +324,24 @@ function todayCard(o, bucket) {
 function wireToday() {
   for (const btn of $$("[data-open-opp]")) {
     btn.addEventListener("click", () => openWorkspace(btn.dataset.openOpp));
+  }
+
+  for (const slab of $$("[data-slab]")) {
+    slab.addEventListener("click", () => {
+      // Clicking the slab you're already in goes back to everything, so the
+      // same button both drills in and backs out.
+      outreach.focus = outreach.focus === slab.dataset.slab ? null : slab.dataset.slab;
+      renderToday();
+    });
+  }
+
+  for (const id of ["clear-focus", "clear-focus-empty"]) {
+    const btn = $(`#${id}`);
+    if (btn)
+      btn.addEventListener("click", () => {
+        outreach.focus = null;
+        renderToday();
+      });
   }
 }
 
@@ -372,6 +421,10 @@ async function renderIntel() {
   outreach.intel = data;
 
   const t = data.totals;
+
+  const focusedLabel = outreach.focus
+    ? (slabs.find(([k]) => k === outreach.focus) || [null, outreach.focus])[1]
+    : null;
 
   body.innerHTML = `
     <div class="stats today-slabs">
@@ -675,6 +728,25 @@ async function openWorkspace(id) {
   }
 
   paintWorkspace();
+
+  // Suggest what to sell without being asked. The brief's point was "don't
+  // make the salesperson decide everything" — a button they have to find and
+  // press is still making them decide. Fires only when nothing has been
+  // picked yet, so it never overwrites a choice someone already made.
+  if (!outreach.opp.opportunity.service_primary) {
+    outreach.recommending = true;
+    paintWorkspace();
+    try {
+      await api(`/api/outreach/${id}/recommend-service`, { method: "POST" });
+      await reloadWorkspace();
+    } catch {
+      // A failed suggestion is not a failed workspace — fall back to the
+      // manual picker rather than blocking the whole panel.
+      paintWorkspace();
+    } finally {
+      outreach.recommending = false;
+    }
+  }
 }
 
 /** Re-fetch and repaint without closing — used after every write. */
@@ -781,6 +853,10 @@ function wsServiceBlock(d) {
                         <button class="btn btn-sm" id="change-service">Pick something else</button>
                       </div>`
                }
+             </div>`
+          : outreach.recommending
+          ? `<div class="rec-box is-thinking">
+               <p class="muted">Working out what to sell them…</p>
              </div>`
           : `<p class="muted">Not decided yet.</p>
              <button class="btn btn-sm btn-primary" id="recommend-service">Suggest what to sell</button>`

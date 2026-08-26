@@ -26,10 +26,9 @@ const SOON = new Date(Date.now() + 36e5 * 20).toISOString();
 const OPP = {
   id: 1, contact_id: 7, lead_id: null, company: "Zepto", owner_id: 1, source: "all",
   stage: "proposal",
-  service_primary: "Influencer Marketing", service_secondary: "Meme Marketing",
-  service_optional: "Content Distribution",
-  service_rationale: "Gen-Z audience and an active product launch.",
-  service_source: "rules", service_accepted: false,
+  // Deliberately blank so the workspace has to suggest one on open.
+  service_primary: null, service_secondary: null, service_optional: null,
+  service_rationale: null, service_source: null, service_accepted: false,
   plan_tier: "growth", plan_name: "Growth — 100 creators",
   plan_config: { geography: "India", language: "Hindi",
                  creator_mix: { nano: 10, micro: 5, macro: 1 }, deliverables: ["Reels"] },
@@ -46,18 +45,37 @@ const OPP = {
   contact_deadline: SOON, industry: "Quick commerce", employees: "5000",
 };
 
+// The stub is stateless, but auto-recommend genuinely writes and then re-reads
+// — so this one field has to persist, or the workspace re-renders with no
+// service and the plan section never appears.
+let recommended = false;
+
 function answer(sql, params = []) {
   const s = String(sql).replace(/\s+/g, " ").trim();
+  if (/UPDATE opportunities SET service_primary/i.test(s)) recommended = true;
   if (/FROM sessions/i.test(s))
     return [{ id: 1, username: "vihith", display_name: "Vihith", role: "admin", active: true,
               expires_at: new Date(Date.now() + 864e5).toISOString() }];
-  if (/FROM opportunities o/i.test(s) && /o\.id = /i.test(s)) return [OPP];
+  if (/FROM opportunities o/i.test(s) && /o\.id = /i.test(s))
+    return [
+      recommended
+        ? {
+            ...OPP,
+            service_primary: "Influencer Marketing",
+            service_secondary: "Meme Marketing",
+            service_optional: "Content Distribution",
+            service_rationale: "Gen-Z audience and an active product launch.",
+            service_source: "rules",
+          }
+        : OPP,
+    ];
   if (/hours_idle/i.test(s))
     return [{
       id: 1, company: "Zepto", stage: "contacted", next_action: "Send the deck.",
       approval_status: null, last_reply_at: NOW, last_contacted_at: null,
       contact_name: "Rahul Sharma", deadline_at: SOON,
       followup_due: null, followup_step: null, meeting_at: null, hours_idle: 40,
+      silent_until: null, updated_at: NOW, hours_to_release: null,
     }];
   if (/FROM opportunities/i.test(s) && /COUNT/i.test(s))
     return [{ total: 12, won: 3, lost: 4, won_value: 2500000, n: 2 }];
@@ -109,7 +127,15 @@ function answer(sql, params = []) {
                        language_multiplier: { Hindi: 1 },
                        deliverable_multiplier: { Reels: 1, YouTube: 1.8 } } }];
   if (/FROM signals/i.test(s)) return [{ title: "Zepto raises $350M", summary: "Fresh capital.", signal_type: "capital" }];
-  if (/FROM leads/i.test(s)) return [{ id: 3, company: "Zepto", fresh_owner_id: 1, fresh_from_newspaper: false }];
+  if (/FROM leads/i.test(s))
+    return [{
+      id: 3, company: "Zepto", fresh_owner_id: null, fresh_from_newspaper: false,
+      tier: 1, tier_note: "Call today", signals: [], contact_count: 2,
+      in_newspaper: true, last_signal_at: NOW, fresh_released_at: NOW,
+    }];
+  if (/alerts_seen_at/i.test(s)) return [{ alerts_seen_at: null }];
+  if (/silent_until IS NOT NULL/i.test(s)) return [];
+  if (/FROM company_blocklist/i.test(s)) return [];
   if (/FROM users/i.test(s)) return [{ n: 1 }];
   if (/FROM companies/i.test(s)) return [{ id: 1, name: "Zepto" }];
   if (/RETURNING/i.test(s)) return [{ id: 99, version: 3, ...OPP }];
@@ -275,9 +301,32 @@ async function drive(window) {
     return i === -1 ? true : `found: …${html.slice(Math.max(0, i - 90), i + 90)}…`;
   });
 
+  /* Slabs drill down (new) */
+  check("Slabs are clickable", () => {
+    const n = $$("[data-slab]").length;
+    return n === 6 ? "6 clickable counts" : `${n} slabs`;
+  });
+
+  const liveSlab = $$("[data-slab]").find((b) => !b.disabled);
+  const liveKey = liveSlab && liveSlab.dataset.slab;
+  click(liveSlab);
+  await wait(250);
+  check("Clicking a slab filters to that group", () => {
+    const groups = $$(".today-group").map((g) => g.dataset.group);
+    if (groups.length !== 1) return `showed ${groups.length} groups: ${groups.join(",")}`;
+    return groups[0] === liveKey ? `only "${liveKey}"` : `showed ${groups[0]}, wanted ${liveKey}`;
+  });
+  check("Filtered view offers a way back", () => Boolean($("#clear-focus")) || "no reset button");
+
+  click($("#clear-focus"));
+  await wait(250);
+  check("Reset restores every group", () => `${$$(".today-group").length} groups back`);
+
   /* Workspace */
   click($("[data-open-opp]"));
-  await wait(250);
+  // Opening now costs two round trips: load, then auto-suggest a service and
+  // reload. 250ms was enough before and is racy now.
+  await wait(700);
 
   const panel = $("#ws-panel");
   check("Workspace opens", () => (panel && !panel.hidden ? "panel visible" : false));
@@ -295,6 +344,17 @@ async function drive(window) {
     const ov = window.getComputedStyle(body).overflowY;
     return ov === "auto" || ov === "scroll" ? ov : `overflow-y is "${ov}"`;
   });
+  check("Suggests a service without being asked", () => {
+    const box = $(".rec-box");
+    if (!box) return "no recommendation appeared";
+    const txt = box.textContent.replace(/\s+/g, " ").trim();
+    return txt.includes("Influencer") ? txt.slice(0, 90) : `unexpected: ${txt.slice(0, 90)}`;
+  });
+  check("Recommendation explains why", () =>
+    $(".rec-why") ? $(".rec-why").textContent.replace(/\s+/g, " ").trim().slice(0, 80) : false);
+  check("Accept / change buttons present", () =>
+    $("#accept-service") && $("#change-service") ? true : "missing accept or change");
+
   check("Workspace has all sections", () => {
     const heads = $$(".ws-section h3").map((h) => h.textContent.trim());
     const want = ["What we should sell them", "Package", "Message to send", "Replies",
@@ -398,6 +458,46 @@ async function drive(window) {
     const rows = $$("#bell-panel [data-bell-opp]");
     return rows.length ? `${rows.length} entry` : "no outreach entries in the bell";
   });
+
+  // --- bell read-state (new) ---
+  check("Bell marks itself read on open", () => {
+    const dot = $("#bell-dot");
+    return dot && dot.hidden ? "dot cleared" : "dot still lit after opening";
+  });
+
+  // --- admin remove from the Newspaper (new) ---
+  click($('[data-tab="newspaper"]'));
+  await wait(500);
+  // The Newspaper is a year -> month -> day drill-down; the cards (and the
+  // Remove button) only exist at the deepest level.
+  for (let i = 0; i < 3; i++) {
+    const tile = $(".np-tile");
+    if (!tile) break;
+    click(tile);
+    await wait(180);
+  }
+  const rm = $("[data-remove-lead]");
+  check("Admin sees a Remove button in the Newspaper", () => Boolean(rm) || "no remove button");
+  if (rm) {
+    click(rm);
+    await wait(150);
+    check("Remove asks hide vs block", () => {
+      const choices = $$("[data-np-choice]").map((b) => b.dataset.npChoice);
+      return choices.includes("hide") && choices.includes("block")
+        ? choices.join(", ")
+        : `only ${choices.join(", ")}`;
+    });
+    check("Remove dialog spells out the consequence", () => {
+      const t = ($("#np-remove-dialog") || {}).textContent || "";
+      return t.includes("comes back") && t.includes("never appears again")
+        ? "both outcomes explained"
+        : "consequences not explained";
+    });
+    const cancel = $$("[data-np-choice]").find((b) => b.dataset.npChoice === "cancel");
+    click(cancel);
+    await wait(100);
+    check("Cancel closes it", () => !$("#np-remove-dialog") || "dialog stayed open");
+  }
 
   check("Still no unrendered template literals", () => {
     // Scan the rendered surfaces only — body.innerHTML also contains the
