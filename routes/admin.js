@@ -369,6 +369,7 @@ router.post("/import", async (req, res, next) => {
 
     let companiesAdded = 0;
     let contactsAdded = 0;
+    let contactsUpdated = 0;
     let duplicatesSkipped = 0;
 
     await db.tx(async (q) => {
@@ -409,6 +410,27 @@ router.post("/import", async (req, res, next) => {
       await q(`INSERT INTO leads (company_id)
                SELECT id FROM companies ON CONFLICT (company_id) DO NOTHING`);
 
+      /*
+       * The duplicate check, and why it looks like this.
+       *
+       * It used to be a single test on the phone number:
+       *
+       *   WHERE NOT (company_contacts.phone IS NOT DISTINCT FROM EXCLUDED.phone)
+       *
+       * which meant "only update if the phone changed". Two consequences,
+       * both bad, and neither visible from the summary line:
+       *
+       *  - Re-importing an enriched sheet did nothing for anyone whose phone
+       *    was unchanged. A new email address, job title or LinkedIn URL on a
+       *    person already on file was silently discarded.
+       *  - Worse for the common case: a contact with NO phone on either side.
+       *    NULL IS NOT DISTINCT FROM NULL is true, so the row was treated as a
+       *    duplicate and skipped outright, forever.
+       *
+       * The row-wise comparison below asks the honest question instead: after
+       * the COALESCEs above have had their say, would this write actually
+       * change anything? If not, skip it. If yes, apply it.
+       */
       for (const p of contacts) {
         const { rows } = await q(
           `INSERT INTO company_contacts
@@ -431,10 +453,22 @@ router.post("/import", async (req, res, next) => {
                   department  = COALESCE(EXCLUDED.department,  company_contacts.department),
                   city        = COALESCE(EXCLUDED.city,        company_contacts.city),
                   is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
-           -- Company + phone + name all matching the row already on file means
-           -- this import row is a duplicate of what we have, not new info —
-           -- skip the write entirely rather than touching the existing row.
-           WHERE NOT (company_contacts.phone IS NOT DISTINCT FROM EXCLUDED.phone)
+           WHERE (company_contacts.role, company_contacts.email, company_contacts.email_alt,
+                  company_contacts.phone, company_contacts.phone2, company_contacts.linkedin,
+                  company_contacts.seniority, company_contacts.department,
+                  company_contacts.city, company_contacts.state, company_contacts.country)
+                 IS DISTINCT FROM
+                 (COALESCE(EXCLUDED.role,       company_contacts.role),
+                  COALESCE(EXCLUDED.email,      company_contacts.email),
+                  COALESCE(EXCLUDED.email_alt,  company_contacts.email_alt),
+                  COALESCE(EXCLUDED.phone,      company_contacts.phone),
+                  COALESCE(EXCLUDED.phone2,     company_contacts.phone2),
+                  COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
+                  COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
+                  COALESCE(EXCLUDED.department, company_contacts.department),
+                  COALESCE(EXCLUDED.city,       company_contacts.city),
+                  COALESCE(EXCLUDED.state,      company_contacts.state),
+                  COALESCE(EXCLUDED.country,    company_contacts.country))
            RETURNING id, (xmax = 0) AS inserted`,
           [p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_type,
            p.phone2, p.phone2_type, p.linkedin, p.notes, p.seniority, p.department,
@@ -457,7 +491,11 @@ router.post("/import", async (req, res, next) => {
             [rows[0].id, p.company, p.name, p.role, p.email, p.email_alt, p.phone,
              p.phone2, p.linkedin, p.seniority, p.department, p.city, p.country, p.state]
           );
-        } else if (!rows[0]) {
+        } else if (rows[0]) {
+          // Existed already, and the sheet had something new to add.
+          contactsUpdated++;
+        } else {
+          // Existed, and the sheet told us nothing we didn't have.
           duplicatesSkipped++;
         }
       }
@@ -469,6 +507,7 @@ router.post("/import", async (req, res, next) => {
       contacts: contacts.length,
       companiesAdded,
       contactsAdded,
+      contactsUpdated,
       duplicatesSkipped,
       skipped,
       matched,

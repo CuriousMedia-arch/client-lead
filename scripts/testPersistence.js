@@ -76,6 +76,7 @@ create table opportunities (
   last_contacted_at timestamptz, last_reply_at timestamptz,
   won_at timestamptz, lost_at timestamptz, won_value numeric,
   silent_until timestamptz, focus_contact_id int,
+  deadline_at timestamptz, deadline_kind text,
   created_at timestamptz default now(), updated_at timestamptz
 );
 create table opportunity_stages (
@@ -95,7 +96,10 @@ create table opportunity_followups (
 create table opportunity_meetings (
   id serial primary key, opportunity_id int, scheduled_at timestamptz, link text,
   attendees text, outcome text, requirement text, notes text,
-  structured jsonb default '{}', created_by int, created_at timestamptz default now()
+  structured jsonb default '{}', created_by int, created_at timestamptz default now(),
+  calendar_event_id text, meet_link text, conference_record text,
+  transcript_state text, transcript_text text,
+  notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text
 );
 create table opportunity_proposals (
   id serial primary key, opportunity_id int, version int, price numeric, service text,
@@ -104,7 +108,7 @@ create table opportunity_proposals (
 );
 create table opportunity_loss (
   opportunity_id int primary key, primary_reason text, secondary_reason text, note text,
-  chose text, competitor_name text, competitor_budget numeric, disliked jsonb default '[]',
+  chose text, competitor_name text, disliked jsonb default '[]',
   could_have_changed text, reapproach boolean, reapproach_days int, reapproach_at date,
   lost_at_stage text, created_by int, created_at timestamptz default now()
 );
@@ -123,6 +127,20 @@ create table activity (
 create table contact_claims (
   id serial primary key, contact_id int, user_id int, source text,
   claimed_at timestamptz default now(), released_at timestamptz, release_note text
+);
+create table google_accounts (
+  user_id int primary key, email text, refresh_token text, scopes text,
+  connected_at timestamptz default now(), last_used_at timestamptz, last_error text
+);
+create table opportunity_execution (
+  id serial primary key, opportunity_id int, deliverable text, owner_name text,
+  owner_id int, due_date date, status text default 'pending', notes text,
+  sort int default 0, created_by int,
+  created_at timestamptz default now(), updated_at timestamptz default now()
+);
+create table content_templates (
+  key text primary key, label text, body text, hint text, sort int default 0,
+  updated_by int, updated_at timestamptz default now()
 );
 create table contact_activity (
   id serial primary key, contact_id int, user_id int, kind text, body text,
@@ -143,9 +161,15 @@ insert into rate_card (service,tier,label,price,creators,views,deliverables,sort
   ('Influencer Marketing','starter','Starter',300000,50,'5M','1 Reel',1),
   ('Influencer Marketing','growth','Growth',500000,100,'12M','1 Reel + 2 Stories',2),
   ('Influencer Marketing','scale','Scale',1000000,250,'30M','2 Reels',3);
+insert into content_templates (key,label,sort,body) values
+  ('service_guidance','AI guidance',1,''),
+  ('proposal_email','Proposal email',2,''),
+  ('deck_link','Deck',3,''),
+  ('followup_1','FU1',4,''),('followup_2','FU2',5,''),
+  ('followup_3','FU3',6,''),('followup_4','FU4',7,''),
+  ('meeting_notes_email','Notes email',8,'Hi {{contact}},\n\n{{notes}}\n\nBest,\n{{sender}}');
 insert into pricing_settings (key,value) values
-  ('cost_model','{"creator_rates":{"nano":3000,"micro":12000,"macro":60000},"internal_cost_pct":10,"geo_multiplier":{"India":1},"language_multiplier":{"Hindi":1},"deliverable_multiplier":{"Reels":1}}'),
-  ('guardrail','{"healthy_margin_pct":35,"min_margin_pct":25,"max_discount_pct":20}'),
+  ('guardrail','{"max_discount_pct":20}'),
   ('followup_cadence','{"step1_days":3,"step2_days":7,"step3_days":14,"step4_days":30,"nudge_after_hours":12,"release_after_hours":24}');
 `);
 
@@ -327,6 +351,184 @@ async function newLeadScenario() {
   console.log(`      counts: ${JSON.stringify(counts)}`);
 }
 
+/**
+ * The clock changes meaning as the deal moves:
+ *   claim -> 24h to send the first message
+ *   sent  -> 7 days to get a reply
+ *   reply -> 7 days to close it
+ * and a logged reply must show under "They replied", not get buried by
+ * whichever clock happens to be running.
+ */
+async function clockScenario() {
+  console.log("\n  --- the three clocks ---\n");
+
+  mem.public.none(`
+    insert into companies (name, industry) values ('Wakefit','Furniture');
+    insert into company_contacts (company, name, role, email, owner_id, claim_source, status)
+      values ('Wakefit','Chaitanya R','CMO','c@wakefit.co',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Wakefit'")[0].id;
+
+  const o = await call("POST", "/api/outreach/open", { contact_id: cid });
+  const oid = o.json.opportunity.id;
+
+  const c1 = o.json.opportunity.countdown;
+  check("On claim, the clock is to CONTACT them",
+    c1 && c1.kind === "contact", c1 ? `"${c1.full}"` : "no countdown");
+  check("…and it says so on the card, not 'to close this'",
+    c1 && /send the first message/.test(c1.full), c1 ? c1.full : "n/a");
+  check("…roughly 24 hours", c1 && c1.hours >= 22 && c1.hours <= 24, c1 ? `${c1.hours}h` : "n/a");
+
+  await call("POST", `/api/outreach/${oid}/sent`, {
+    channel: "email", subject: "Hi", body: "First approach.",
+  });
+  const afterSent = (await call("GET", `/api/outreach/${oid}`)).json.opportunity.countdown;
+  check("After the first message, the clock is to get a REPLY",
+    afterSent && afterSent.kind === "reply", afterSent ? `"${afterSent.full}"` : "no countdown");
+  check("…and it resets to 7 days",
+    afterSent && afterSent.days >= 6, afterSent ? `${afterSent.days}d` : "n/a");
+
+  await call("POST", `/api/outreach/${oid}/reply`, { body: "Please share details." });
+  const afterReply = (await call("GET", `/api/outreach/${oid}`)).json.opportunity.countdown;
+  check("After their reply, the clock is to CLOSE it",
+    afterReply && afterReply.kind === "close", afterReply ? `"${afterReply.full}"` : "no countdown");
+  check("…and it resets to 7 days again",
+    afterReply && afterReply.days >= 6, afterReply ? `${afterReply.days}d` : "n/a");
+
+  // The complaint that started this.
+  const today = await call("GET", "/api/outreach/today");
+  const where = Object.entries(today.json.buckets)
+    .filter(([, l]) => l.some((x) => x.company === "Wakefit"))
+    .map(([k]) => k);
+  check("A logged reply shows under 'They replied'", where.includes("replied"),
+    where.length ? `landed in "${where.join(", ")}"` : "in NO bucket");
+
+  // The claim row must agree with the opportunity, or the two tabs disagree.
+  const claimRow = mem.public.many(`select deadline_at from company_contacts where id = ${cid}`)[0];
+  const oppRow = mem.public.many(`select deadline_at from opportunities where id = ${oid}`)[0];
+  check("The claim's own clock was moved to match",
+    claimRow.deadline_at && oppRow.deadline_at &&
+      Math.abs(new Date(claimRow.deadline_at) - new Date(oppRow.deadline_at)) < 2000,
+    "claim and opportunity agree");
+
+  // Timing out a WORKED lead must not destroy the work.
+  mem.public.none(`update opportunities set deadline_at = now() - interval '1 hour' where id = ${oid}`);
+  await call("GET", "/api/outreach/today");
+  const still = mem.public.many(`select id, owner_id from opportunities where id = ${oid}`);
+  check("A worked lead that times out keeps its history",
+    still.length === 1, still.length ? "row kept" : "row was DELETED with all its messages");
+  check("…but loses its owner so it leaves Today",
+    still.length === 1 && !still[0].owner_id, still.length ? `owner_id = ${still[0].owner_id}` : "n/a");
+
+  const freed = mem.public.many(`select owner_id from company_contacts where id = ${cid}`)[0];
+  check("…and the contact goes back to the pool", !freed.owner_id, `owner_id = ${freed.owner_id}`);
+}
+
+/**
+ * The changes asked for in the latest round: merged package+proposal, no
+ * custom builder, no cost or margin anywhere, execution plan, editable
+ * templates, and a loss interview that can't be half-filled.
+ */
+async function newFeaturesScenario() {
+  console.log("\n  --- this round's changes ---\n");
+
+  mem.public.none(`
+    insert into companies (name, industry) values ('Nykaa','Beauty');
+    insert into company_contacts (company, name, role, email, owner_id, claim_source, status)
+      values ('Nykaa','Adwaita N','Head of Growth','a@nykaa.com',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Nykaa'")[0].id;
+  const oid = (await call("POST", "/api/outreach/open", { contact_id: cid })).json.opportunity.id;
+
+  await call("POST", `/api/outreach/${oid}/service`, { primary: "Influencer Marketing" });
+
+  // --- pricing: list price only, no cost or margin ---
+  const q = await call("POST", "/api/outreach/quote", {
+    service: "Influencer Marketing", tier: "growth", price: 500000,
+  });
+  const quote = q.json.quote;
+  check("Quote carries no cost or margin",
+    quote.margin_pct === undefined && quote.vendor_cost === undefined && quote.internal_cost === undefined,
+    Object.keys(quote).join(", "));
+  check("Quote still rules on discount", quote.requires_approval === false,
+    `${quote.discount_pct}% off, approval=${quote.requires_approval}`);
+
+  const deep = await call("POST", "/api/outreach/quote", {
+    service: "Influencer Marketing", tier: "growth", price: 300000,
+  });
+  check("A big discount still needs a manager", deep.json.quote.requires_approval === true,
+    `${deep.json.quote.discount_pct}% off -> ${deep.json.quote.label}`);
+
+  await call("POST", `/api/outreach/${oid}/plan`, {
+    service: "Influencer Marketing", tier: "growth", price: 500000, budget: 600000,
+  });
+  const saved = mem.public.many(
+    `select quoted_price, client_budget, vendor_cost, margin_pct from opportunities where id = ${oid}`
+  )[0];
+  check("Saving a package writes price and budget, nothing else",
+    Number(saved.quoted_price) === 500000 && !saved.vendor_cost && !saved.margin_pct,
+    `price ${saved.quoted_price}, budget ${saved.client_budget}, cost ${saved.vendor_cost}`);
+
+  // --- execution plan ---
+  await call("POST", `/api/outreach/${oid}/proposal`, { price: 500000, body: "Proposal text" });
+  const ex = await call("POST", `/api/outreach/${oid}/execution`, {
+    deliverable: "50 creator reels live", due_date: "2026-09-30", owner_name: "Riya",
+  });
+  check("Execution plan takes deliverable, date and owner",
+    ex.status === 200 && ex.json.item.owner_name === "Riya",
+    ex.status === 200 ? `${ex.json.item.deliverable} / ${ex.json.item.due_date} / ${ex.json.item.owner_name}` : ex.raw);
+
+  const exId = ex.json.item.id;
+  const moved = await call("PATCH", `/api/outreach/execution/${exId}`, { status: "in_progress" });
+  check("Execution status can change", moved.json.item.status === "in_progress", moved.json.item.status);
+
+  const listed = await call("GET", `/api/outreach/${oid}/execution`);
+  check("Execution items come back with the opportunity", listed.json.items.length === 1,
+    `${listed.json.items.length} item(s)`);
+
+  // --- templates ---
+  const tpl = await call("GET", "/api/outreach/meta/templates");
+  const keys = (tpl.json.templates || []).map((t) => t.key);
+  check("All the template slots exist",
+    ["service_guidance", "proposal_email", "deck_link", "followup_1", "followup_4"].every((k) =>
+      keys.includes(k)
+    ), keys.join(", "));
+
+  const put = await call("PUT", "/api/outreach/meta/templates", {
+    templates: [{ key: "followup_1", body: "Hi {{contact}}, circling back on {{company}}." }],
+  });
+  check("Templates save", put.status === 200, put.status === 200 ? null : put.raw);
+
+  await call("POST", `/api/outreach/${oid}/sent`, { channel: "email", subject: "Hi", body: "First message." });
+  const fu = await call("POST", `/api/outreach/${oid}/followup/1/draft`);
+  check("A written follow-up template is used verbatim",
+    fu.json.draft.source === "template" && fu.json.draft.body.includes("Adwaita"),
+    `source=${fu.json.draft.source}: "${fu.json.draft.body}"`);
+
+  // --- the loss interview will not accept a half-filled form ---
+  const short = await call("POST", `/api/outreach/${oid}/lost`, { primary_reason: "budget" });
+  check("Loss form rejects a missing 'who did they choose'", short.status === 400,
+    short.status === 400 ? short.json.error : `got ${short.status}`);
+
+  const noPlan = await call("POST", `/api/outreach/${oid}/lost`, {
+    primary_reason: "budget", chose: "competitor", could_have_changed: "Lower price",
+    reapproach: "yes",
+  });
+  check("Loss form rejects 'try again: yes' with no date", noPlan.status === 400,
+    noPlan.status === 400 ? noPlan.json.error : `got ${noPlan.status}`);
+
+  const full = await call("POST", `/api/outreach/${oid}/lost`, {
+    primary_reason: "budget", chose: "competitor", competitor_name: "Rival Co",
+    could_have_changed: "Lower price", reapproach: "yes", reapproach_days: 60,
+  });
+  check("A complete loss form is accepted", full.status === 200,
+    full.status === 200 ? null : full.raw);
+
+  const lossRow = mem.public.many(`select * from opportunity_loss where opportunity_id = ${oid}`)[0];
+  check("Competitor budget is no longer stored",
+    lossRow && !("competitor_budget" in lossRow), "column is gone");
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -347,9 +549,26 @@ async function run() {
   // 1. Book a meeting.
   const when = new Date(Date.now() + 3 * 864e5).toISOString();
   const meeting = await call("POST", `/api/outreach/${id}/meeting`, {
-    scheduled_at: when, link: "https://meet.example", attendees: "Rahul",
+    scheduled_at: when, attendees: "rahul@zepto.com",
   });
   check("Meeting saves", meeting.status === 200, meeting.status === 200 ? null : meeting.raw);
+
+  // Google isn't connected in this test, and that must not stop a meeting
+  // being booked — it just means no Meet link. Losing the meeting because
+  // Calendar was unavailable would be far worse than losing the link.
+  check("Meeting saves even with Google not connected",
+    meeting.status === 200 && meeting.json.meet_created === false,
+    `meet_created=${meeting.json.meet_created}, google=${meeting.json.google_connected}`);
+
+  const notesTry = await call("POST", `/api/outreach/meeting/${meeting.json.meeting.id}/fetch-notes`);
+  check("Asking for notes without Google gives a plain-English reason",
+    notesTry.status === 200 && /connect/i.test(notesTry.json.message || ""),
+    notesTry.json.message);
+
+  const fwdDraft = await call("GET", `/api/outreach/meeting/${meeting.json.meeting.id}/forward-draft`);
+  check("Forwarding offers a draft to review first",
+    fwdDraft.status === 200 && fwdDraft.json.body.includes("Rahul"),
+    fwdDraft.status === 200 ? `to ${fwdDraft.json.to}` : fwdDraft.raw);
   const meetingId = meeting.json && meeting.json.meeting && meeting.json.meeting.id;
 
   // 2. Write notes on it.
@@ -421,6 +640,8 @@ async function run() {
 
   await freshClaimScenario();
   await newLeadScenario();
+  await clockScenario();
+  await newFeaturesScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();

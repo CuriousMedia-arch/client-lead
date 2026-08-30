@@ -1868,11 +1868,21 @@ function wireListActions() {
           toast(r.warning, true);
           console.warn("Columns recognised:", r.matched, "| ignored:", r.unmatched);
         } else {
+          // Say what happened to every row, not just the new ones. "0 new
+          // contacts" on a sheet of 200 people reads as a broken import when
+          // it usually means they were already on file — and the difference
+          // between "already there" and "updated with new details" is exactly
+          // what someone re-uploading an enriched sheet wants to know.
           toast(
-            `${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}, ` +
-              `${r.contactsAdded} new contact${r.contactsAdded === 1 ? "" : "s"}` +
-              (r.skipped ? ` · ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped` : "") +
-              (r.duplicatesSkipped ? ` · ${r.duplicatesSkipped} duplicate${r.duplicatesSkipped === 1 ? "" : "s"} skipped` : "")
+            [
+              `${r.companiesAdded} new compan${r.companiesAdded === 1 ? "y" : "ies"}`,
+              `${r.contactsAdded} new contact${r.contactsAdded === 1 ? "" : "s"}`,
+              r.contactsUpdated ? `${r.contactsUpdated} updated` : null,
+              r.duplicatesSkipped ? `${r.duplicatesSkipped} already up to date` : null,
+              r.skipped ? `${r.skipped} row${r.skipped === 1 ? "" : "s"} with no company name` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
           );
         }
         refresh();
@@ -3174,12 +3184,27 @@ function wireAdmin() {
       try {
         const csv = await file.text();
         const r = await api("/api/admin/import", { method: "POST", body: { csv } });
+        // Full breakdown here, where there's room for it. If people are
+        // missing after an import, this is the first thing to read — and if
+        // the column names weren't recognised, `unmatched` says which ones
+        // were ignored instead of leaving it a mystery.
         out.innerHTML = `<p class="hint" style="margin-top:12px">
           <strong style="color:var(--teal)">Done.</strong>
+          Read ${r.rows} row${r.rows === 1 ? "" : "s"}:
           ${r.companies} compan${r.companies === 1 ? "y" : "ies"} (${r.companiesAdded} new),
-          ${r.contacts} contact${r.contacts === 1 ? "" : "s"} (${r.contactsAdded} new)${
+          ${r.contacts} contact${r.contacts === 1 ? "" : "s"}
+          (${r.contactsAdded} new${r.contactsUpdated ? `, ${r.contactsUpdated} updated` : ""}${
+            r.duplicatesSkipped ? `, ${r.duplicatesSkipped} already up to date` : ""
+          })${
             r.skipped ? `, ${r.skipped} row${r.skipped === 1 ? "" : "s"} skipped with no company name` : ""
           }.
+          ${
+            r.unmatched && r.unmatched.length
+              ? `<br /><span style="color:var(--amber-ink)">Columns ignored: ${esc(
+                  r.unmatched.join(", ")
+                )}</span>`
+              : ""
+          }
         </p>`;
         toast("Contact sheet imported");
         input.value = "";

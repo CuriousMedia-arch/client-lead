@@ -42,9 +42,10 @@ async function queryLeads(params, user) {
   // Applied here rather than per-tab so there is no list anyone can reach that
   // shows a lead someone deliberately removed.
   where.push("l.deleted_at IS NULL");
-  where.push(
-    "NOT EXISTS (SELECT 1 FROM company_blocklist b WHERE lower(b.company) = lower(c.name))"
-  );
+  // Blocklisted companies are excluded via a LEFT JOIN below rather than a
+  // correlated NOT EXISTS — same result, one pass over the blocklist instead
+  // of a lookup per lead.
+  where.push("bl.id IS NULL");
 
   if (tab === "fresh") {
     // Unclaimed on the FRESH track specifically. Whether someone claimed this
@@ -152,6 +153,7 @@ c.is_sample
        JOIN companies c ON c.id = l.company_id
        LEFT JOIN users u  ON u.id = l.owner_id
        LEFT JOIN users fu ON fu.id = l.fresh_owner_id
+       LEFT JOIN company_blocklist bl ON lower(bl.company) = lower(c.name)
       ${where.length ? "WHERE " + where.join("\n        AND ") : ""}
       ORDER BY ${orderBy}
       LIMIT ${bind(Math.min(Number(params.limit) || 50, 200))}

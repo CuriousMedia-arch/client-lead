@@ -104,9 +104,14 @@ function answer(sql, params = []) {
     return [{ opportunity_id: 1, primary_reason: "budget", reason: "budget", n: 5,
               lost_at_stage: "proposal", reapproach_at: NOW, company: "Zepto", id: 1 }];
   if (/FROM opportunity_messages/i.test(s))
-    return [{ id: 1, direction: "in", channel: "email", body: "Please share details.",
-              sentiment: "positive", intent: "interested", ai_next_action: "Send the deck.",
-              created_at: NOW, user_name: "Vihith" }];
+    return [
+      { id: 1, direction: "in", channel: "email", body: "Please share details.",
+        sentiment: "positive", intent: "interested", ai_next_action: "Send the deck.",
+        created_at: NOW, user_name: "Vihith" },
+      { id: 2, direction: "out", channel: "email", subject: "Zepto x Curious Media",
+        body: "Hi Rahul,\n\nSaw the news about Zepto.", generated: true,
+        sent_at: NOW, created_at: NOW, user_name: "Vihith" },
+    ];
   if (/FROM company_contacts/i.test(s))
     return [{ id: 7, name: "Rahul Sharma", role: "VP Marketing", email: "rahul@zepto.com",
               phone: "9800000000", linkedin: "https://linkedin.com/in/x", company: "Zepto",
@@ -138,6 +143,10 @@ function answer(sql, params = []) {
   if (/sent\.opportunity_id/i.test(s)) return [];   // prior attempts at this company
   if (/deadline_at IS NOT NULL/i.test(s)) return [];
   if (/FROM company_blocklist/i.test(s)) return [];
+  if (/FROM content_templates/i.test(s))
+    return [{ key: "deck_link", label: "Deck", body: "", hint: "", sort: 3 }];
+  if (/FROM google_accounts/i.test(s)) return [];
+  if (/FROM opportunity_execution/i.test(s)) return [];
   if (/FROM users/i.test(s)) return [{ n: 1 }];
   if (/FROM companies/i.test(s)) return [{ id: 1, name: "Zepto" }];
   if (/RETURNING/i.test(s)) return [{ id: 99, version: 3, ...OPP }];
@@ -304,6 +313,11 @@ async function drive(window) {
   });
 
   /* Slabs drill down (new) */
+  check("\"Do these first\" is now \"Urgent\"", () => {
+    const txt = $("#outreach-body").textContent;
+    return !txt.includes("Do these first") ? "renamed" : "old label still showing";
+  });
+
   check("Slabs are clickable", () => {
     const n = $$("[data-slab]").length;
     return n === 7 ? "7 clickable counts" : `${n} slabs`;
@@ -360,15 +374,28 @@ async function drive(window) {
   check("Workspace has all sections", () => {
     const heads = $$(".ws-section h3").map((h) => h.textContent.trim());
     const want = ["What we should sell them", "Package", "Message to send", "Replies",
-                  "Reminder schedule", "Meetings", "Proposal", "History"];
+                  "Reminder schedule", "Meetings", "History"];
     const missing = want.filter((w) => !heads.some((h) => h.startsWith(w)));
     return missing.length ? `missing ${missing.join(", ")}` : `${heads.length} sections`;
   });
   check("Contact block shows the channels", () => `${$$(".ws-chan").length} channels`);
-  check("Guardrail renders", () => {
-    const g = $(".guardrail");
-    return g ? g.className.replace("guardrail ", "") : false;
+  // Cost and margin are gone; only the discount verdict remains, and it only
+  // appears once a price has actually been checked or saved.
+  check("No cost or margin is shown anywhere", () => {
+    const html = $(".ws-body").textContent;
+    const leaked = ["Vendor", "margin", "Margin", "Our costs", "We keep"].filter((w) =>
+      html.includes(w)
+    );
+    return leaked.length ? `still showing: ${leaked.join(", ")}` : "clean";
   });
+  check("Packages and proposal are one section", () => {
+    const heads = $$(".ws-section h3").map((h) => h.textContent.trim());
+    return heads.some((h) => h.startsWith("Package")) && !heads.includes("Proposal")
+      ? "merged"
+      : `sections: ${heads.join(" | ")}`;
+  });
+  check("Custom package builder is gone", () =>
+    !$("#plan-builder") && !$("#toggle-builder") ? "removed" : "builder still present");
   check("Proposal versions show the delta", () => {
     const d = $$(".ver-delta").map((e) => e.textContent.trim());
     return d.length ? d.join(" / ") : false;
@@ -407,6 +434,17 @@ async function drive(window) {
   const waTab = $$("[data-pitch-tab]").find((t) => t.dataset.pitchTab === "whatsapp");
   click(waTab);
   await wait(80);
+  check("Sent messages are kept and shown", () => {
+    const rows = $$(".sent-row");
+    return rows.length ? `${rows.length} sent message(s) listed` : "no record of what was sent";
+  });
+  check("The pitch explains what it was built from", () => {
+    const why = $(".pitch-why");
+    if (!why) return "no reasoning shown";
+    const keys = $$(".why-list dt").map((e) => e.textContent);
+    return keys.length ? keys.join(", ") : "reasoning box is empty";
+  });
+
   check("Channel tabs swap the body", () =>
     $("#pitch-subject-wrap").hidden && $("#pitch-body").value.length > 10
       ? "whatsapp copy shown, subject hidden"
@@ -444,8 +482,14 @@ async function drive(window) {
   click($$("[data-oview]").find((b) => b.dataset.oview === "pricing"));
   await wait(220);
   check("Rate card is editable", () => `${$$(".rate-row input").length} inputs`);
-  check("Guardrail thresholds are editable", () =>
-    $("#gr-healthy") && $("#gr-min") && $("#gr-discount") ? true : false);
+  check("Only the discount limit is editable", () =>
+    $("#gr-discount") && !$("#gr-healthy") && !$("#gr-min")
+      ? "cost model removed"
+      : "margin fields still there");
+  check("Template slots are editable", () => {
+    const n = $$("[data-tpl]").length;
+    return n ? `${n} template(s)` : "no template editor";
+  });
 
   check("Cadence is editable", () =>
     $("#cad-1") && $("#cad-4") && $("#cad-nudge")

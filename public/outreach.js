@@ -27,13 +27,17 @@ const outreach = {
   // picking a plan reset the price field it had just filled in.
   pendingTier: null,
   pendingPrice: null,
-  builderOpen: false,
   proposalDraft: null,
   // Which slab is being drilled into, or null for the normal grouped view.
   // Lives in state, not the DOM, so a repaint after any action keeps the
   // filter the user chose.
   focus: null,
   recommending: false,
+  pitchTab: "email",
+  google: {},              // whether Google is set up / connected
+  deckLink: null,          // the packages deck, from the admin templates
+  noteMessages: {},        // per-meeting explanation of why notes aren't ready
+  writingNotes: null,      // which meeting has its manual notes box open
 };
 
 const STAGE_LABEL = {
@@ -113,6 +117,22 @@ async function renderOutreach() {
   // opportunity and simply never appeared — only a browser refresh fixed it.
   // The server now does it inside /today, so it cannot fall behind.
 
+  // Cheap, cached for the session, and both are needed by the workspace — so
+  // fetch them here rather than on every panel open.
+  try {
+    outreach.google = await api("/api/google/status");
+  } catch {
+    outreach.google = { configured: false, connected: false };
+  }
+  try {
+    const { templates } = await api("/api/outreach/meta/templates");
+    const deck = templates.find((t) => t.key === "deck_link");
+    outreach.deckLink = deck && deck.body ? deck.body.trim() : null;
+    outreach.templates = templates;
+  } catch {
+    outreach.templates = [];
+  }
+
   content.innerHTML = `
     ${outreachNav()}
     <div id="outreach-body"><p class="muted" style="padding:24px">Loading…</p></div>`;
@@ -131,7 +151,7 @@ function outreachNav() {
     ["pipeline", "All my leads"],
     ["intel", "What's working"],
   ];
-  if (state.user.role === "admin") views.push(["pricing", "Pricing"]);
+  if (state.user.role === "admin") views.push(["pricing", "Settings"]);
 
   return `
     <div class="mine-subtabs">
@@ -178,7 +198,7 @@ async function renderToday() {
   // whoever wrote it and means nothing to the person using it at 10am.
   // First item is the bucket key: clicking a slab shows exactly that group.
   const slabs = [
-    ["urgent", "Do these first", c.urgent, "time is running out on these", c.urgent ? "is-late" : ""],
+    ["urgent", "Urgent", c.urgent, "time is running out on these", c.urgent ? "is-late" : ""],
     ["followup", "Time to follow up", c.followup, "you said you'd check back", c.followup ? "is-urgent" : ""],
     ["new", "Not started", c.new, "you haven't contacted them yet", ""],
     ["replied", "They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
@@ -188,7 +208,7 @@ async function renderToday() {
   ];
 
   const groups = [
-    ["urgent", "🔥 Do these first", data.buckets.urgent],
+    ["urgent", "🔥 Urgent", data.buckets.urgent],
     ["replied", "🟢 They replied — answer them", data.buckets.replied],
     ["meeting", "📅 Meetings today", data.buckets.meeting],
     ["followup", "🟠 Time to follow up", data.buckets.followup],
@@ -288,7 +308,7 @@ function todayCard(o, bucket) {
 
   const clock = o.countdown
     ? `<span class="clock ${o.countdown.overdue ? "clock-over" : o.countdown.urgent ? "clock-soon" : ""}">${esc(
-        o.countdown.overdue ? "Time's up" : `${o.countdown.label} to close this`
+        o.countdown.full || o.countdown.label
       )}</span>`
     : "";
 
@@ -369,7 +389,7 @@ async function renderPipeline() {
     <div class="db-table">
       <div class="pipe-head">
         <span>Company</span><span>Person</span><span>Where it stands</span>
-        <span>What we're selling</span><span>Deal size</span><span>Profit</span><span>Time left</span><span></span>
+        <span>What we're selling</span><span>Deal size</span><span>Time left</span><span></span>
       </div>
       ${rows
         .map(
@@ -380,9 +400,6 @@ async function renderPipeline() {
           <span><span class="stage-chip stage-${esc(o.stage)}">${esc(STAGE_LABEL[o.stage] || o.stage)}</span></span>
           <span>${esc(o.service_primary || "—")}</span>
           <span class="num">${inrShort(o.quoted_price)}</span>
-          <span class="num ${marginTone(o.margin_pct)}">${
-            o.margin_pct == null ? "—" : `${Number(o.margin_pct).toFixed(0)}%`
-          }</span>
           <span>${o.countdown ? esc(o.countdown.label) : "—"}</span>
           <span><button class="btn btn-sm" data-open-opp="${o.id}">Open</button></span>
         </div>`
@@ -391,14 +408,6 @@ async function renderPipeline() {
     </div>`;
 
   wireToday();
-}
-
-function marginTone(pct) {
-  if (pct == null) return "";
-  const n = Number(pct);
-  if (n >= 35) return "num-good";
-  if (n >= 25) return "num-warn";
-  return "num-bad";
 }
 
 /* ── items 13 & 15: the intelligence view ─────────────────────────────────── */
@@ -531,28 +540,29 @@ async function renderIntel() {
 
 async function renderPricing() {
   const body = $("#outreach-body");
-  let data;
+  let data, tpl;
   try {
     data = await api("/api/outreach/meta/rate-card");
+    tpl = await api("/api/outreach/meta/templates");
   } catch (err) {
-    body.innerHTML = `<div class="empty"><h2>Couldn't load pricing</h2><p>${esc(err.message)}</p></div>`;
+    body.innerHTML = `<div class="empty"><h2>Couldn't load settings</h2><p>${esc(err.message)}</p></div>`;
     return;
   }
   outreach.rateCard = data;
 
   const rows = data.rate_card.flatMap((g) => g.plans);
   const g = data.guardrail;
-  const m = data.cost_model;
   const cad = data.cadence || {};
+  const templates = tpl.templates || [];
 
   body.innerHTML = `
     <section class="intel-block">
-      <h3>Standard packages and prices</h3>
-      <p class="hint">These are made-up numbers so the screens work. Type your real prices over them — every price in the portal comes from this table.</p>
+      <h3>Packages and prices</h3>
+      <p class="hint">What the team can sell and for how much. Every price in the portal comes from this table.</p>
       <div class="rate-table">
         <div class="rate-head">
-          <span>Service</span><span>Tier</span><span>Label</span><span>Price ₹</span>
-          <span>Creators</span><span>Views</span><span>Deliverables</span>
+          <span>Service</span><span>Tier</span><span>Name</span><span>Price ₹</span>
+          <span>Creators</span><span>Views</span><span>What they get</span>
         </div>
         ${rows
           .map(
@@ -572,44 +582,17 @@ async function renderPricing() {
     </section>
 
     <section class="intel-block">
-      <h3>What things cost us</h3>
-      <p class="hint">What we pay one creator. The custom package builder starts from these and adjusts for region, language and what they produce.</p>
+      <h3>Discount limit</h3>
+      <p class="hint">How much a salesperson can knock off a package on their own. Past this, it goes to a manager before the deal can be marked won.</p>
       <div class="grid-3">
-        ${["nano", "micro", "macro"]
-          .map(
-            (k) => `
-          <label class="field">
-            <span>${k} creator ₹</span>
-            <input type="number" id="cm-${k}" value="${Number((m.creator_rates || {})[k] || 0)}" />
-          </label>`
-          )
-          .join("")}
-        <label class="field">
-          <span>Our overhead %</span>
-          <input type="number" id="cm-internal" value="${Number(m.internal_cost_pct || 0)}" />
-        </label>
-      </div>
-    </section>
-
-    <section class="intel-block">
-      <h3>Profit rules</h3>
-      <p class="hint">If a price makes too little profit, or the discount is too big, it goes to a manager before the deal can be marked won.</p>
-      <div class="grid-3">
-        <label class="field"><span>Good profit %</span><input type="number" id="gr-healthy" value="${Number(
-          g.healthy_margin_pct
-        )}" /></label>
-        <label class="field"><span>Lowest profit we allow %</span><input type="number" id="gr-min" value="${Number(
-          g.min_margin_pct
-        )}" /></label>
-        <label class="field"><span>Biggest discount allowed %</span><input type="number" id="gr-discount" value="${Number(
-          g.max_discount_pct
-        )}" /></label>
+        <label class="field"><span>Biggest discount allowed %</span>
+          <input type="number" id="gr-discount" value="${Number(g.max_discount_pct)}" /></label>
       </div>
     </section>
 
     <section class="intel-block">
       <h3>Reminder timing</h3>
-      <p class="hint">How many days after your first message each reminder appears. The last box is different: if you pick up a lead and send nothing at all, that is how long before we start reminding you.</p>
+      <p class="hint">How many days after the first message each reminder appears. The last box is different: if someone picks up a lead and sends nothing at all, that's how long before we start nudging them.</p>
       <div class="grid-3">
         ${[1, 2, 3, 4]
           .map(
@@ -620,12 +603,33 @@ async function renderPricing() {
           </label>`
           )
           .join("")}
-        <label class="field">
-          <span>Remind me if nothing sent after (hours)</span>
-          <input type="number" min="1" id="cad-nudge" value="${Number(cad.nudge_after_hours || 24)}" />
-        </label>
+        <label class="field"><span>Nudge if nothing sent after (hours)</span>
+          <input type="number" min="1" id="cad-nudge" value="${Number(cad.nudge_after_hours || 12)}" /></label>
       </div>
-      <button class="btn btn-primary" id="save-pricing">Save pricing</button>
+      <button class="btn btn-primary" id="save-pricing">Save these settings</button>
+    </section>
+
+    <section class="intel-block">
+      <h3>Wording and templates</h3>
+      <p class="hint">Everything the portal writes on your behalf. Change it here and it applies everywhere — no code change needed. Placeholders like <code>{{company}}</code> get filled in automatically.</p>
+      ${templates
+        .map(
+          (t) => `
+        <div class="tpl-block" data-tpl="${esc(t.key)}">
+          <label class="field">
+            <span>${esc(t.label)}</span>
+            <p class="hint tpl-hint">${esc(t.hint || "")}</p>
+            ${
+              t.key === "deck_link"
+                ? `<input data-tpl-body value="${esc(t.body || "")}" placeholder="https://…" />`
+                : `<textarea data-tpl-body rows="${t.key === "service_guidance" ? 8 : 5}"
+                     placeholder="${esc(t.body ? "" : "Not filled in yet")}">${esc(t.body || "")}</textarea>`
+            }
+          </label>
+        </div>`
+        )
+        .join("")}
+      <button class="btn btn-primary" id="save-templates">Save wording</button>
     </section>`;
 
   $("#save-pricing").addEventListener("click", async () => {
@@ -639,32 +643,38 @@ async function renderPricing() {
           views: f("views"), deliverables: f("deliverables"),
         };
       }),
-      cost_model: {
-        ...m,
-        creator_rates: {
-          nano: Number($("#cm-nano").value),
-          micro: Number($("#cm-micro").value),
-          macro: Number($("#cm-macro").value),
-        },
-        internal_cost_pct: Number($("#cm-internal").value),
-      },
-      guardrail: {
-        healthy_margin_pct: Number($("#gr-healthy").value),
-        min_margin_pct: Number($("#gr-min").value),
-        max_discount_pct: Number($("#gr-discount").value),
-      },
+      guardrail: { max_discount_pct: Number($("#gr-discount").value) },
       followup_cadence: {
         step1_days: Number($("#cad-1").value),
         step2_days: Number($("#cad-2").value),
         step3_days: Number($("#cad-3").value),
         step4_days: Number($("#cad-4").value),
         nudge_after_hours: Number($("#cad-nudge").value),
+        contact_hours: Number(cad.contact_hours) || 24,
+        reply_days: Number(cad.reply_days) || 7,
+        close_days: Number(cad.close_days) || 7,
       },
     };
 
     try {
       await api("/api/outreach/meta/rate-card", { method: "PUT", body: payload });
-      toast("Pricing saved");
+      toast("Saved");
+      renderPricing();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#save-templates").addEventListener("click", async () => {
+    const payload = {
+      templates: $$("[data-tpl]").map((el) => ({
+        key: el.dataset.tpl,
+        body: el.querySelector("[data-tpl-body]").value,
+      })),
+    };
+    try {
+      await api("/api/outreach/meta/templates", { method: "PUT", body: payload });
+      toast("Wording saved");
       renderPricing();
     } catch (err) {
       toast(err.message, true);
@@ -708,7 +718,6 @@ function closeWorkspace() {
   outreach.proposalDraft = null;
   outreach.pendingTier = null;
   outreach.pendingPrice = null;
-  outreach.builderOpen = false;
 }
 
 async function openWorkspace(id) {
@@ -719,10 +728,10 @@ async function openWorkspace(id) {
 
   outreach.pendingTier = null;
   outreach.pendingPrice = null;
-  outreach.builderOpen = false;
 
   try {
     outreach.opp = await api(`/api/outreach/${id}`);
+    outreach.opp.execution = (await api(`/api/outreach/${id}/execution`)).items;
     if (!outreach.rateCard) outreach.rateCard = await api("/api/outreach/meta/rate-card");
   } catch (err) {
     panel.innerHTML = `<div class="empty"><h2>Couldn't open it</h2><p>${esc(err.message)}</p></div>`;
@@ -756,6 +765,7 @@ async function reloadWorkspace() {
   if (!outreach.opp) return;
   const id = outreach.opp.opportunity.id;
   outreach.opp = await api(`/api/outreach/${id}`);
+  outreach.opp.execution = (await api(`/api/outreach/${id}/execution`)).items;
   paintWorkspace();
 }
 
@@ -763,6 +773,13 @@ function paintWorkspace() {
   const { panel } = workspaceEls();
   const d = outreach.opp;
   const o = d.opportunity;
+
+  // Every action in here repaints the whole panel, which resets the scroll to
+  // the top. Generating a pitch is the worst case: you press the button near
+  // the middle of a long panel and get thrown back to the company name, with
+  // the thing you asked for now somewhere off screen. Remember where they
+  // were and put them back.
+  const wasScrolled = $(".ws-body", panel) ? $(".ws-body", panel).scrollTop : 0;
 
   panel.innerHTML = `
     <header class="ws-head">
@@ -781,14 +798,31 @@ function paintWorkspace() {
       ${wsReplyBlock(d)}
       ${wsFollowupBlock(d)}
       ${wsMeetingBlock(d)}
-      ${wsProposalBlock(d)}
+      ${wsExecutionBlock(d)}
       ${wsHistoryBlock(d)}
       ${wsTimelineBlock(d)}
       ${wsCloseBlock(d)}
     </div>`;
 
+  // Restore before the browser paints, so there is no visible jump.
+  const body = $(".ws-body", panel);
+  if (body && wasScrolled) body.scrollTop = wasScrolled;
+
   $("#ws-close").addEventListener("click", closeWorkspace);
   wireWorkspace();
+}
+
+/**
+ * Repaint, then bring one section into view.
+ *
+ * Used after something is generated: staying exactly where you were is right
+ * for a save, but wrong when the whole point of the click was to produce
+ * something new further down.
+ */
+function paintAndReveal(selector) {
+  paintWorkspace();
+  const el = $(selector, $("#ws-panel"));
+  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 /* --- contact header (item 3) --- */
@@ -811,7 +845,7 @@ function wsContactBlock(d) {
 
   const clock = o.countdown
     ? `<span class="clock ${o.countdown.overdue ? "clock-over" : o.countdown.urgent ? "clock-soon" : ""}">${esc(
-        o.countdown.overdue ? "Claim expired" : o.countdown.label
+        o.countdown.full || o.countdown.label
       )}</span>`
     : "";
 
@@ -908,22 +942,36 @@ function wsServiceBlock(d) {
 
 /* --- items 5-7: plan selection, custom builder, guardrail --- */
 
+/**
+ * Packages and proposal, in one section.
+ *
+ * They were two sections and that was wrong: choosing a package and writing
+ * the proposal that quotes it are one job, and splitting them meant scrolling
+ * between the price you picked and the document that names it.
+ *
+ * The custom package builder is gone. Every quote is now a listed package,
+ * optionally discounted — which also removed the cost breakdown, so nothing on
+ * this screen shows what delivery costs us.
+ */
 function wsPlanBlock(d) {
   const o = d.opportunity;
   const card = (outreach.rateCard && outreach.rateCard.rate_card) || [];
   const group = card.find((g) => g.service === o.service_primary);
-  const cfg = o.plan_config || {};
   const q = outreach.quote;
   const tier = outreach.pendingTier || o.plan_tier;
   const price = outreach.pendingPrice != null ? outreach.pendingPrice : Number(o.quoted_price || 0);
+  const draft = outreach.proposalDraft;
 
   if (!o.service_primary) {
-    return `<section class="ws-section"><h3>Package &amp; price</h3><p class="muted">First decide what you're selling them, above.</p></section>`;
+    return `<section class="ws-section" id="package-section">
+              <h3>Package &amp; proposal</h3>
+              <p class="muted">Pick what you're selling first.</p>
+            </section>`;
   }
 
   return `
-    <section class="ws-section">
-      <h3>Package &amp; price</h3>
+    <section class="ws-section" id="package-section">
+      <h3>Package &amp; proposal</h3>
 
       ${
         group
@@ -934,126 +982,127 @@ function wsPlanBlock(d) {
                  <button class="plan-card ${tier === p.tier ? "is-on" : ""}" data-plan="${esc(p.tier)}">
                    <span class="plan-price">${inrShort(p.price)}</span>
                    <span class="plan-label">${esc(p.label)}</span>
-                   <span class="plan-detail">${p.creators ? `${p.creators} creators` : "—"}</span>
+                   <span class="plan-detail">${p.creators ? `${p.creators} creators` : ""}</span>
                    <span class="plan-detail">${esc(p.views || "")}</span>
                    <span class="plan-detail">${esc(p.deliverables || "")}</span>
                  </button>`
                  )
                  .join("")}
              </div>`
-          : `<p class="muted">No standard packages for ${esc(o.service_primary)} yet. Build one below.</p>`
+          : `<p class="muted">No packages set up for ${esc(o.service_primary)} yet. An admin can add them under Pricing.</p>`
       }
 
-      <button class="btn btn-sm" id="toggle-builder">Build a custom package</button>
-
-      <div id="plan-builder" ${outreach.builderOpen || tier === "custom" ? "" : "hidden"}>
-        <div class="grid-3">
-          <label class="field"><span>Geography</span>
-            <select id="pb-geo">${["India", "North", "South", "Regional"]
-              .map((g) => `<option ${cfg.geography === g ? "selected" : ""}>${g}</option>`)
-              .join("")}</select></label>
-          <label class="field"><span>Language</span>
-            <select id="pb-lang">${["Hindi", "English", "Tamil", "Telugu", "Marathi", "Bengali", "Kannada"]
-              .map((g) => `<option ${cfg.language === g ? "selected" : ""}>${g}</option>`)
-              .join("")}</select></label>
-          <label class="field"><span>Views promised (in millions)</span>
-            <input type="number" id="pb-views" value="${Number(cfg.views_m || 0)}" /></label>
-        </div>
-
-        <span class="mono-label">How many creators</span>
-        <div class="grid-3">
-          ${["nano", "micro", "macro"]
-            .map(
-              (t) => `
-            <label class="field"><span>${t}</span>
-              <input type="number" min="0" id="pb-${t}" value="${Number((cfg.creator_mix || {})[t] || 0)}" /></label>`
-            )
-            .join("")}
-        </div>
-
-        <span class="mono-label">What they get</span>
-        <div class="chips" id="pb-deliverables">
-          ${["Reels", "YouTube", "Stories", "Static post"]
-            .map(
-              (dv) =>
-                `<button class="chip ${
-                  (cfg.deliverables || []).includes(dv) ? "is-on" : ""
-                }" data-deliv="${esc(dv)}">${dv}</button>`
-            )
-            .join("")}
-        </div>
-      </div>
-
       <div class="grid-3">
-        <label class="field"><span>What the client can spend ₹</span>
+        <label class="field"><span>What they can spend ₹</span>
           <input type="number" id="pb-budget" value="${Number(o.client_budget || 0)}" /></label>
-        <label class="field"><span>What we'll charge ₹</span>
+        <label class="field"><span>What we're charging ₹</span>
           <input type="number" id="pb-price" value="${price}" /></label>
         <div class="field"><span class="mono-label">&nbsp;</span>
-          <button class="btn btn-sm" id="run-quote">Check the profit</button></div>
+          <button class="btn btn-sm" id="run-quote">Check this price</button></div>
       </div>
 
-      ${guardrailBox(q, o)}
+      ${discountBox(q, o)}
 
-      <button class="btn btn-primary" id="save-plan">Save</button>
+      <button class="btn btn-primary" id="save-plan">Save package &amp; price</button>
+
+      <div class="section-split"></div>
+
+      <h4 class="ws-subhead">Proposal</h4>
+
+      ${
+        d.proposals.length
+          ? `<div class="ver-list">
+               ${d.proposals
+                 .map(
+                   (p, i) => `
+                 <details class="ver-row-wrap">
+                   <summary class="ver-row">
+                     <span class="ver-tag">V${p.version}</span>
+                     <span class="ver-price">${inrShort(p.price)}</span>
+                     ${
+                       i < d.proposals.length - 1
+                         ? `<span class="ver-delta">${deltaLabel(p.price, d.proposals[i + 1].price)}</span>`
+                         : `<span class="ver-delta">—</span>`
+                     }
+                     <span class="muted">${esc(p.user_name || "")} · ${esc(dateOnly(p.created_at))}</span>
+                     <span class="ver-note">${esc(p.change_note || "")}</span>
+                   </summary>
+                   <pre class="ver-body">${esc(p.body || "(no text saved for this version)")}</pre>
+                   <button class="btn btn-sm" data-copy-proposal="${p.id}">Copy this version</button>
+                 </details>`
+                 )
+                 .join("")}
+             </div>`
+          : `<p class="muted">No proposal written yet.</p>`
+      }
+
+      <div class="ws-actions">
+        <button class="btn btn-sm btn-primary" id="gen-proposal">Write the proposal</button>
+        ${
+          outreach.deckLink
+            ? `<a class="btn btn-sm" href="${esc(outreach.deckLink)}" target="_blank" rel="noopener">Open the deck</a>`
+            : ""
+        }
+      </div>
+
+      ${
+        draft
+          ? `<label class="field"><span>Proposal text</span>
+               <textarea id="prop-body" rows="14">${esc(draft.body)}</textarea></label>
+             <div class="grid-2">
+               <label class="field"><span>Price ₹</span>
+                 <input type="number" id="prop-price" value="${Number(o.quoted_price || 0)}" /></label>
+               <label class="field"><span>What changed</span>
+                 <input id="prop-note" placeholder="e.g. dropped to match their budget" /></label>
+             </div>
+             <button class="btn btn-primary" id="save-proposal">Save as V${d.proposals.length + 1}</button>`
+          : ""
+      }
     </section>`;
 }
 
 /**
- * Item 7's traffic light.
+ * The discount check.
  *
- * Shows the working, not just the verdict — vendor cost, internal cost, margin
- * — because a salesperson who can see WHY the number is red can fix it by
- * changing the plan, and one who only sees "blocked" goes and asks their
- * manager to override it.
+ * All the cost working — creator cost, our overheads, margin percentage — has
+ * been taken out at the client's request. What remains is the one question a
+ * salesperson actually needs answered before sending a price: is this discount
+ * something I can sign off myself, or does it go to my manager?
  */
-function guardrailBox(q, o) {
-  const source = q || (o.margin_pct != null
-    ? {
-        revenue: o.quoted_price, vendor_cost: o.vendor_cost, internal_cost: o.internal_cost,
-        margin_amount: o.margin_amount, margin_pct: o.margin_pct,
-        status: o.approval_status === "pending" ? "blocked" : o.margin_pct >= 35 ? "healthy" : "thin",
-        label: o.approval_status === "pending"
-          ? "Needs your manager's approval"
-          : o.margin_pct >= 35
-          ? "Good deal — go ahead"
-          : "Tight, but you can sell it",
-        reasons: o.approval_reason ? [o.approval_reason] : [],
-      }
-    : null);
+function discountBox(q, o) {
+  const source =
+    q ||
+    (o.approval_status
+      ? {
+          status: o.approval_status === "pending" ? "blocked" : "ok",
+          label:
+            o.approval_status === "pending"
+              ? "Needs your manager's approval"
+              : o.approval_status === "approved"
+              ? "Approved by your manager"
+              : "Your manager said no",
+          reasons: o.approval_reason ? [o.approval_reason] : [],
+        }
+      : null);
 
-  if (!source) {
-    return `<p class="muted">Put in a price and press "Check the profit" to see if this deal is worth doing.</p>`;
-  }
+  if (!source) return "";
 
-  const tone =
-    source.status === "healthy" ? "gr-good" : source.status === "thin" ? "gr-warn" : "gr-bad";
+  const tone = source.status === "ok" ? "gr-good" : "gr-bad";
 
   return `
     <div class="guardrail ${tone}">
       <div class="gr-verdict">
         <span class="gr-dot"></span>
         <strong>${esc(source.label)}</strong>
-        <span class="gr-margin">${source.margin_pct == null ? "—" : `we keep ${Number(source.margin_pct).toFixed(1)}%`}</span>
-      </div>
-      <div class="gr-lines">
-        <span><span class="mono-label">They pay us</span>${inr(source.revenue)}</span>
-        <span><span class="mono-label">Creators cost</span>${inr(source.vendor_cost)}</span>
-        <span><span class="mono-label">Our costs</span>${inr(source.internal_cost)}</span>
-        <span><span class="mono-label">We keep</span>${inr(source.margin_amount)}</span>
+        ${
+          source.discount_pct > 0
+            ? `<span class="gr-margin">${Number(source.discount_pct).toFixed(0)}% off standard</span>`
+            : ""
+        }
       </div>
       ${
         source.reasons && source.reasons.length
           ? `<ul class="gr-reasons">${source.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`
-          : ""
-      }
-      ${
-        o.approval_status
-          ? `<p class="gr-approval">Manager: <strong>${esc(
-              { pending: "still checking", approved: "said yes", rejected: "said no" }[
-                o.approval_status
-              ] || o.approval_status
-            )}</strong>${o.approval_note ? ` — ${esc(o.approval_note)}` : ""}</p>`
           : ""
       }
     </div>`;
@@ -1064,41 +1113,161 @@ function guardrailBox(q, o) {
 function wsPitchBlock(d) {
   const p = outreach.pitch;
 
+  // What has already gone out, per channel. The old version wiped the draft the
+  // moment you pressed Mark as sent, which assumed one message per lead on one
+  // platform — but the same pitch normally goes out on email AND LinkedIn AND
+  // WhatsApp, and you had to regenerate it each time.
+  const sentChannels = new Set(
+    (d.messages || []).filter((m) => m.direction === "out").map((m) => m.channel)
+  );
+
+  const activeTab = outreach.pitchTab || "email";
+  const isEmail = activeTab === "email";
+  const channelKey =
+    activeTab === "call_script" ? "call" : activeTab === "proposal_intro" ? "note" : activeTab;
+  const alreadySent = sentChannels.has(channelKey);
+
+  const bodyFor = (k) => (k === "email" ? (p && p.email.body) || "" : (p && p[k]) || "");
+
   return `
-    <section class="ws-section">
+    <section class="ws-section" id="pitch-section">
       <h3>Message to send</h3>
-      <p class="hint">We write this using their company, their recent news, the job title of your contact, and what you are selling — so it does not read like a template.</p>
-      <button class="btn btn-sm btn-primary" id="gen-pitch">Write my message</button>
+      <p class="hint">Written from their company, their recent news, your contact's job title and what you're selling — so it doesn't read like a template.</p>
+      <button class="btn btn-sm btn-primary" id="gen-pitch">${
+        p ? "Rewrite it" : "Write my message"
+      }</button>
 
       ${
         p
           ? `<div class="pitch-box">
-               ${p.source === "rules" ? `<p class="tag-warn">Our AI writer is switched off, so this is a standard template. Please edit it before you send.</p>` : ""}
+               ${
+                 p.source === "rules"
+                   ? `<p class="tag-warn">Our AI writer is switched off, so this is a standard template. Please edit it before you send.</p>`
+                   : ""
+               }
+
+               ${pitchReasoning(d, p)}
+
                <div class="chips" id="pitch-tabs">
                  ${CHANNELS.map(
-                   ([k, label], i) =>
-                     `<button class="chip ${i === 0 ? "is-on" : ""}" data-pitch-tab="${k}">${label}</button>`
+                   ([k, label]) => {
+                     const key =
+                       k === "call_script" ? "call" : k === "proposal_intro" ? "note" : k;
+                     return `<button class="chip ${k === activeTab ? "is-on" : ""}" data-pitch-tab="${k}">${label}${
+                       sentChannels.has(key) ? " ✓" : ""
+                     }</button>`;
+                   }
                  ).join("")}
                </div>
 
-               <label class="field" id="pitch-subject-wrap">
+               <label class="field" id="pitch-subject-wrap" ${isEmail ? "" : "hidden"}>
                  <span>Subject</span>
-                 <input id="pitch-subject" value="${esc(p.email.subject)}" />
+                 <input id="pitch-subject" value="${esc((p.email && p.email.subject) || "")}" />
                </label>
                <label class="field">
                  <span>Message</span>
-                 <textarea id="pitch-body" rows="10">${esc(p.email.body)}</textarea>
+                 <textarea id="pitch-body" rows="10">${esc(bodyFor(activeTab))}</textarea>
                </label>
 
                <div class="ws-actions">
                  <button class="btn btn-sm" id="copy-pitch">Copy</button>
-                 <button class="btn btn-sm btn-primary" id="log-sent">Mark as sent</button>
+                 <button class="btn btn-sm ${alreadySent ? "" : "btn-primary"}" id="log-sent">
+                   ${alreadySent ? "Send this again" : "Mark as sent"}
+                 </button>
                </div>
-               <p class="hint">Copy this, paste it into your email or WhatsApp, send it, then click Mark as sent. That schedules your reminders and adds it to the history below.</p>
+               <p class="hint">${
+                 alreadySent
+                   ? "Already sent on this channel — the draft stays here so you can use it on the others too."
+                   : "Copy this, paste it into your email or WhatsApp, send it, then click Mark as sent. That schedules your reminders and adds it to the record below."
+               }</p>
              </div>`
           : ""
       }
+
+      ${wsSentBlock(d)}
     </section>`;
+}
+
+/**
+ * Why the message says what it says.
+ *
+ * "Don't just write a message" — a salesperson about to send something in their
+ * own name needs to see what it was built from, both to trust it and to catch
+ * it when one of the inputs is wrong. That second case is real: a news
+ * headline attached to the wrong company reads perfectly fluently and is
+ * mortifying to send.
+ */
+function pitchReasoning(d, p) {
+  const o = d.opportunity;
+  const used = [];
+
+  if (o.company) used.push(["Company", o.company]);
+  if (o.focus_name || o.contact_name)
+    used.push([
+      "Writing to",
+      `${o.focus_name || o.contact_name}${
+        o.focus_role || o.contact_role ? `, ${o.focus_role || o.contact_role}` : ""
+      }`,
+    ]);
+  if (o.industry) used.push(["Industry", o.industry]);
+  if (p.signal_title) used.push(["Their recent news", p.signal_title]);
+  if (o.service_primary) used.push(["Selling", o.service_primary]);
+  if (o.plan_name) used.push(["Package", o.plan_name]);
+  if (o.quoted_price) used.push(["Price quoted", inr(o.quoted_price)]);
+
+  if (!used.length) return "";
+
+  return `
+    <details class="pitch-why" ${p.mismatch ? "open" : ""}>
+      <summary>What we used to write this</summary>
+      ${
+        p.mismatch
+          ? `<p class="tag-warn">Careful — the news headline on file mentions a different company. Check it before sending.</p>`
+          : ""
+      }
+      <dl class="why-list">
+        ${used
+          .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`)
+          .join("")}
+      </dl>
+      ${p.why ? `<p class="why-note">${esc(p.why)}</p>` : ""}
+    </details>`;
+}
+
+/**
+ * What has actually gone out.
+ *
+ * Only inbound messages were shown before, so once a pitch was logged there was
+ * no way to see what you had actually said — which matters most when a reply
+ * arrives three days later and you cannot remember what you sent.
+ */
+function wsSentBlock(d) {
+  const sent = (d.messages || []).filter((m) => m.direction === "out");
+  if (!sent.length) return "";
+
+  const LABEL = {
+    email: "Email", linkedin: "LinkedIn", whatsapp: "WhatsApp",
+    call: "Call", note: "Note", meeting: "Meeting",
+  };
+
+  return `
+    <div class="sent-list">
+      <span class="mono-label">What you've sent</span>
+      ${sent
+        .map(
+          (m, i) => `
+        <details class="sent-row" ${i === 0 ? "open" : ""}>
+          <summary>
+            <span class="sent-chan">${esc(LABEL[m.channel] || m.channel)}</span>
+            <span class="sent-when">${esc(shortDateTime(m.sent_at || m.created_at))}</span>
+            <span class="sent-peek">${esc((m.subject || m.body || "").slice(0, 60))}</span>
+          </summary>
+          ${m.subject ? `<p class="sent-subject">${esc(m.subject)}</p>` : ""}
+          <pre class="sent-body">${esc(m.body)}</pre>
+        </details>`
+        )
+        .join("")}
+    </div>`;
 }
 
 /* --- items 11 & 17: log a reply, get it classified --- */
@@ -1180,100 +1349,195 @@ function wsFollowupBlock(d) {
     </section>`;
 }
 
-/* --- items 20-21: meetings --- */
+/* --- meetings, Google Meet, and notes --- */
+
+const MEETING_OUTCOME_LABEL = Object.fromEntries(MEETING_OUTCOMES);
 
 function wsMeetingBlock(d) {
+  const g = outreach.google || {};
+
   return `
-    <section class="ws-section">
+    <section class="ws-section" id="meeting-section">
       <h3>Meetings</h3>
 
-      ${d.meetings
-        .map(
-          (m) => `
-        <div class="meet-box">
-          <div class="meet-head">
-            <strong>${esc(shortDateTime(m.scheduled_at))}</strong>
-            ${m.link ? `<a href="${esc(m.link)}" target="_blank" rel="noopener">Join</a>` : ""}
-            ${m.outcome ? `<span class="tag-soft">${esc(m.outcome.replace(/_/g, " "))}</span>` : ""}
-          </div>
-          ${m.requirement ? `<p><span class="mono-label">Requirement</span>${esc(m.requirement)}</p>` : ""}
-          ${
-            m.structured && m.structured.next_step
-              ? `<p><span class="mono-label">Next step</span>${esc(m.structured.next_step)}</p>`
-              : ""
-          }
-          ${
-            !m.notes
-              ? `<label class="field"><span>Meeting notes</span>
-                   <textarea rows="3" data-notes-for="${m.id}" placeholder="What was discussed, what they asked for, who was in the room"></textarea></label>
-                 <label class="field"><span>Outcome</span>
-                   <select data-outcome-for="${m.id}">
-                     <option value="">Let the system read the notes</option>
-                     ${MEETING_OUTCOMES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}
-                   </select></label>
-                 <button class="btn btn-sm btn-primary" data-save-notes="${m.id}">Save notes</button>`
-              : `<p class="meet-notes">${esc(m.notes)}</p>`
-          }
-        </div>`
-        )
-        .join("")}
+      ${
+        g.configured && !g.connected
+          ? `<p class="tag-warn">Connect your Google account and meetings booked here get a Meet link automatically, and notes afterwards.
+               <button class="btn btn-sm" id="connect-google">Connect Google</button></p>`
+          : ""
+      }
+      ${
+        g.connected && g.last_error
+          ? `<p class="tag-warn">Google refused the last request — you may need to reconnect.
+               <button class="btn btn-sm" id="connect-google">Reconnect</button></p>`
+          : ""
+      }
+
+      ${d.meetings.map(meetingCard).join("")}
 
       <div class="grid-3">
-        <label class="field"><span>Schedule a meeting</span><input type="datetime-local" id="mt-when" /></label>
-        <label class="field"><span>Link</span><input id="mt-link" placeholder="Meet / Zoom URL" /></label>
-        <label class="field"><span>Attendees</span><input id="mt-who" /></label>
+        <label class="field"><span>When</span><input type="datetime-local" id="mt-when" /></label>
+        <label class="field"><span>How long</span>
+          <select id="mt-mins">
+            <option value="30">30 minutes</option>
+            <option value="45">45 minutes</option>
+            <option value="60">1 hour</option>
+            <option value="15">15 minutes</option>
+          </select></label>
+        <label class="field"><span>Anyone else (email)</span><input id="mt-who" placeholder="optional, comma separated" /></label>
       </div>
-      <button class="btn btn-sm" id="add-meeting">Add meeting</button>
+      <button class="btn btn-sm btn-primary" id="add-meeting">
+        ${g.connected ? "Book it and send a Meet link" : "Add meeting"}
+      </button>
+      ${
+        g.connected
+          ? `<p class="hint">This creates the calendar invite, generates the Google Meet link and emails everyone. Your contact is invited automatically.</p>`
+          : ""
+      }
     </section>`;
 }
 
-/* --- items 22-23: proposals and versions --- */
-
-function wsProposalBlock(d) {
-  const draft = outreach.proposalDraft;
+function meetingCard(m) {
+  const state = m.transcript_state;
 
   return `
-    <section class="ws-section">
-      <h3>Proposal</h3>
+    <div class="meet-box">
+      <div class="meet-head">
+        <strong>${esc(shortDateTime(m.scheduled_at))}</strong>
+        ${
+          m.meet_link
+            ? `<a class="meet-join" href="${esc(m.meet_link)}" target="_blank" rel="noopener">Join Meet</a>`
+            : m.link
+            ? `<a href="${esc(m.link)}" target="_blank" rel="noopener">Join</a>`
+            : ""
+        }
+        ${m.outcome ? `<span class="tag-soft">${esc(MEETING_OUTCOME_LABEL[m.outcome] || m.outcome.replace(/_/g, " "))}</span>` : ""}
+      </div>
+
+      ${m.attendees ? `<p class="muted">${esc(m.attendees)}</p>` : ""}
+      ${m.requirement ? `<p><span class="mono-label">What they need</span>${esc(m.requirement)}</p>` : ""}
+      ${
+        m.structured && m.structured.next_step
+          ? `<p><span class="mono-label">Next step</span>${esc(m.structured.next_step)}</p>`
+          : ""
+      }
 
       ${
-        d.proposals.length
-          ? `<div class="ver-list">
-               ${d.proposals
+        m.notes
+          ? `<div class="meet-notes-wrap">
+               <span class="mono-label">Notes${m.notes_generated_at ? " — written from the call recording" : ""}</span>
+               <p class="meet-notes">${esc(m.notes)}</p>
+               <div class="ws-actions">
+                 <button class="btn btn-sm" data-forward-notes="${m.id}">Email these notes</button>
+                 ${
+                   m.notes_sent_at
+                     ? `<span class="muted">Sent to ${esc(m.notes_sent_to || "")} on ${esc(dateOnly(m.notes_sent_at))}</span>`
+                     : ""
+                 }
+               </div>
+             </div>`
+          : `<div class="meet-actions">
+               ${
+                 m.meet_link
+                   ? `<button class="btn btn-sm btn-primary" data-fetch-notes="${m.id}">Get notes from the call</button>`
+                   : ""
+               }
+               <button class="btn btn-sm" data-write-notes="${m.id}">Write notes myself</button>
+             </div>
+
+             ${
+               state && state !== "ready"
+                 ? `<p class="hint">${esc(outreach.noteMessages[m.id] || "")}</p>`
+                 : outreach.noteMessages[m.id]
+                 ? `<p class="hint">${esc(outreach.noteMessages[m.id])}</p>`
+                 : ""
+             }
+
+             ${
+               outreach.writingNotes === m.id
+                 ? `<label class="field"><span>What was discussed</span>
+                      <textarea rows="4" data-notes-for="${m.id}" placeholder="What they asked for, who was in the room, what happens next"></textarea></label>
+                    <label class="field"><span>How did it go?</span>
+                      <select data-outcome-for="${m.id}">
+                        <option value="">Let the system read the notes</option>
+                        ${MEETING_OUTCOMES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}
+                      </select></label>
+                    <button class="btn btn-sm btn-primary" data-save-notes="${m.id}">Save notes</button>`
+                 : ""
+             }`
+      }
+    </div>`;
+}
+
+/* --- the execution plan --- */
+
+/**
+ * What we deliver once it's won: deliverable, when, who owns it.
+ *
+ * Only appears from proposal stage onward. Before that there is nothing to
+ * plan, and an empty planning table on a lead nobody has spoken to yet is
+ * noise on the one screen that is supposed to be free of it.
+ */
+function wsExecutionBlock(d) {
+  const o = d.opportunity;
+  const items = d.execution || [];
+  const relevant = ["proposal", "negotiation", "won"].includes(o.stage) || items.length;
+  if (!relevant) return "";
+
+  const STATUS = {
+    pending: "Not started",
+    in_progress: "In progress",
+    done: "Done",
+    blocked: "Blocked",
+  };
+
+  return `
+    <section class="ws-section" id="execution-section">
+      <h3>Execution plan</h3>
+      <p class="hint">What we've promised to deliver, by when, and who owns it.</p>
+
+      ${
+        items.length
+          ? `<div class="exec-list">
+               <div class="exec-head">
+                 <span>Deliverable</span><span>Due</span><span>Owner</span><span>Status</span><span></span>
+               </div>
+               ${items
                  .map(
-                   (p, i) => `
-                 <div class="ver-row">
-                   <span class="ver-tag">V${p.version}</span>
-                   <span class="ver-price">${inrShort(p.price)}</span>
-                   ${
-                     i < d.proposals.length - 1
-                       ? `<span class="ver-delta">${deltaLabel(p.price, d.proposals[i + 1].price)}</span>`
-                       : `<span class="ver-delta">—</span>`
-                   }
-                   <span class="muted">${esc(p.user_name || "")} · ${esc(dateOnly(p.created_at))}</span>
-                   <span class="ver-note">${esc(p.change_note || "")}</span>
+                   (it) => `
+                 <div class="exec-row exec-${esc(it.status)}">
+                   <span class="exec-what">${esc(it.deliverable)}</span>
+                   <span class="exec-due ${
+                     it.due_date && new Date(it.due_date) < new Date() && it.status !== "done"
+                       ? "is-late"
+                       : ""
+                   }">${it.due_date ? esc(dateOnly(it.due_date)) : "—"}</span>
+                   <span>${esc(it.owner_name || "—")}</span>
+                   <span>
+                     <select class="exec-status" data-exec-status="${it.id}">
+                       ${Object.entries(STATUS)
+                         .map(
+                           ([v, l]) =>
+                             `<option value="${v}" ${it.status === v ? "selected" : ""}>${l}</option>`
+                         )
+                         .join("")}
+                     </select>
+                   </span>
+                   <span><button class="btn btn-sm btn-ghost" data-exec-remove="${it.id}">Remove</button></span>
                  </div>`
                  )
                  .join("")}
              </div>`
-          : `<p class="muted">No versions yet.</p>`
+          : `<p class="muted">Nothing planned yet.</p>`
       }
 
-      <button class="btn btn-sm btn-primary" id="gen-proposal">Write the proposal</button>
-
-      ${
-        draft
-          ? `<label class="field"><span>Proposal body</span>
-               <textarea id="prop-body" rows="14">${esc(draft.body)}</textarea></label>
-             <div class="grid-3">
-               <label class="field"><span>Price ₹</span>
-                 <input type="number" id="prop-price" value="${Number(d.opportunity.quoted_price || 0)}" /></label>
-               <label class="field"><span>What changed</span>
-                 <input id="prop-note" placeholder="e.g. dropped to match their budget" /></label>
-             </div>
-             <button class="btn btn-primary" id="save-proposal">Save as V${d.proposals.length + 1}</button>`
-          : ""
-      }
+      <div class="grid-3">
+        <label class="field"><span>Deliverable</span>
+          <input id="ex-what" placeholder="e.g. 50 creator reels live" /></label>
+        <label class="field"><span>Due</span><input type="date" id="ex-due" /></label>
+        <label class="field"><span>Owner</span><input id="ex-owner" placeholder="who's responsible" /></label>
+      </div>
+      <button class="btn btn-sm" id="add-exec">Add to the plan</button>
     </section>`;
 }
 
@@ -1392,7 +1656,7 @@ function wsCloseBlock(d) {
       <div id="lost-form" hidden>
         <p class="hint">A minute here tells the whole company why deals are being lost. Please fill it in properly.</p>
 
-        <label class="field"><span>1. What happened? *</span>
+        <label class="field"><span>1. What happened? <em class="req">required</em></span>
           <select id="ls-primary">
             <option value="">Pick a reason</option>
             ${reasons.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}
@@ -1404,40 +1668,99 @@ function wsCloseBlock(d) {
             ${reasons.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("")}
           </select></label>
 
-        <label class="field"><span>2. Who did the client choose?</span>
+        <label class="field"><span>2. Who did they go with? <em class="req">required</em></span>
           <select id="ls-chose">
-            <option value="">Don't know</option>
+            <option value="">Choose one</option>
             <option value="competitor">A competitor</option>
             <option value="internal">Did it internally</option>
             <option value="nobody">Nobody</option>
           </select></label>
 
-        <div class="grid-2">
-          <label class="field"><span>Competitor name</span><input id="ls-comp" /></label>
-          <label class="field"><span>3. Approximate competitor budget ₹</span><input type="number" id="ls-compbudget" /></label>
-        </div>
+        <label class="field"><span>Their name, if you know it</span><input id="ls-comp" /></label>
 
-        <span class="mono-label">4. What did the client dislike?</span>
+        <span class="mono-label">What did they dislike? (optional)</span>
         <div class="chips" id="ls-dislikes">
           ${DISLIKES.map(([v, l]) => `<button class="chip" data-dislike="${v}">${l}</button>`).join("")}
         </div>
 
-        <label class="field"><span>5. What could have changed the outcome?</span>
+        <label class="field"><span>3. What could have changed the outcome? <em class="req">required</em></span>
           <textarea id="ls-changed" rows="2"></textarea></label>
 
         <label class="field"><span>Your notes</span>
           <textarea id="ls-note" rows="2" placeholder="e.g. Client liked the concept but budget was ₹5L against ₹8L proposed"></textarea></label>
 
         <div class="grid-2">
-          <label class="field"><span>6. Should we try again later?</span>
-            <select id="ls-reapproach"><option value="">No</option><option value="yes">Yes</option></select></label>
-          <label class="field"><span>7. When?</span>
+          <label class="field"><span>4. Should we try again later? <em class="req">required</em></span>
+            <select id="ls-reapproach"><option value="">Choose one</option><option value="no">No</option><option value="yes">Yes</option></select></label>
+          <label class="field"><span>5. When? <em class="req">required if yes</em></span>
             <select id="ls-days"><option value="">—</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select></label>
         </div>
 
         <button class="btn btn-danger btn-block" id="save-lost">Record the loss</button>
       </div>
     </section>`;
+}
+
+/**
+ * Review before sending.
+ *
+ * The brief asked to be able to check the follow-up email before it goes, so
+ * this is a dialog rather than a one-click send — the whole point is the pause.
+ */
+function openForwardDialog(meetingId, draft) {
+  const existing = $("#forward-dialog");
+  if (existing) existing.remove();
+
+  const box = document.createElement("div");
+  box.id = "forward-dialog";
+  box.className = "modal-backdrop";
+  box.innerHTML = `
+    <div class="modal-box">
+      <h3>Email these notes</h3>
+      <label class="field"><span>To</span>
+        <input id="fw-to" value="${esc(draft.to || "")}" placeholder="their email address" /></label>
+      <label class="field"><span>Subject</span>
+        <input id="fw-subject" value="${esc(draft.subject || "")}" /></label>
+      <label class="field"><span>Message</span>
+        <textarea id="fw-body" rows="14">${esc(draft.body || "")}</textarea></label>
+      <div class="ws-actions">
+        <button class="btn btn-primary" id="fw-send">Send it</button>
+        <button class="btn" id="fw-copy">Copy instead</button>
+        <button class="btn btn-sm" id="fw-cancel">Cancel</button>
+      </div>
+      <p class="hint">Sent from your own Google account, so replies come back to you.</p>
+    </div>`;
+
+  document.body.appendChild(box);
+
+  const close = () => box.remove();
+  box.addEventListener("click", (e) => { if (e.target === box) close(); });
+  $("#fw-cancel", box).addEventListener("click", close);
+
+  $("#fw-copy", box).addEventListener("click", () => {
+    navigator.clipboard.writeText($("#fw-body", box).value).then(
+      () => toast("Copied"),
+      () => toast("Couldn't copy — select the text and copy manually", true)
+    );
+  });
+
+  $("#fw-send", box).addEventListener("click", async () => {
+    const to = $("#fw-to", box).value.trim();
+    if (!to.includes("@")) return toast("Who should this go to?", true);
+    try {
+      await api(`/api/outreach/meeting/${meetingId}/forward`, {
+        method: "POST",
+        body: { to, subject: $("#fw-subject", box).value, body: $("#fw-body", box).value },
+      });
+      close();
+      toast(`Sent to ${to}`);
+      await reloadWorkspace();
+    } catch (err) {
+      // Almost always "Google isn't connected". Keep the draft on screen so
+      // nothing they typed is lost — they can still copy it out.
+      toast(err.message, true);
+    }
+  });
 }
 
 /* ── workspace wiring ─────────────────────────────────────────────────────── */
@@ -1522,42 +1845,16 @@ function wireWorkspace() {
         // pre-fills the price with its list price — the salesperson is pricing
         // off the card unless they deliberately change it.
         outreach.pendingTier = btn.dataset.plan;
-        outreach.builderOpen = false;
-        if (quote.list_price) outreach.pendingPrice = quote.list_price;
+        if (quote.recommended_price) outreach.pendingPrice = quote.recommended_price;
         outreach.quote = quote;
         paintWorkspace();
       })
     );
   }
 
-  on("#toggle-builder", "click", () => {
-    outreach.builderOpen = !($("#plan-builder", panel) && !$("#plan-builder", panel).hidden);
-    if (outreach.builderOpen) outreach.pendingTier = "custom";
-    $("#plan-builder", panel).hidden = !outreach.builderOpen;
-  });
-
-  for (const chip of $$("[data-deliv]", panel)) {
-    chip.addEventListener("click", () => chip.classList.toggle("is-on"));
-  }
-
-  const readPlanConfig = () => ({
-    geography: $("#pb-geo", panel) ? $("#pb-geo", panel).value : null,
-    language: $("#pb-lang", panel) ? $("#pb-lang", panel).value : null,
-    views_m: $("#pb-views", panel) ? Number($("#pb-views", panel).value) : 0,
-    creator_mix: {
-      nano: $("#pb-nano", panel) ? Number($("#pb-nano", panel).value) : 0,
-      micro: $("#pb-micro", panel) ? Number($("#pb-micro", panel).value) : 0,
-      macro: $("#pb-macro", panel) ? Number($("#pb-macro", panel).value) : 0,
-    },
-    deliverables: $$("[data-deliv].is-on", panel).map((c) => c.dataset.deliv),
-  });
-
-  // A custom build always wins over a card selection: opening the builder is
-  // the salesperson saying "not one of these".
-  const currentTier = () => {
-    if (outreach.builderOpen) return "custom";
-    return outreach.pendingTier || o.plan_tier || "custom";
-  };
+  // A package is either chosen off the card or it is whatever was saved last.
+  // The custom builder that used to feed this is gone.
+  const currentTier = () => outreach.pendingTier || o.plan_tier || null;
 
   on("#run-quote", "click", () =>
     guard(async () => {
@@ -1566,7 +1863,6 @@ function wireWorkspace() {
         body: {
           service: o.service_primary,
           tier: currentTier(),
-          plan_config: readPlanConfig(),
           price: Number($("#pb-price", panel).value),
           budget: Number($("#pb-budget", panel).value),
         },
@@ -1584,7 +1880,6 @@ function wireWorkspace() {
         body: {
           service: o.service_primary,
           tier: currentTier(),
-          plan_config: readPlanConfig(),
           price: Number($("#pb-price", panel).value),
           budget: Number($("#pb-budget", panel).value),
         },
@@ -1592,8 +1887,8 @@ function wireWorkspace() {
       outreach.quote = quote;
       toast(
         quote.requires_approval
-          ? "Saved — your manager has to approve this price"
-          : `Saved — ${quote.margin_pct}% margin`,
+          ? "Saved — your manager has to approve this discount"
+          : "Package and price saved",
         quote.requires_approval
       );
       outreach.pendingTier = null;
@@ -1608,17 +1903,16 @@ function wireWorkspace() {
       toast("Writing…");
       const { pitch } = await api(`/api/outreach/${id}/pitch`, { method: "POST" });
       outreach.pitch = pitch;
-      paintWorkspace();
+      paintAndReveal("#pitch-section");
     })
   );
 
   for (const tab of $$("[data-pitch-tab]", panel)) {
     tab.addEventListener("click", () => {
-      const key = tab.dataset.pitchTab;
-      const p = outreach.pitch;
-      $$("[data-pitch-tab]", panel).forEach((t) => t.classList.toggle("is-on", t === tab));
-      $("#pitch-subject-wrap", panel).hidden = key !== "email";
-      $("#pitch-body", panel).value = key === "email" ? p.email.body : p[key] || "";
+      // Through state, not the DOM: marking one channel sent repaints the
+      // panel, and the channel you were on has to survive that.
+      outreach.pitchTab = tab.dataset.pitchTab;
+      paintWorkspace();
     });
   }
 
@@ -1632,8 +1926,7 @@ function wireWorkspace() {
 
   on("#log-sent", "click", () =>
     guard(async () => {
-      const active = $("[data-pitch-tab].is-on", panel);
-      const channel = active ? active.dataset.pitchTab : "email";
+      const channel = outreach.pitchTab || "email";
       await api(`/api/outreach/${id}/sent`, {
         method: "POST",
         body: {
@@ -1643,8 +1936,10 @@ function wireWorkspace() {
           generated: true,
         },
       });
-      outreach.pitch = null;
-      toast("Logged — follow-up sequence started");
+      // The draft stays. The same pitch normally goes out on more than one
+      // channel, and clearing it forced a regenerate — which produced slightly
+      // different wording each time.
+      toast(`Logged as sent on ${channel === "call_script" ? "call" : channel}`);
       await reloadWorkspace();
     })
   );
@@ -1684,21 +1979,120 @@ function wireWorkspace() {
   }
 
   /* items 20-21 */
+  on("#connect-google", "click", () =>
+    guard(async () => {
+      const { url } = await api("/api/google/connect");
+      window.location.href = url;
+    })
+  );
+
   on("#add-meeting", "click", () =>
     guard(async () => {
       const when = $("#mt-when", panel).value;
       if (!when) return toast("Pick a date and time", true);
-      await api(`/api/outreach/${id}/meeting`, {
+
+      const res = await api(`/api/outreach/${id}/meeting`, {
         method: "POST",
         body: {
           scheduled_at: new Date(when).toISOString(),
-          link: $("#mt-link", panel).value,
+          minutes: Number($("#mt-mins", panel).value) || 30,
           attendees: $("#mt-who", panel).value,
+        },
+      });
+
+      // Say what actually happened. A meeting saved without a Meet link
+      // because Calendar refused is a different situation from one saved
+      // without a link because Google was never connected.
+      toast(
+        res.meet_created
+          ? "Booked — invite sent with a Meet link"
+          : res.meet_error
+          ? `Saved, but Google wouldn't create the invite: ${res.meet_error}`
+          : "Meeting saved"
+      , Boolean(res.meet_error));
+
+      await reloadWorkspace();
+    })
+  );
+
+  for (const btn of $$("[data-fetch-notes]", panel)) {
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        const mid = btn.dataset.fetchNotes;
+        toast("Asking Google for the recording…");
+        const res = await api(`/api/outreach/meeting/${mid}/fetch-notes`, { method: "POST" });
+
+        if (res.state !== "ready") {
+          // Keep the reason on screen, not just in a toast that vanishes —
+          // "transcription was never switched on" is something they need to
+          // act on, and it will still be true tomorrow.
+          outreach.noteMessages[mid] = res.message;
+          paintWorkspace();
+          return toast(res.message, true);
+        }
+
+        delete outreach.noteMessages[mid];
+        toast("Notes written from the call");
+        await reloadWorkspace();
+      })
+    );
+  }
+
+  for (const btn of $$("[data-write-notes]", panel)) {
+    btn.addEventListener("click", () => {
+      outreach.writingNotes =
+        outreach.writingNotes === btn.dataset.writeNotes ? null : btn.dataset.writeNotes;
+      paintWorkspace();
+    });
+  }
+
+  for (const btn of $$("[data-forward-notes]", panel)) {
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        const mid = btn.dataset.forwardNotes;
+        const draft = await api(`/api/outreach/meeting/${mid}/forward-draft`);
+        openForwardDialog(mid, draft);
+      })
+    );
+  }
+
+  /* the execution plan */
+  on("#add-exec", "click", () =>
+    guard(async () => {
+      const what = $("#ex-what", panel).value.trim();
+      if (!what) return toast("What's the deliverable?", true);
+      await api(`/api/outreach/${id}/execution`, {
+        method: "POST",
+        body: {
+          deliverable: what,
+          due_date: $("#ex-due", panel).value || null,
+          owner_name: $("#ex-owner", panel).value || null,
         },
       });
       await reloadWorkspace();
     })
   );
+
+  for (const sel of $$("[data-exec-status]", panel)) {
+    sel.addEventListener("change", () =>
+      guard(async () => {
+        await api(`/api/outreach/execution/${sel.dataset.execStatus}`, {
+          method: "PATCH",
+          body: { status: sel.value },
+        });
+        await reloadWorkspace();
+      })
+    );
+  }
+
+  for (const btn of $$("[data-exec-remove]", panel)) {
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        await api(`/api/outreach/execution/${btn.dataset.execRemove}`, { method: "DELETE" });
+        await reloadWorkspace();
+      })
+    );
+  }
 
   for (const btn of $$("[data-save-notes]", panel)) {
     btn.addEventListener("click", () =>
@@ -1712,6 +2106,7 @@ function wireWorkspace() {
             outcome: $(`[data-outcome-for="${mid}"]`, panel).value || null,
           },
         });
+        outreach.writingNotes = null;
         await reloadWorkspace();
       })
     );
@@ -1723,7 +2118,7 @@ function wireWorkspace() {
       toast("Drafting…");
       const { draft } = await api(`/api/outreach/${id}/proposal/draft`, { method: "POST" });
       outreach.proposalDraft = draft;
-      paintWorkspace();
+      paintAndReveal("#proposal-section");
     })
   );
 
@@ -1746,6 +2141,16 @@ function wireWorkspace() {
     })
   );
 
+  for (const btn of $$("[data-copy-proposal]", panel)) {
+    btn.addEventListener("click", () => {
+      const pre = btn.previousElementSibling;
+      navigator.clipboard.writeText(pre ? pre.textContent : "").then(
+        () => toast("Copied"),
+        () => toast("Couldn't copy — select the text and copy manually", true)
+      );
+    });
+  }
+
   /* items 12 & 14 */
   on("#mark-won", "click", () =>
     guard(async () => {
@@ -1767,22 +2172,32 @@ function wireWorkspace() {
 
   on("#save-lost", "click", () =>
     guard(async () => {
+      // Checked here as well as on the server so the person gets told which
+      // box, not just that something was missing.
       const primary = $("#ls-primary", panel).value;
-      if (!primary) return toast("Pick a primary reason", true);
+      const chose = $("#ls-chose", panel).value;
+      const changed = $("#ls-changed", panel).value.trim();
+      const again = $("#ls-reapproach", panel).value;
+      const days = $("#ls-days", panel).value;
+
+      if (!primary) return toast("Say what happened", true);
+      if (!chose) return toast("Say who they went with", true);
+      if (!changed) return toast("Say what could have changed the outcome", true);
+      if (!again) return toast("Say whether we should try again", true);
+      if (again === "yes" && !days) return toast("Say when we should try again", true);
 
       await api(`/api/outreach/${id}/lost`, {
         method: "POST",
         body: {
           primary_reason: primary,
           secondary_reason: $("#ls-secondary", panel).value || null,
-          chose: $("#ls-chose", panel).value || null,
+          chose,
           competitor_name: $("#ls-comp", panel).value || null,
-          competitor_budget: Number($("#ls-compbudget", panel).value) || null,
           disliked: $$("[data-dislike].is-on", panel).map((c) => c.dataset.dislike),
-          could_have_changed: $("#ls-changed", panel).value || null,
+          could_have_changed: changed,
           note: $("#ls-note", panel).value || null,
-          reapproach: $("#ls-reapproach", panel).value === "yes",
-          reapproach_days: Number($("#ls-days", panel).value) || null,
+          reapproach: again,
+          reapproach_days: Number(days) || null,
         },
       });
       toast("Recorded — it'll show up in Intelligence");

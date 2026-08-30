@@ -346,15 +346,6 @@
 .gr-bad .gr-dot { background: var(--coral); }
 .gr-margin { font-family: var(--mono); font-size: 12px; margin-left: auto; }
 
-.gr-lines {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-.gr-lines > span { font-family: var(--mono); font-size: 12.5px; }
-.gr-lines .mono-label { display: block; margin-bottom: 2px; }
-
 .gr-reasons { margin: 10px 0 0; padding-left: 18px; font-size: 12.5px; }
 .gr-approval { margin: 8px 0 0; font-size: 12.5px; }
 
@@ -678,4 +669,180 @@
 @media (max-width: 720px) {
   .hist-row { grid-template-columns: 1fr 1fr; row-gap: 3px; }
   .hist-effort { text-align: left; }
+}
+
+/* ── Why the message says what it says ────────────────────────────────────── */
+
+.pitch-why {
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+}
+.pitch-why > summary { cursor: pointer; color: var(--ink-soft); font-size: 12px; }
+.pitch-why > summary:hover { color: var(--ink); }
+
+.why-list {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr;
+  gap: 3px 12px;
+  margin: 10px 0 0;
+}
+.why-list dt {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+  align-self: baseline;
+}
+.why-list dd { margin: 0; }
+.why-note { margin: 10px 0 0; color: var(--ink-soft); font-style: italic; }
+
+/* ── What has actually gone out ───────────────────────────────────────────── */
+
+.sent-list { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+
+.sent-row { border-bottom: 1px solid var(--line); padding: 6px 0; }
+.sent-row:last-child { border-bottom: 0; }
+.sent-row > summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 78px 104px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12.5px;
+}
+.sent-chan { font-weight: 600; }
+.sent-when { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+.sent-peek { color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sent-subject { font-weight: 600; margin: 8px 0 4px; font-size: 13px; }
+.sent-body {
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  margin: 4px 0 8px;
+}
+
+/* ── Proposal versions open to show the text ──────────────────────────────── */
+
+.ver-row-wrap { border-bottom: 1px solid var(--line); }
+.ver-row-wrap:last-child { border-bottom: 0; }
+.ver-row-wrap > summary { cursor: pointer; list-style: none; }
+.ver-row-wrap > summary::-webkit-details-marker { display: none; }
+.ver-row-wrap > summary:hover { background: var(--surface-sunk); }
+.ver-row-wrap .ver-row { border-bottom: 0; }
+
+.ver-body {
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  margin: 4px 0 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* ── Merged package + proposal section ────────────────────────────────────── */
+
+.section-split {
+  border-top: 1px solid var(--line);
+  margin: 22px 0 16px;
+}
+
+.ws-subhead {
+  font-family: var(--display);
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0 0 10px;
+}
+
+/* ── Google Meet ──────────────────────────────────────────────────────────── */
+
+.meet-join {
+  background: var(--teal);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  font-size: 12px;
+  text-decoration: none;
+}
+.meet-join:hover { background: var(--teal-dark); }
+
+.meet-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.meet-notes-wrap { margin-top: 10px; }
+
+/* ── Execution plan ───────────────────────────────────────────────────────── */
+
+.exec-list { margin-bottom: 14px; }
+
+.exec-head, .exec-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 2fr) 80px minmax(90px, 1fr) 130px 78px;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  font-size: 12.5px;
+}
+
+.exec-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--line);
+}
+
+.exec-row { border-bottom: 1px solid var(--line); }
+.exec-row:last-child { border-bottom: 0; }
+.exec-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.exec-what { font-weight: 600; }
+.exec-due { font-family: var(--mono); font-size: 11px; }
+
+/* A date that has passed on something not yet done is the only thing on this
+   table worth colouring. */
+.exec-due.is-late { color: var(--coral); font-weight: 600; }
+.exec-done .exec-what { text-decoration: line-through; opacity: .6; }
+.exec-blocked { background: var(--coral-tint); }
+
+.exec-status {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11.5px;
+  background: var(--surface);
+}
+
+/* ── Admin: templates ─────────────────────────────────────────────────────── */
+
+.tpl-block { border-bottom: 1px solid var(--line); padding: 4px 0 14px; margin-bottom: 14px; }
+.tpl-block:last-of-type { border-bottom: 0; }
+.tpl-hint { margin: 2px 0 6px; font-size: 11.5px; }
+.tpl-block code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface-sunk);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Marks the loss-interview questions that can't be skipped. */
+.req {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--coral);
+  font-style: normal;
+  margin-left: 6px;
 }

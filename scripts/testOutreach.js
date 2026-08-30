@@ -116,6 +116,10 @@ function answer(sql) {
   if (/FROM leads/i.test(s)) return [{ id: 3, company: "Zepto", fresh_owner_id: 1, fresh_from_newspaper: false }];
   if (/alerts_seen_at/i.test(s)) return [{ alerts_seen_at: null }];
   if (/FROM company_blocklist/i.test(s)) return [{ id: 1, company: "Zepto", reason: "x" }];
+  if (/FROM content_templates/i.test(s))
+    return [{ key: "deck_link", label: "Deck", body: "", hint: "", sort: 3 }];
+  if (/FROM google_accounts/i.test(s)) return [];
+  if (/FROM opportunity_execution/i.test(s)) return [];
   if (/FROM users/i.test(s)) return [{ n: 1 }];
   if (/RETURNING/i.test(s)) return [{ id: 99, version: 3, ...OPP }];
   return [{ id: 1, n: 0, v: 2, stage: "contacted" }];
@@ -215,10 +219,15 @@ const CASES = [
   ["POST", "/api/outreach/1/proposal", { price: 750000, body: "Body", change_note: "discount" }],
   ["POST", "/api/outreach/1/stage", { stage: "negotiation" }],
   ["POST", "/api/outreach/1/stage", { stage: "lost" }],           // must be rejected
-  ["POST", "/api/outreach/1/lost", { primary_reason: "budget", reapproach: true, reapproach_days: 60, disliked: ["price"] }],
+  ["POST", "/api/outreach/1/lost", { primary_reason: "budget", chose: "competitor",
+      could_have_changed: "A lower price", reapproach: "yes", reapproach_days: 60, disliked: ["price"] }],
   ["POST", "/api/outreach/1/lost", { primary_reason: "nonsense" }], // must be rejected
   ["GET",  "/api/outreach/meta/intelligence"],
   ["GET",  "/api/outreach/meta/approvals"],
+  ["GET",  "/api/outreach/meta/templates"],
+  ["GET",  "/api/outreach/1/execution"],
+  ["POST", "/api/outreach/1/execution", { deliverable: "50 reels", due_date: "2026-09-30", owner_name: "Riya" }],
+  ["GET",  "/api/google/status"],
   ["POST", "/api/outreach/1/approval", { decision: "approve" }],
   ["PUT",  "/api/outreach/meta/rate-card", { rows: [{ service: "Meme Marketing", tier: "growth", price: 400000 }],
       guardrail: { healthy_margin_pct: 40, min_margin_pct: 30, max_discount_pct: 15 },

@@ -19,6 +19,7 @@ const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 const pricing = require("../lib/pricing");
 const sweeps = require("../lib/sweeps");
+const gcal = require("../lib/google");
 const ai = require("../lib/outreachAI");
 
 const router = express.Router();
@@ -82,25 +83,50 @@ const OPP_SELECT = `
     LEFT JOIN leads            l  ON l.id  = o.lead_id
     LEFT JOIN companies        c  ON lower(c.name) = lower(o.company)`;
 
-/** The claim's own deadline, whichever kind of claim it is. */
+/**
+ * The opportunity's own clock wins; the claim's is the fallback for rows that
+ * pre-date it. `kind` is what makes the label honest — the same "23h left" is
+ * either "send the first message" or "close the deal" depending on where the
+ * conversation has got to, and the old card said "to close this" for both.
+ */
 function deadlineOf(o) {
-  return o.contact_deadline || o.lead_deadline || null;
+  return o.deadline_at || o.contact_deadline || o.lead_deadline || null;
 }
 
 function countdown(o) {
   const at = deadlineOf(o);
   if (!at) return null;
+
+  const kind = o.deadline_kind || "contact";
+  const purpose = DEADLINE_LABEL[kind] || DEADLINE_LABEL.contact;
+
   const ms = new Date(at).getTime() - Date.now();
   if (!Number.isFinite(ms)) return null;
-  if (ms <= 0) return { label: "Claim expired", hours: 0, days: 0, overdue: true, urgent: true };
+
+  if (ms <= 0) {
+    return {
+      kind, purpose,
+      label: "Time is up",
+      full: `Time is up ${purpose}`,
+      hours: 0, days: 0, overdue: true, urgent: true,
+    };
+  }
+
   const hours = Math.floor(ms / 3600000);
   const days = Math.floor(hours / 24);
+  const label = days >= 1 ? `${days}d left` : `${hours}h left`;
+
   return {
-    label: days >= 1 ? `${days}d left` : `${hours}h left`,
+    kind,
+    purpose,
+    label,
+    full: `${label} ${purpose}`,
     hours,
     days,
     overdue: false,
-    urgent: hours <= 48,
+    // Relative to the window, not a flat number: 6 hours left on a 24-hour
+    // contact window is the same amount of trouble as a day left on a week.
+    urgent: kind === "contact" ? hours <= 6 : hours <= 48,
   };
 }
 
@@ -266,6 +292,74 @@ router.post("/alerts/seen", async (req, res, next) => {
   }
 });
 
+/**
+ * The clock, and what it currently means.
+ *
+ *   contact  send the first message           (24 hours from claiming)
+ *   reply    get an answer to that message    (7 days from sending)
+ *   close    win or lose it                   (7 days from their answer)
+ *
+ * One function sets all three, and it also writes the same moment onto the
+ * underlying claim. That second part is the important one: the claim row is
+ * what All Leads and Fresh Leads read, so leaving it behind would give the
+ * same lead two different countdowns depending on which tab you were looking
+ * at — and only one of them would actually release anything.
+ */
+const DEADLINE_LABEL = {
+  contact: "to send the first message",
+  reply: "to get a reply",
+  close: "to close the deal",
+};
+
+async function setDeadline(opp, kind, q = null) {
+  const run = q || ((text, params) => db.pool.query(text, params));
+  const cadence = await pricing.followupCadence();
+
+  const interval =
+    kind === "contact"
+      ? `${Number(cadence.contact_hours) || 24} hours`
+      : kind === "reply"
+      ? `${Number(cadence.reply_days) || 7} days`
+      : `${Number(cadence.close_days) || 7} days`;
+
+  const { rows } = await run(
+    `UPDATE opportunities
+        SET deadline_at = now() + $2::interval,
+            deadline_kind = $3,
+            updated_at = now()
+      WHERE id = $1
+      RETURNING deadline_at`,
+    [opp.id, interval, kind]
+  );
+
+  const at = rows[0] && rows[0].deadline_at;
+  if (!at) return null;
+
+  if (opp.contact_id) {
+    await run(`UPDATE company_contacts SET deadline_at = $2 WHERE id = $1`, [opp.contact_id, at]);
+  } else if (opp.lead_id && opp.source === "all") {
+    await run(`UPDATE leads SET deadline_at = $2, updated_at = now() WHERE id = $1`, [opp.lead_id, at]);
+  } else if (opp.lead_id) {
+    await run(
+      `UPDATE leads SET fresh_deadline_at = $2, fresh_last_activity_at = now(), updated_at = now()
+        WHERE id = $1`,
+      [opp.lead_id, at]
+    );
+  }
+
+  return at;
+}
+
+/** Stop the clock entirely — the deal is done, either way. */
+async function clearDeadline(oppId, q = null) {
+  const run = q || ((text, params) => db.pool.query(text, params));
+  await run(
+    `UPDATE opportunities SET deadline_at = NULL, deadline_kind = NULL, updated_at = now()
+      WHERE id = $1`,
+    [oppId]
+  );
+}
+
 /* ── the Today screen (items 1 & 2) ───────────────────────────────────────── */
 
 /**
@@ -345,25 +439,20 @@ router.get("/today", async (req, res, next) => {
       o.meeting_today = meetingBy.get(o.id) || null;
       o.next_meeting_at = (nextBy.get(o.id) || {}).scheduled_at || null;
 
-      // A lead nobody has written to yet belongs under "Not contacted", which
-      // is where a salesperson looks for it. It only jumps the queue into
-      // "Do these first" once the clock is genuinely nearly out.
-      //
-      // This distinction matters because a Fresh claim starts on a 24-hour
-      // probation, and the flat 48-hour urgency test made EVERY new claim
-      // instantly urgent — so "Not contacted" always read zero and "Do these
-      // first" filled up with leads that had a full day left.
-      const neverContacted = o.stage === "new" && !o.last_contacted_at;
-      const nearlyOut = o.countdown
-        ? o.countdown.overdue || (neverContacted ? o.countdown.hours <= 6 : o.countdown.urgent)
-        : false;
+      const waitingOnUs =
+        o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at);
 
-      // Order matters. A claim about to expire outranks everything: lose it and
-      // the rest of the list is moot.
-      if (nearlyOut) buckets.urgent.push(o);
+      // An unanswered reply comes FIRST, ahead of the clock.
+      //
+      // It used to sit behind the urgency check, and because the deadline never
+      // reset after first contact, every contacted lead was permanently inside
+      // the urgent window — so a reply you had just logged went into "Do these
+      // first" and "They replied" stayed empty no matter what you did. The
+      // reply is also the most actionable thing on the board: somebody is
+      // sitting there waiting for an answer.
+      if (waitingOnUs) buckets.replied.push(o);
+      else if (o.countdown && (o.countdown.overdue || o.countdown.urgent)) buckets.urgent.push(o);
       else if (o.meeting_today) buckets.meeting.push(o);
-      else if (o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at))
-        buckets.replied.push(o);
       else if (o.approval_status === "pending" || o.stage === "proposal") buckets.proposal.push(o);
       else if (o.due_followup) buckets.followup.push(o);
       else if (o.stage === "new") buckets.new.push(o);
@@ -500,6 +589,9 @@ router.post("/open", async (req, res, next) => {
       [created.id, req.user.id]
     );
 
+    // Clock starts: 24 hours to send the first message.
+    await setDeadline({ id: created.id, contact_id: contactId, lead_id: leadId, source }, "contact");
+
     const opp = await loadOpp(created.id, req.user);
     res.json({ opportunity: opp, created: true });
   } catch (err) {
@@ -631,9 +723,10 @@ router.get("/alerts", async (req, res, next) => {
               (SELECT MIN(m.scheduled_at) FROM opportunity_meetings m
                 WHERE m.opportunity_id = o.id
                   AND m.scheduled_at::date = CURRENT_DATE) AS meeting_at,
-              o.silent_until,
+              o.deadline_at,
+              o.deadline_kind,
               o.updated_at,
-              EXTRACT(EPOCH FROM (o.silent_until - now())) / 3600 AS hours_to_release,
+              EXTRACT(EPOCH FROM (o.deadline_at - now())) / 3600 AS hours_to_release,
               EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600  AS hours_idle
          FROM opportunities o
          LEFT JOIN company_contacts cc ON cc.id = o.contact_id
@@ -703,14 +796,19 @@ router.get("/alerts", async (req, res, next) => {
               : `Reminder ${r.followup_step} is due today`,
           action: "Open it and we'll write the message for you",
         });
-      } else if (r.stage === "new" && !r.last_contacted_at && r.hours_to_release != null && r.hours_to_release <= nudgeAfter) {
+      } else if (
+        r.deadline_kind === "contact" &&
+        !r.last_contacted_at &&
+        r.hours_to_release != null &&
+        r.hours_to_release <= nudgeAfter
+      ) {
         // Nothing has ever been sent on this one. The follow-up sequence
         // cannot help — it only starts after a first message — so without
         // this branch a freshly claimed lead can sit silently until its claim
         // expires, which is exactly the gap that made the bell look dead.
         items.push({
           id: r.id, company: r.company, contact_name: r.contact_name,
-          kind: "stalled", urgency: 4, since: r.silent_until,
+          kind: "stalled", urgency: 4, since: r.deadline_at,
           // Counts DOWN to the consequence, not up since the claim. "Claimed
           // 41 hours ago" tells a salesperson nothing they can act on; "goes
           // back in 7 hours" tells them exactly what happens if they don't.
@@ -723,6 +821,29 @@ router.get("/alerts", async (req, res, next) => {
                   Math.floor(r.hours_to_release) === 1 ? "" : "s"
                 }`,
           action: "Send your first message to keep it",
+        });
+      } else if (
+        r.deadline_kind &&
+        r.deadline_kind !== "contact" &&
+        r.hours_to_release != null &&
+        r.hours_to_release <= 24
+      ) {
+        // The reply and close windows need their own warning. Without one, a
+        // week-long clock ran out with no notice at all — the only alert that
+        // existed was for leads that had never been contacted.
+        items.push({
+          id: r.id, company: r.company, contact_name: r.contact_name,
+          kind: "stalled", urgency: 4, since: r.deadline_at,
+          text:
+            r.hours_to_release <= 0
+              ? "About to go back to the pool"
+              : `Goes back in ${Math.max(1, Math.floor(r.hours_to_release))} hour${
+                  Math.floor(r.hours_to_release) === 1 ? "" : "s"
+                }`,
+          action:
+            r.deadline_kind === "reply"
+              ? "Chase them for an answer, or log their reply if they've sent one"
+              : "Close it as won or lost before the week is up",
         });
       } else if (r.approval_status === "pending") {
         items.push({
@@ -1016,16 +1137,12 @@ router.post("/:id/focus", async (req, res, next) => {
 
 router.get("/meta/rate-card", async (req, res, next) => {
   try {
-    const [card, model, rules, cadence] = await Promise.all([
+    const [card, rules, cadence] = await Promise.all([
       pricing.rateCard(),
-      pricing.costModel(),
       pricing.guardrail(),
       pricing.followupCadence(),
     ]);
-    res.json({
-      rate_card: card, cost_model: model, guardrail: rules,
-      cadence, services: ai.SERVICES,
-    });
+    res.json({ rate_card: card, guardrail: rules, cadence, services: ai.SERVICES });
   } catch (err) {
     next(err);
   }
@@ -1033,7 +1150,7 @@ router.get("/meta/rate-card", async (req, res, next) => {
 
 /**
  * Live quote — called as the builder's fields change, so the salesperson sees
- * the margin move while they type rather than after they save. Writes nothing.
+ * the discount as they type rather than after they save. Writes nothing.
  */
 router.post("/quote", async (req, res, next) => {
   try {
@@ -1041,7 +1158,6 @@ router.post("/quote", async (req, res, next) => {
       quote: await pricing.priceQuote({
         service: req.body.service,
         tier: req.body.tier,
-        planConfig: req.body.plan_config || {},
         price: req.body.price,
         budget: req.body.budget,
       }),
@@ -1072,39 +1188,32 @@ router.post("/:id/plan", async (req, res, next) => {
     const quote = await pricing.priceQuote({
       service,
       tier: req.body.tier,
-      planConfig: req.body.plan_config || {},
       price: req.body.price,
       budget: req.body.budget,
     });
 
-    // Always back to 'pending' when the guardrail fires. An earlier approval
-    // was for an earlier price; carrying it forward would let a salesperson
-    // get one discount signed off and then keep cutting under cover of it.
+    // Always back to 'pending' when the discount rule fires. An earlier
+    // approval was for an earlier price; carrying it forward would let a
+    // salesperson get one discount signed off and then keep cutting under
+    // cover of it.
     const needsApproval = quote.requires_approval;
 
     await db.run(
       `UPDATE opportunities
           SET service_primary = $2,
-              plan_tier = $3, plan_name = $4, plan_config = $5,
-              client_budget = $6, quoted_price = $7,
-              vendor_cost = $8, internal_cost = $9,
-              margin_amount = $10, margin_pct = $11,
-              approval_status = CASE WHEN $12 THEN 'pending' ELSE NULL END,
-              approval_reason = CASE WHEN $12 THEN $13 ELSE NULL END,
+              plan_tier = $3, plan_name = $4,
+              client_budget = $5, quoted_price = $6,
+              approval_status = CASE WHEN $7 THEN 'pending' ELSE NULL END,
+              approval_reason = CASE WHEN $7 THEN $8 ELSE NULL END,
               updated_at = now()
         WHERE id = $1`,
       [
         opp.id,
         service,
-        req.body.tier || "custom",
+        req.body.tier || null,
         quote.plan_name,
-        JSON.stringify(req.body.plan_config || {}),
         req.body.budget || null,
         quote.revenue,
-        quote.vendor_cost,
-        quote.internal_cost,
-        quote.margin_amount,
-        quote.margin_pct,
         needsApproval,
         needsApproval ? quote.reasons.join(" ") : null,
       ]
@@ -1153,7 +1262,26 @@ router.post("/:id/pitch", async (req, res, next) => {
     if (!opp) return res.status(404).json({ error: "No such opportunity." });
     if (!assertOwner(opp, req.user, res)) return;
 
-    res.json({ pitch: await ai.generatePitch(await contextFor(opp)) });
+    const ctx = await contextFor(opp);
+    const pitch = await ai.generatePitch(ctx);
+
+    // Send back what it was written FROM, not just the words. The salesperson
+    // is about to put this out under their own name and needs to be able to
+    // check the inputs — especially the news headline, which is the one thing
+    // here that comes from a scraper rather than from them.
+    pitch.signal_title = ctx.signal_title || null;
+
+    // A headline that names a different company is the specific failure worth
+    // catching: it reads perfectly fluently and is mortifying to send. Cheap
+    // check — does the headline mention a capitalised name that isn't theirs
+    // while never mentioning theirs?
+    pitch.mismatch = Boolean(
+      ctx.signal_title &&
+        opp.company &&
+        !ctx.signal_title.toLowerCase().includes(opp.company.toLowerCase().split(" ")[0])
+    );
+
+    res.json({ pitch });
   } catch (err) {
     next(err);
   }
@@ -1193,6 +1321,10 @@ router.post("/:id/sent", async (req, res, next) => {
         [opp.id]
       );
       if (opp.stage === "new") await moveStage(opp.id, "contacted", req.user.id, q);
+
+      // The clock changes meaning here: they have been written to, so the
+      // question is no longer "will you contact them" but "will they answer".
+      await setDeadline(opp, "reply", q);
     });
 
     // Item 18 — the sequence starts when the first message goes out.
@@ -1241,6 +1373,9 @@ router.post("/:id/reply", async (req, res, next) => {
           WHERE id = $1`,
         [opp.id, verdict.next_action]
       );
+
+      // They answered. Now it is a week to win or lose it.
+      await setDeadline(opp, "close", q);
 
       // Item 18's hard rule: the client answered, so stop the drip. Nothing is
       // more corrosive to a live conversation than an automated "just
@@ -1343,18 +1478,281 @@ router.post("/:id/meeting", async (req, res, next) => {
 
     if (!req.body.scheduled_at) return res.status(400).json({ error: "When is the meeting?" });
 
+    const start = new Date(req.body.scheduled_at);
+    const minutes = Number(req.body.minutes) || 30;
+    const end = new Date(start.getTime() + minutes * 60000);
+
+    // Who gets the invite. The chosen contact by default, plus anyone typed in.
+    const invitees = String(req.body.attendees || "")
+      .split(/[,;\s]+/)
+      .filter((x) => x.includes("@"));
+    const primaryEmail = opp.focus_email || opp.contact_email;
+    if (primaryEmail && !invitees.includes(primaryEmail)) invitees.unshift(primaryEmail);
+
+    let meet = null;
+    let meetError = null;
+
+    if (req.body.create_meet !== false) {
+      try {
+        meet = await gcal.createMeeting(req.user.id, {
+          summary: `${opp.company} × Curious Media`,
+          description: opp.service_primary
+            ? `Discussing ${opp.service_primary}.`
+            : "Introductory call.",
+          startISO: start.toISOString(),
+          endISO: end.toISOString(),
+          attendees: invitees,
+        });
+      } catch (err) {
+        // A Calendar failure must not lose the meeting. Record it anyway and
+        // tell them why there is no link — otherwise the salesperson retypes
+        // everything and still has no idea what went wrong.
+        console.error("[outreach] calendar failed:", err.message);
+        meetError = err.message;
+      }
+    }
+
     const row = await db.one(
       `INSERT INTO opportunity_meetings
-         (opportunity_id, scheduled_at, link, attendees, created_by)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [opp.id, req.body.scheduled_at, req.body.link || null, req.body.attendees || null, req.user.id]
+         (opportunity_id, scheduled_at, link, attendees, created_by,
+          calendar_event_id, meet_link, transcript_state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [
+        opp.id,
+        start.toISOString(),
+        (meet && meet.meetLink) || req.body.link || null,
+        invitees.join(", ") || req.body.attendees || null,
+        req.user.id,
+        meet && meet.eventId,
+        meet && meet.meetLink,
+        meet ? "pending" : null,
+      ]
     );
 
     if (STAGES.indexOf(opp.stage) < STAGES.indexOf("meeting")) {
       await moveStage(opp.id, "meeting", req.user.id);
     }
 
-    res.json({ meeting: row });
+    res.json({
+      meeting: row,
+      meet_created: Boolean(meet),
+      meet_error: meetError,
+      google_connected: Boolean(await gcal.accountFor(req.user.id)),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Pull the transcript and turn it into notes.
+ *
+ * Called on demand rather than automatically, because Meet artifacts are not
+ * ready when the call ends — reports put it as long as 45 minutes — so a
+ * button the salesperson presses when they are ready beats a background job
+ * racing Google and failing quietly.
+ *
+ * Every unhappy path returns a plain-English reason. "Transcription was never
+ * switched on" and "Google is still processing it" need completely different
+ * responses from the person reading the screen.
+ */
+router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
+  try {
+    const meeting = await db.one(
+      `SELECT m.*, o.owner_id, o.company, o.service_primary, o.plan_name
+         FROM opportunity_meetings m JOIN opportunities o ON o.id = m.opportunity_id
+        WHERE m.id = $1`,
+      [req.params.meetingId]
+    );
+    if (!meeting) return res.status(404).json({ error: "No such meeting." });
+    if (meeting.owner_id !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Not your meeting." });
+    }
+
+    const result = await gcal.fetchTranscript(req.user.id, {
+      eventId: meeting.calendar_event_id,
+      meetLink: meeting.meet_link,
+    });
+
+    const EXPLAIN = {
+      not_connected: "Connect your Google account first — Settings, then Connect Google.",
+      no_meet_link: "This meeting has no Google Meet link, so there's nothing to fetch.",
+      no_conference_yet: "Google hasn't finished processing this call yet. Try again in a few minutes.",
+      still_processing: "Google is still preparing the transcript. Usually ready within an hour of the call.",
+      transcription_was_off: "Nobody switched transcription on during this call, so there's no record to work from. An admin can turn it on automatically for everyone.",
+      empty_transcript: "The transcript came back empty — nothing was captured.",
+    };
+
+    if (result.state !== "ready") {
+      await db.run(
+        `UPDATE opportunity_meetings SET transcript_state = $2, conference_record = COALESCE($3, conference_record)
+          WHERE id = $1`,
+        [meeting.id, result.state, result.conferenceRecord || null]
+      );
+      return res.json({
+        state: result.state,
+        message: EXPLAIN[result.reason] || result.reason || "Couldn't fetch the transcript.",
+      });
+    }
+
+    // We have words. Turn them into the structured fields the rest of the
+    // portal already reads — same shape as hand-typed notes, so reporting does
+    // not have to care where they came from.
+    const structured = await ai.structureMeetingNotes(result.text, {
+      company: meeting.company,
+      service: meeting.service_primary,
+      plan_name: meeting.plan_name,
+    });
+
+    const summary = [
+      structured.requirement ? `What they need: ${structured.requirement}` : null,
+      structured.budget_mentioned ? `Budget mentioned: ${structured.budget_mentioned}` : null,
+      structured.timeline ? `Timeline: ${structured.timeline}` : null,
+      structured.decision_makers && structured.decision_makers.length
+        ? `In the room: ${structured.decision_makers.join(", ")}`
+        : null,
+      structured.objections && structured.objections.length
+        ? `Concerns raised: ${structured.objections.join("; ")}`
+        : null,
+      structured.next_step ? `Next step: ${structured.next_step}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const row = await db.one(
+      `UPDATE opportunity_meetings
+          SET transcript_state = 'ready',
+              transcript_text = $2,
+              conference_record = COALESCE($3, conference_record),
+              notes = COALESCE(NULLIF(notes, ''), $4),
+              outcome = COALESCE(outcome, $5),
+              requirement = COALESCE(requirement, $6),
+              structured = $7,
+              notes_generated_at = now()
+        WHERE id = $1 RETURNING *`,
+      [
+        meeting.id,
+        result.text.slice(0, 200000),
+        result.conferenceRecord || null,
+        summary,
+        structured.outcome || null,
+        structured.requirement || null,
+        JSON.stringify(structured),
+      ]
+    );
+
+    res.json({ state: "ready", meeting: row, structured, ai_source: structured.source });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Forward the notes by email.
+ *
+ * Uses the template an admin maintains, so the wording is theirs and not
+ * something buried in this file.
+ */
+router.post("/meeting/:meetingId/forward", async (req, res, next) => {
+  try {
+    const meeting = await db.one(
+      `SELECT m.*, o.owner_id, o.company, o.id AS opportunity_id
+         FROM opportunity_meetings m JOIN opportunities o ON o.id = m.opportunity_id
+        WHERE m.id = $1`,
+      [req.params.meetingId]
+    );
+    if (!meeting) return res.status(404).json({ error: "No such meeting." });
+    if (meeting.owner_id !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Not your meeting." });
+    }
+
+    const to = String(req.body.to || "").trim();
+    if (!to.includes("@")) return res.status(400).json({ error: "Who should this go to?" });
+
+    const tpl = await db.one("SELECT body FROM content_templates WHERE key = 'meeting_notes_email'", []);
+    const notes = meeting.notes || "";
+
+    const filled = fillTemplate(
+      (tpl && tpl.body) ||
+        "Hi {{contact}},\n\nThanks for your time today. My notes from our conversation:\n\n{{notes}}\n\nShout if I've missed anything.\n\nBest,\n{{sender}}",
+      {
+        company: meeting.company,
+        contact: req.body.contact_name || "there",
+        date: new Date(meeting.scheduled_at).toLocaleDateString("en-IN", {
+          day: "numeric", month: "long", year: "numeric",
+        }),
+        notes,
+        sender: req.user.display_name || "Curious Media",
+      }
+    );
+
+    const subject = req.body.subject || `Notes from our call — ${meeting.company}`;
+    const body = req.body.body || filled;
+
+    const result = await gcal.sendMail(req.user.id, { to, subject, body });
+
+    if (!result.sent) {
+      return res.status(400).json({
+        error:
+          result.reason === "not_connected"
+            ? "Connect your Google account first — then you can send straight from here."
+            : `Google wouldn't send it: ${result.reason}`,
+        draft: { to, subject, body },
+      });
+    }
+
+    await db.run(
+      `UPDATE opportunity_meetings SET notes_sent_at = now(), notes_sent_to = $2 WHERE id = $1`,
+      [meeting.id, to]
+    );
+    await db.run(
+      `INSERT INTO opportunity_messages
+         (opportunity_id, direction, channel, subject, body, sent_at, created_by)
+       VALUES ($1, 'out', 'email', $2, $3, now(), $4)`,
+      [meeting.opportunity_id, subject, body, req.user.id]
+    );
+
+    res.json({ sent: true, to });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Give a draft to look at before anything is sent. */
+router.get("/meeting/:meetingId/forward-draft", async (req, res, next) => {
+  try {
+    const meeting = await db.one(
+      `SELECT m.*, o.owner_id, o.company,
+              COALESCE(fc.name, cc.name)  AS contact_name,
+              COALESCE(fc.email, cc.email) AS contact_email
+         FROM opportunity_meetings m
+         JOIN opportunities o ON o.id = m.opportunity_id
+         LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+         LEFT JOIN company_contacts fc ON fc.id = o.focus_contact_id
+        WHERE m.id = $1`,
+      [req.params.meetingId]
+    );
+    if (!meeting) return res.status(404).json({ error: "No such meeting." });
+
+    const tpl = await db.one("SELECT body FROM content_templates WHERE key = 'meeting_notes_email'", []);
+
+    res.json({
+      to: meeting.contact_email || "",
+      subject: `Notes from our call — ${meeting.company}`,
+      body: fillTemplate(
+        (tpl && tpl.body) ||
+          "Hi {{contact}},\n\nThanks for your time today. My notes from our conversation:\n\n{{notes}}\n\nShout if I've missed anything.\n\nBest,\n{{sender}}",
+        {
+          company: meeting.company,
+          contact: (meeting.contact_name || "there").split(" ")[0],
+          date: new Date(meeting.scheduled_at).toLocaleDateString("en-IN", {
+            day: "numeric", month: "long", year: "numeric",
+          }),
+          notes: meeting.notes || "(no notes yet)",
+          sender: req.user.display_name || "Curious Media",
+        }
+      ),
+    });
   } catch (err) {
     next(err);
   }
@@ -1420,10 +1818,15 @@ router.post("/:id/proposal/draft", async (req, res, next) => {
     if (!assertOwner(opp, req.user, res)) return;
 
     const ctx = await contextFor(opp);
-    const config = opp.plan_config || {};
+    // Deliverables come from the chosen package on the rate card now that
+    // custom package building is gone.
+    const plan = opp.plan_tier
+      ? await pricing.planFor(opp.service_primary, opp.plan_tier)
+      : null;
+
     const draft = await ai.draftProposal({
       ...ctx,
-      deliverables: Array.isArray(config.deliverables) ? config.deliverables.join(", ") : null,
+      deliverables: plan ? plan.deliverables : null,
     });
 
     res.json({ draft });
@@ -1453,7 +1856,6 @@ router.post("/:id/proposal", async (req, res, next) => {
     const quote = await pricing.priceQuote({
       service: opp.service_primary,
       tier: opp.plan_tier,
-      planConfig: opp.plan_config || {},
       price: req.body.price,
     });
 
@@ -1476,16 +1878,13 @@ router.post("/:id/proposal", async (req, res, next) => {
     await db.run(
       `UPDATE opportunities
           SET quoted_price = COALESCE($2, quoted_price),
-              margin_pct = $3, margin_amount = $4,
-              approval_status = CASE WHEN $5 THEN 'pending' ELSE approval_status END,
-              approval_reason = CASE WHEN $5 THEN $6 ELSE approval_reason END,
+              approval_status = CASE WHEN $3 THEN 'pending' ELSE approval_status END,
+              approval_reason = CASE WHEN $3 THEN $4 ELSE approval_reason END,
               updated_at = now()
         WHERE id = $1`,
       [
         opp.id,
         req.body.price || null,
-        quote.margin_pct,
-        quote.margin_amount,
         quote.requires_approval,
         quote.requires_approval ? quote.reasons.join(" ") : null,
       ]
@@ -1522,7 +1921,7 @@ router.post("/:id/stage", async (req, res, next) => {
     // to bite at the moment revenue is recorded, not just when it is quoted.
     if (to === "won" && opp.approval_status === "pending") {
       return res.status(400).json({
-        error: "This quote is below the approved margin and is waiting on manager approval.",
+        error: "This price is discounted past the limit and is waiting on manager approval.",
       });
     }
 
@@ -1535,6 +1934,7 @@ router.post("/:id/stage", async (req, res, next) => {
         [opp.id]
       );
       await closeUnderlyingClaim(opp, "won");
+      await clearDeadline(opp.id);
     }
 
     res.json({ opportunity: await loadOpp(opp.id, req.user) });
@@ -1561,26 +1961,44 @@ router.post("/:id/lost", async (req, res, next) => {
       return res.status(400).json({ error: "Pick a primary reason." });
     }
 
+    // Questions the client asked to be compulsory. A loss record that answers
+    // "budget" and nothing else tells management nothing they can act on,
+    // which was the whole reason for the interview.
+    const required = [
+      [req.body.chose, "Say who the client went with."],
+      [req.body.could_have_changed, "Say what could have changed the outcome."],
+      [req.body.reapproach !== undefined && req.body.reapproach !== null && req.body.reapproach !== "",
+        "Say whether we should try again."],
+    ];
+    for (const [value, message] of required) {
+      if (!value) return res.status(400).json({ error: message });
+    }
+
+    const wantsReapproach = req.body.reapproach === true || req.body.reapproach === "yes";
     const days = [30, 60, 90].includes(Number(req.body.reapproach_days))
       ? Number(req.body.reapproach_days)
       : null;
+
+    // "When?" is only compulsory if the answer to "should we?" was yes.
+    if (wantsReapproach && !days) {
+      return res.status(400).json({ error: "Say when we should try again — 30, 60 or 90 days." });
+    }
 
     await db.tx(async (q) => {
       await q(
         `INSERT INTO opportunity_loss
            (opportunity_id, primary_reason, secondary_reason, note, chose,
-            competitor_name, competitor_budget, disliked, could_have_changed,
+            competitor_name, disliked, could_have_changed,
             reapproach, reapproach_days, reapproach_at, lost_at_stage, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                 CASE WHEN $11::int IS NULL THEN NULL ELSE CURRENT_DATE + $11::int END,
-                 $12,$13)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                 CASE WHEN $10::int IS NULL THEN NULL ELSE CURRENT_DATE + $10::int END,
+                 $11,$12)
          ON CONFLICT (opportunity_id) DO UPDATE SET
            primary_reason = EXCLUDED.primary_reason,
            secondary_reason = EXCLUDED.secondary_reason,
            note = EXCLUDED.note,
            chose = EXCLUDED.chose,
            competitor_name = EXCLUDED.competitor_name,
-           competitor_budget = EXCLUDED.competitor_budget,
            disliked = EXCLUDED.disliked,
            could_have_changed = EXCLUDED.could_have_changed,
            reapproach = EXCLUDED.reapproach,
@@ -1593,10 +2011,9 @@ router.post("/:id/lost", async (req, res, next) => {
           req.body.note || null,
           req.body.chose || null,
           req.body.competitor_name || null,
-          req.body.competitor_budget || null,
           JSON.stringify(Array.isArray(req.body.disliked) ? req.body.disliked : []),
           req.body.could_have_changed || null,
-          req.body.reapproach === true || req.body.reapproach === "yes",
+          wantsReapproach,
           days,
           // The stage it died in is the stage it was in when the interview was
           // filed — captured now, because moveStage is about to overwrite it.
@@ -1612,6 +2029,7 @@ router.post("/:id/lost", async (req, res, next) => {
         [opp.id]
       );
       await closeUnderlyingClaim(opp, "lost", q);
+      await clearDeadline(opp.id, q);
     });
 
     res.json({ opportunity: await loadOpp(opp.id, req.user) });
@@ -1724,6 +2142,147 @@ router.get("/meta/intelligence", async (req, res, next) => {
   }
 });
 
+/** {{placeholder}} substitution. Unknown keys are left alone rather than
+ *  blanked, so a typo in a template shows up as {{copmany}} on screen instead
+ *  of silently disappearing. */
+function fillTemplate(text, values) {
+  return String(text || "").replace(/\{\{\s*(\w+)\s*\}\}/g, (whole, key) =>
+    values[key] != null ? String(values[key]) : whole
+  );
+}
+
+/* ── the execution plan ───────────────────────────────────────────────────── */
+
+/**
+ * What we actually deliver once it's won: deliverable, date, owner.
+ *
+ * Separate from the package because a package is what was sold and this is
+ * what was promised. They drift, and being able to see the drift is the point.
+ */
+router.get("/:id/execution", async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT * FROM opportunity_execution WHERE opportunity_id = $1 ORDER BY sort, due_date NULLS LAST, id`,
+      [req.params.id]
+    );
+    res.json({ items: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/execution", async (req, res, next) => {
+  try {
+    const opp = await loadOpp(req.params.id, req.user);
+    if (!opp) return res.status(404).json({ error: "No such opportunity." });
+    if (!assertOwner(opp, req.user, res)) return;
+
+    const deliverable = String(req.body.deliverable || "").trim();
+    if (!deliverable) return res.status(400).json({ error: "What's the deliverable?" });
+
+    const row = await db.one(
+      `INSERT INTO opportunity_execution
+         (opportunity_id, deliverable, owner_name, owner_id, due_date, notes, sort, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6,
+               COALESCE((SELECT MAX(sort) + 1 FROM opportunity_execution WHERE opportunity_id = $1), 0),
+               $7)
+       RETURNING *`,
+      [
+        opp.id, deliverable,
+        req.body.owner_name || null,
+        req.body.owner_id || null,
+        req.body.due_date || null,
+        req.body.notes || null,
+        req.user.id,
+      ]
+    );
+    res.json({ item: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/execution/:itemId", async (req, res, next) => {
+  try {
+    const item = await db.one(
+      `SELECT e.*, o.owner_id AS opp_owner
+         FROM opportunity_execution e JOIN opportunities o ON o.id = e.opportunity_id
+        WHERE e.id = $1`,
+      [req.params.itemId]
+    );
+    if (!item) return res.status(404).json({ error: "No such item." });
+    if (item.opp_owner !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Not yours to change." });
+    }
+
+    const row = await db.one(
+      `UPDATE opportunity_execution
+          SET deliverable = COALESCE($2, deliverable),
+              owner_name  = COALESCE($3, owner_name),
+              due_date    = COALESCE($4, due_date),
+              status      = COALESCE($5, status),
+              notes       = COALESCE($6, notes),
+              updated_at  = now()
+        WHERE id = $1 RETURNING *`,
+      [
+        item.id,
+        req.body.deliverable || null,
+        req.body.owner_name || null,
+        req.body.due_date || null,
+        ["pending", "in_progress", "done", "blocked"].includes(req.body.status) ? req.body.status : null,
+        req.body.notes || null,
+      ]
+    );
+    res.json({ item: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/execution/:itemId", async (req, res, next) => {
+  try {
+    const item = await db.one(
+      `SELECT e.id, o.owner_id AS opp_owner
+         FROM opportunity_execution e JOIN opportunities o ON o.id = e.opportunity_id
+        WHERE e.id = $1`,
+      [req.params.itemId]
+    );
+    if (!item) return res.json({ ok: true });
+    if (item.opp_owner !== req.user.id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Not yours to remove." });
+    }
+    await db.run("DELETE FROM opportunity_execution WHERE id = $1", [item.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/* ── admin: the editable templates ────────────────────────────────────────── */
+
+router.get("/meta/templates", async (req, res, next) => {
+  try {
+    res.json({ templates: await db.all("SELECT * FROM content_templates ORDER BY sort, key") });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/meta/templates", requireAdmin, async (req, res, next) => {
+  try {
+    for (const t of Array.isArray(req.body.templates) ? req.body.templates : []) {
+      if (!t.key) continue;
+      await db.run(
+        `UPDATE content_templates SET body = $2, updated_by = $3, updated_at = now() WHERE key = $1`,
+        [t.key, t.body || "", req.user.id]
+      );
+    }
+    res.json({ ok: true, templates: await db.all("SELECT * FROM content_templates ORDER BY sort, key") });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /* ── admin: the rate card ─────────────────────────────────────────────────── */
 
 router.put("/meta/rate-card", requireAdmin, async (req, res, next) => {
@@ -1746,7 +2305,7 @@ router.put("/meta/rate-card", requireAdmin, async (req, res, next) => {
       );
     }
 
-    for (const key of ["cost_model", "guardrail", "followup_cadence"]) {
+    for (const key of ["guardrail", "followup_cadence"]) {
       if (!req.body[key]) continue;
       await db.run(
         `INSERT INTO pricing_settings (key, value, updated_by, updated_at)
