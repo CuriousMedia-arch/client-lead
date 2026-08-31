@@ -66,6 +66,53 @@ function esc(value) {
 }
 
 /** Every request the page makes. Throws with the server's message on failure. */
+/**
+ * Replace the page without losing what someone is typing.
+ *
+ * Every search keystroke re-renders all of #content, which destroys the search
+ * box and builds a new one. Three things went wrong with that:
+ *
+ *  - The new box was filled from state.search — the value as it was when the
+ *    debounce fired. Anything typed while the request was in flight was wiped,
+ *    so typing at a normal speed dropped characters.
+ *  - The caret was forced to the end, so correcting a typo in the middle of a
+ *    word was impossible — one keystroke and you were back at the end.
+ *  - Nothing stopped an older, slower response from landing after a newer one
+ *    and painting stale results.
+ *
+ * This carries the live value and caret across the swap, and the sequence
+ * guard below deals with the third.
+ */
+function swapContent(el, html, keepFocus) {
+  const live = keepFocus ? document.getElementById(keepFocus) : null;
+  const value = live ? live.value : null;
+  const start = live ? live.selectionStart : null;
+  const end = live ? live.selectionEnd : null;
+
+  el.innerHTML = html;
+
+  if (!keepFocus) return;
+  const fresh = document.getElementById(keepFocus);
+  if (!fresh) return;
+
+  // What is on screen wins over what the last render knew about.
+  if (value != null && fresh.value !== value) fresh.value = value;
+  fresh.focus();
+  if (start != null) {
+    try { fresh.setSelectionRange(start, end); } catch { /* not a text input */ }
+  }
+}
+
+/**
+ * Which list request is the current one.
+ *
+ * Bumped before every fetch; a response whose number no longer matches has
+ * been overtaken and is dropped. Without this, typing "zepto" quickly could
+ * end up showing the results for "zep" because that request happened to
+ * finish last.
+ */
+let listSeq = 0;
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     method: opts.method || "GET",
@@ -341,11 +388,17 @@ function wireEvents() {
     if (e.target.id !== "f-search") return;
     clearTimeout(searchTimer);
     const v = e.target.value.trim();
+
+    // One character matches most of the database and the result is useless, so
+    // wait for a second one. Clearing the box still resets immediately.
+    if (v.length === 1) return;
+
     searchTimer = setTimeout(() => {
+      if (v === state.search) return;   // nothing actually changed
       state.search = v;
       state.pageSize = 50;
       renderContent({ keepFocus: "f-search" });
-    }, 280);
+    }, 300);
   });
 
   $("#content").addEventListener("change", (e) => {
@@ -585,7 +638,7 @@ function filterBar() {
   return `
     <div class="filter-bar">
       <input class="search-input" id="f-search" type="search"
-             placeholder="Search company or industry…" value="${esc(state.search)}" />
+             placeholder="Search company, person, email or industry…" value="${esc(state.search)}" />
 
       ${
         showTier
@@ -637,7 +690,11 @@ async function renderContent(opts = {}) {
 
   let leads;
   try {
+    const seq = ++listSeq;
     ({ leads } = await api(`/api/leads?${currentQuery()}`));
+    // A newer search went out while this one was in flight — its results are
+    // the ones that match what's on screen, so drop these.
+    if (seq !== listSeq) return;
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load leads</h2><p>${esc(err.message)}</p></div>`;
     return;
@@ -655,7 +712,7 @@ async function renderContent(opts = {}) {
       ? newspaperView(leads)
       : myOutreachView(leads);
 
-  content.innerHTML = actionBar() + filterBar() + body;
+  swapContent(content, actionBar() + filterBar() + body, opts.keepFocus);
 
   // Fresh Leads cards used to carry the company's contact list — who held
   // whom, and their last two log entries. That has moved to My Outreach, which
@@ -666,11 +723,6 @@ async function renderContent(opts = {}) {
   if ($("#f-tier")) $("#f-tier").value = state.tier || "";
   if ($("#f-type")) $("#f-type").value = [...state.types][0] || "";
   if ($("#f-sort")) $("#f-sort").value = state.sort;
-
-  if (opts.keepFocus) {
-    const el = $("#" + opts.keepFocus);
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-  }
 
   wireListActions();
 }
@@ -758,13 +810,8 @@ async function renderPeople(opts = {}) {
        }`
     : emptyState().outerHTML;
 
-  content.innerHTML = actionBar() + filterBar() + body;
+  swapContent(content, actionBar() + filterBar() + body, opts.keepFocus);
   if ($("#f-sort")) $("#f-sort").value = state.sort;
-
-  if (opts.keepFocus) {
-    const el = $("#" + opts.keepFocus);
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-  }
 
   wireListActions();
 }

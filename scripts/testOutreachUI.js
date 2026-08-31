@@ -313,6 +313,41 @@ async function drive(window) {
   });
 
   /* Slabs drill down (new) */
+  // --- search behaviour on All Leads ---
+  click($('[data-tab="all"]'));
+  await wait(500);
+
+  const box = $("#f-search");
+  check("Search box exists", () => Boolean(box) || "no search box");
+  if (box) {
+    check("Placeholder mentions people, not just companies", () =>
+      /person|contact|name/i.test(box.placeholder) ? box.placeholder : `says "${box.placeholder}"`);
+
+    // Type fast, the way a person does: the render fires mid-typing and used
+    // to wipe whatever had been typed since and jump the caret to the end.
+    box.value = "zep";
+    box.dispatchEvent(new window.Event("input", { bubbles: true }));
+    box.value = "zepto";
+    box.setSelectionRange(3, 3);
+    box.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await wait(600);
+
+    const after = $("#f-search");
+    check("Typing survives the re-render", () =>
+      after && after.value === "zepto" ? "kept \"zepto\"" : `box says "${after && after.value}"`);
+    check("Caret stays where it was", () =>
+      after && after.selectionStart === 3
+        ? "caret held at 3"
+        : `caret at ${after && after.selectionStart}, wanted 3`);
+    check("Search box keeps focus", () =>
+      doc.activeElement === after
+        ? "focused"
+        : `focus on ${doc.activeElement && doc.activeElement.id}`);
+  }
+
+  click($('[data-tab="mine"]'));
+  await wait(400);
+
   check("\"Do these first\" is now \"Urgent\"", () => {
     const txt = $("#outreach-body").textContent;
     return !txt.includes("Do these first") ? "renamed" : "old label still showing";

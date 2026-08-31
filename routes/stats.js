@@ -19,8 +19,17 @@ router.get("/", async (req, res, next) => {
     const [row, lastRun, byMode] = await Promise.all([
       db.one(
         `SELECT
-           (SELECT COUNT(*) FROM leads l JOIN companies c ON c.id = l.company_id
-             WHERE c.is_sample = false AND c.approval = 'approved')            AS total_leads,
+           -- The All Leads tab counts PEOPLE, not companies. The tab lists
+           -- companies but the thing being counted is how many contacts are
+           -- actually reachable — a watchlist of 300 companies with 40
+           -- contacts between them is 40 leads to work, not 300.
+           (SELECT COUNT(*) FROM company_contacts cc
+             WHERE cc.deleted_at IS NULL
+               AND EXISTS (SELECT 1 FROM companies c
+                            WHERE lower(c.name) = lower(cc.company)
+                              AND c.is_sample = false AND c.approval = 'approved')
+               AND NOT EXISTS (SELECT 1 FROM company_blocklist b
+                                WHERE lower(b.company) = lower(cc.company)))   AS total_leads,
            -- Unclaimed on the FRESH track specifically — an All Leads claim
            -- on the same company doesn't count against this. Split by which
            -- Fresh Leads sub-tab the row lands in: approved companies are
@@ -64,7 +73,24 @@ router.get("/", async (req, res, next) => {
            (SELECT COUNT(*) FROM signals)                                      AS total_signals,
            (SELECT COUNT(*) FROM companies WHERE active)                       AS total_companies,
            (SELECT COUNT(*) FROM sites WHERE active)                           AS total_sites,
-           (SELECT COUNT(*) FROM company_contacts WHERE deleted_at IS NULL)                             AS total_contacts`,
+           (SELECT COUNT(*) FROM company_contacts WHERE deleted_at IS NULL)                             AS total_contacts,
+           -- What the All Leads tab actually lists.
+           --
+           -- The pill used to show total_leads, which counts COMPANIES — so a
+           -- watchlist of 300 companies holding 4,000 people read "300". All
+           -- Leads is a list of people, and the number on the tab has to be
+           -- the number of things in the list or it just misleads.
+           --
+           -- Filtered the same way the list is: no deleted people, nothing
+           -- from a blocklisted company, and only companies the list shows.
+           (SELECT COUNT(*)
+              FROM company_contacts cc
+              JOIN companies c ON lower(c.name) = lower(cc.company)
+              LEFT JOIN company_blocklist bl ON lower(bl.company) = lower(c.name)
+             WHERE cc.deleted_at IS NULL
+               AND bl.id IS NULL
+               AND c.is_sample = false
+               AND c.approval = 'approved')                                                            AS all_leads_contacts`,
         [req.user.id, days]
       ),
       db.one("SELECT * FROM runs WHERE status <> 'running' ORDER BY id DESC LIMIT 1"),
@@ -80,7 +106,11 @@ router.get("/", async (req, res, next) => {
         unclaimedFresh: row.unclaimed_fresh,
       },
       totals: {
-        leads: row.total_leads,
+        // The tab pill reads this. It is people, not companies — see the
+        // query above. `companies` below still holds the company count for
+        // anywhere that genuinely wants it.
+        leads: row.all_leads_contacts,
+        leadCompanies: row.total_leads,
         fresh: Number(row.fresh_company) + Number(row.fresh_new),
         freshCompany: Number(row.fresh_company),
         freshNew: Number(row.fresh_new),

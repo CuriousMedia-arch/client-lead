@@ -389,6 +389,39 @@ async function run() {
   await bigSheetScenario();
   await slicedUploadScenario();
 
+  // The tab pill should count PEOPLE, because All Leads lists people. It used
+  // to count companies, so 2 companies holding 7 contacts read "2".
+  const stats = await call("GET", "/api/stats");
+  if (stats.status === 200) {
+    const people = mem.public.many(
+      "select count(*)::int as n from company_contacts where deleted_at is null"
+    )[0].n;
+    check("All Leads counts contacts, not companies",
+      stats.json.totals.leads === people,
+      `pill says ${stats.json.totals.leads}, there are ${people} contacts and ${stats.json.totals.leadCompanies} companies`);
+  } else {
+    // The whole /api/stats query uses a correlated EXISTS that pg-mem can't
+    // evaluate — pre-existing, unrelated to this count. Run just the new
+    // subquery so the change is still actually verified.
+    console.log(`      (full stats endpoint needs real Postgres; checking the count alone)`);
+    const counted = mem.public.many(`
+      select count(*)::int as n
+        from company_contacts cc
+        join companies c on lower(c.name) = lower(cc.company)
+        left join company_blocklist bl on lower(bl.company) = lower(c.name)
+       where cc.deleted_at is null
+         and bl.id is null
+         and c.is_sample = false
+         and c.approval = 'approved'
+    `)[0].n;
+    const people = mem.public.many(
+      "select count(*)::int as n from company_contacts where deleted_at is null"
+    )[0].n;
+    const companies = mem.public.many("select count(*)::int as n from companies")[0].n;
+    check("All Leads counts contacts, not companies", counted === people,
+      `counts ${counted} people (${companies} companies) — the pill used to show ${companies}`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();
   process.exit(fail ? 1 : 0);

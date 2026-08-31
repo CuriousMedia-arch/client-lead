@@ -99,8 +99,25 @@ async function queryLeads(params, user) {
   if (statuses.length) where.push(`l.status = ANY(${bind(statuses)})`);
 
   if (params.q) {
+    // Company, industry, and the people at that company.
+    //
+    // Searching only company names meant that looking up someone by name — the
+    // most natural thing to try — silently returned nothing, which reads as a
+    // broken search rather than a narrow one. Email is included too because
+    // half the time what you have is the address, not the spelling of the name.
     const q = bind(`%${String(params.q).toLowerCase()}%`);
-    where.push(`(LOWER(c.name) LIKE ${q} OR LOWER(COALESCE(c.industry,'')) LIKE ${q})`);
+    where.push(`(
+      LOWER(c.name) LIKE ${q}
+      OR LOWER(COALESCE(c.industry,'')) LIKE ${q}
+      OR EXISTS (
+        SELECT 1 FROM company_contacts cc
+         WHERE lower(cc.company) = lower(c.name)
+           AND cc.deleted_at IS NULL
+           AND (LOWER(cc.name) LIKE ${q}
+                OR LOWER(COALESCE(cc.email,'')) LIKE ${q}
+                OR LOWER(COALESCE(cc.role,'')) LIKE ${q})
+      )
+    )`);
   }
 
   if (params.tier) {
