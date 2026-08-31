@@ -1799,6 +1799,87 @@ function confirmRemoveLead(id, company) {
 // Order the groups the same way the playbook orders priority: hottest first.
 const TYPE_ORDER = ["capital", "brand_launch", "retail_expansion", "leadership", "crisis", "none"];
 
+/**
+ * Send a contact sheet to the server in slices.
+ *
+ * Not an optimisation — a requirement on serverless hosting. Vercel caps a
+ * function's request body at 4.5 MB and that is infrastructure, not a setting:
+ * you can change execution time and memory in vercel.json, you cannot change
+ * this. A real export is well past it. The function timeout bites too — ten
+ * seconds on Hobby, and twenty thousand rows takes far longer than that.
+ *
+ * So the browser cuts the sheet into parts and sends them one after another,
+ * each with the header row attached so every part parses on its own. Safe
+ * because the importer is idempotent: it upserts, so a part that gets sent
+ * twice tops the same people up rather than duplicating them.
+ *
+ * It also fixes a plain usability problem on any host — instead of the page
+ * sitting frozen for a minute, you watch it count through the parts.
+ */
+async function importInSlices(csv, onProgress) {
+  // Comfortably inside Vercel's 4.5 MB body cap, and small enough that one
+  // part finishes well within a short function timeout.
+  const MAX_BYTES = 2 * 1024 * 1024;
+  const MAX_ROWS = 2000;
+
+  const lines = csv.split(/\r?\n/);
+  const header = lines[0];
+  const body = lines.slice(1).filter((l) => l.trim());
+
+  const parts = [];
+  let current = [];
+  let bytes = header.length;
+
+  for (const line of body) {
+    // A quoted field can legitimately contain a newline, which would split a
+    // record across two parts and corrupt both. Only break where the quotes so
+    // far are balanced, which is the same rule the parser uses.
+    const balanced = (current.join("\n").match(/"/g) || []).length % 2 === 0;
+
+    if (current.length && balanced && (current.length >= MAX_ROWS || bytes >= MAX_BYTES)) {
+      parts.push([header, ...current].join("\n"));
+      current = [];
+      bytes = header.length;
+    }
+    current.push(line);
+    bytes += line.length + 1;
+  }
+  if (current.length) parts.push([header, ...current].join("\n"));
+
+  const total = {
+    rows: 0, companies: 0, contacts: 0,
+    companiesAdded: 0, contactsAdded: 0, contactsUpdated: 0,
+    duplicatesSkipped: 0, skipped: 0,
+    unmatched: [], parts: parts.length,
+  };
+
+  let sent = 0;
+  for (let i = 0; i < parts.length; i++) {
+    if (onProgress) onProgress(i + 1, parts.length, sent);
+
+    const r = await api("/api/admin/import", {
+      method: "POST",
+      body: { csv: parts[i], part: i + 1, parts: parts.length },
+    });
+
+    for (const key of ["rows", "companies", "contacts", "companiesAdded",
+                       "contactsAdded", "contactsUpdated", "duplicatesSkipped", "skipped"]) {
+      total[key] += Number(r[key]) || 0;
+    }
+    // Same columns every part; keep one copy rather than a growing list.
+    if (r.unmatched && r.unmatched.length) total.unmatched = r.unmatched;
+    if (r.warning) total.warning = r.warning;
+    sent += Number(r.rows) || 0;
+  }
+
+  // Companies repeat across parts, so the summed figure overcounts them.
+  // Reporting how many were CREATED is both accurate and the more useful
+  // number; the total is quietly dropped to the created count's floor.
+  total.companies = Math.max(total.companiesAdded, 0) || total.companies;
+
+  return total;
+}
+
 function signalsByType(signals, limit, hideSummary) {
   const list = (signals || []).slice(0, limit || 8);
   if (!list.length) {
@@ -3183,14 +3264,19 @@ function wireAdmin() {
       out.innerHTML = `<p class="hint" style="margin-top:12px">Reading ${esc(file.name)}…</p>`;
       try {
         const csv = await file.text();
-        const r = await api("/api/admin/import", { method: "POST", body: { csv } });
+        const r = await importInSlices(csv, (done, total, sent) => {
+          out.innerHTML = `<p class="hint" style="margin-top:12px">
+            Uploading part ${done} of ${total}… ${sent.toLocaleString()} rows sent so far.
+          </p>`;
+        });
+
         // Full breakdown here, where there's room for it. If people are
         // missing after an import, this is the first thing to read — and if
         // the column names weren't recognised, `unmatched` says which ones
         // were ignored instead of leaving it a mystery.
         out.innerHTML = `<p class="hint" style="margin-top:12px">
           <strong style="color:var(--teal)">Done.</strong>
-          Read ${r.rows} row${r.rows === 1 ? "" : "s"}:
+          Read ${r.rows} row${r.rows === 1 ? "" : "s"}${r.parts > 1 ? ` in ${r.parts} parts` : ""}:
           ${r.companies} compan${r.companies === 1 ? "y" : "ies"} (${r.companiesAdded} new),
           ${r.contacts} contact${r.contacts === 1 ? "" : "s"}
           (${r.contactsAdded} new${r.contactsUpdated ? `, ${r.contactsUpdated} updated` : ""}${

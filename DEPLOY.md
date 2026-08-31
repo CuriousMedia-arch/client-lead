@@ -156,3 +156,60 @@ leave on by accident.
 
 Running the sweep twice at once is harmless: each query only selects rows that
 are genuinely overdue and then makes them not-overdue.
+
+---
+
+## Moving from Render to Vercel
+
+Read the limits first — two of them shape the app, not just the config.
+
+### What is fixed, and what is not
+
+| | Vercel | Notes |
+|---|---|---|
+| Request body | **4.5 MB, hard** | Infrastructure-level. `maxDuration` and `memory` are configurable in `vercel.json`; this is not. |
+| Function timeout | 10s Hobby, up to 300s Pro | `vercel.json` sets 60s. On Hobby it is capped lower regardless. |
+| Always-on process | None | An in-process cron never fires. |
+
+The body cap is why the browser now sends contact sheets **in slices**
+(`importInSlices` in `public/app.js`). A 7 MB export cannot reach a Vercel
+function in one request under any configuration. Slices are safe to retry —
+the importer upserts, so a repeated part tops the same people up.
+
+**Pro is effectively required.** On Hobby, a 10-second ceiling will time out
+AI pitch generation, proposal drafting and larger import slices. Everything is
+built to survive a timeout without corrupting data, but the experience is poor.
+
+### Checklist
+
+- [ ] Import the repo at [vercel.com/new](https://vercel.com/new)
+- [ ] Framework preset: **Other**. Build command: leave empty. `vercel.json`
+      already routes `api/index.js` and serves `public/` from the CDN.
+- [ ] Copy every environment variable across from Render:
+      `DATABASE_URL`, `NEWSAPI_AI_KEY`, `GEMINI_API_KEY`, `SESSION_SECRET`,
+      `CRON_SECRET`, `TZ_NAME`, and the Google four if set
+      (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`,
+      `TOKEN_SECRET`)
+- [ ] `DATABASE_URL` must be the Supabase **pooler** string, port 6543. A
+      direct connection will exhaust Postgres connections under serverless,
+      where each cold start opens its own.
+- [ ] Deploy, then point your domain at it
+- [ ] **Update `GOOGLE_REDIRECT_URI`** and the matching Authorised redirect URI
+      in Google Cloud to the new domain, or Google sign-in breaks with
+      `redirect_uri_mismatch`
+- [ ] Update the `APP_URL` repository secret so the GitHub Actions sweep hits
+      the new deployment
+- [ ] Turn the Render service off only after all of the above is verified
+
+### After the move — check these specifically
+
+- [ ] Import a contact sheet. Watch it count through the parts.
+- [ ] Book a meeting (Google Meet link appears)
+- [ ] Generate a pitch (this is the one most likely to hit a timeout)
+- [ ] Actions tab → *Release overdue leads* → Run workflow → green
+
+### What does not change
+
+The lead scan already runs on GitHub Actions and writes straight to Supabase,
+so it is unaffected. `services/scheduler.js` detects `VERCEL` and skips
+registering in-process timers.

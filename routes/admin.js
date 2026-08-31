@@ -372,19 +372,47 @@ router.post("/import", async (req, res, next) => {
     let contactsUpdated = 0;
     let duplicatesSkipped = 0;
 
+    /*
+     * Everything below is batched, and it has to be.
+     *
+     * The original version ran one round trip per row inside a single
+     * transaction. On a real export — around 20,000 contacts — that is 40,000
+     * sequential queries to a hosted database: somewhere between three and ten
+     * minutes, which overruns the request before it can finish. The import
+     * looked like it "didn't work" when it was still running.
+     *
+     * Multi-row INSERTs in chunks turn that into a few hundred round trips.
+     */
+    const CHUNK = 250;
+    const chunks = (arr) => {
+      const out = [];
+      for (let i = 0; i < arr.length; i += CHUNK) out.push(arr.slice(i, i + CHUNK));
+      return out;
+    };
+
     await db.tx(async (q) => {
-      for (const c of companies) {
-        // Existing companies keep their name and approval, but pick up any
-        // keywords the sheet adds. A company already rejected stays rejected.
+      for (const batch of chunks(companies)) {
+        const args = [];
+        const values = batch
+          .map((c) => {
+            const at = args.length;
+            args.push(c.name, JSON.stringify(c.keywords), c.domain, c.website, c.linkedin,
+                      c.employees, c.revenue, c.industry, c.founded, c.city, c.state,
+                      c.specialities);
+            return `($${at + 1}, $${at + 2}::jsonb, true, 'watchlist', 'approved',
+                     $${at + 3}, $${at + 4}, $${at + 5}, $${at + 6}, $${at + 7}, $${at + 8},
+                     $${at + 9}, $${at + 10}, $${at + 11}, $${at + 12})`;
+          })
+          .join(", ");
+
         const { rows } = await q(
           `INSERT INTO companies
              (name, keywords, active, origin, approval,
               domain, website, linkedin, employees, revenue, industry, founded,
               city, state, specialities)
-           VALUES ($1, $2::jsonb, true, 'watchlist', 'approved', $3, $4, $5, $6, $7, $8, $9,
-                   $10, $11, $12)
+           VALUES ${values}
            ON CONFLICT (lower(name)) DO UPDATE
-              SET keywords  = $2::jsonb,
+              SET keywords  = EXCLUDED.keywords,
                   specialities = COALESCE(EXCLUDED.specialities, companies.specialities),
                   domain    = COALESCE(EXCLUDED.domain,    companies.domain),
                   website   = COALESCE(EXCLUDED.website,   companies.website),
@@ -400,10 +428,9 @@ router.post("/import", async (req, res, next) => {
                   approval  = CASE WHEN companies.approval = 'rejected'
                                    THEN 'rejected' ELSE 'approved' END
            RETURNING id, (xmax = 0) AS inserted`,
-          [c.name, JSON.stringify(c.keywords), c.domain, c.website, c.linkedin,
-           c.employees, c.revenue, c.industry, c.founded, c.city, c.state, c.specialities]
+          args
         );
-        if (rows[0].inserted) companiesAdded++;
+        for (const r of rows) if (r.inserted) companiesAdded++;
       }
 
       // Every company on the watchlist needs a lead row to hang signals off.
@@ -428,75 +455,111 @@ router.post("/import", async (req, res, next) => {
        *    duplicate and skipped outright, forever.
        *
        * The row-wise comparison below asks the honest question instead: after
-       * the COALESCEs above have had their say, would this write actually
-       * change anything? If not, skip it. If yes, apply it.
+       * the COALESCEs have had their say, would this write actually change
+       * anything? If not, skip it. If yes, apply it.
        */
-      for (const p of contacts) {
+      const SET = `
+              role        = COALESCE(EXCLUDED.role,        company_contacts.role),
+              email       = COALESCE(EXCLUDED.email,       company_contacts.email),
+              email_alt   = COALESCE(EXCLUDED.email_alt,   company_contacts.email_alt),
+              country     = COALESCE(EXCLUDED.country,     company_contacts.country),
+              state       = COALESCE(EXCLUDED.state,       company_contacts.state),
+              phone       = COALESCE(EXCLUDED.phone,       company_contacts.phone),
+              phone_type  = COALESCE(EXCLUDED.phone_type,  company_contacts.phone_type),
+              phone2      = COALESCE(EXCLUDED.phone2,      company_contacts.phone2),
+              phone2_type = COALESCE(EXCLUDED.phone2_type, company_contacts.phone2_type),
+              linkedin    = COALESCE(EXCLUDED.linkedin,    company_contacts.linkedin),
+              notes       = COALESCE(EXCLUDED.notes,       company_contacts.notes),
+              seniority   = COALESCE(EXCLUDED.seniority,   company_contacts.seniority),
+              department  = COALESCE(EXCLUDED.department,  company_contacts.department),
+              city        = COALESCE(EXCLUDED.city,        company_contacts.city),
+              is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary`;
+
+      const CHANGED = `
+           (company_contacts.role, company_contacts.email, company_contacts.email_alt,
+            company_contacts.phone, company_contacts.phone2, company_contacts.linkedin,
+            company_contacts.seniority, company_contacts.department,
+            company_contacts.city, company_contacts.state, company_contacts.country)
+           IS DISTINCT FROM
+           (COALESCE(EXCLUDED.role,       company_contacts.role),
+            COALESCE(EXCLUDED.email,      company_contacts.email),
+            COALESCE(EXCLUDED.email_alt,  company_contacts.email_alt),
+            COALESCE(EXCLUDED.phone,      company_contacts.phone),
+            COALESCE(EXCLUDED.phone2,     company_contacts.phone2),
+            COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
+            COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
+            COALESCE(EXCLUDED.department, company_contacts.department),
+            COALESCE(EXCLUDED.city,       company_contacts.city),
+            COALESCE(EXCLUDED.state,      company_contacts.state),
+            COALESCE(EXCLUDED.country,    company_contacts.country))`;
+
+      for (const batch of chunks(contacts)) {
+        const args = [];
+        const values = batch
+          .map((p) => {
+            const at = args.length;
+            args.push(p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_type,
+                      p.phone2, p.phone2_type, p.linkedin, p.notes, p.seniority, p.department,
+                      p.city, p.country, p.state, p.is_primary);
+            return `(${Array.from({ length: 17 }, (_, k) => `$${at + k + 1}`).join(", ")})`;
+          })
+          .join(", ");
+
+        // company and name come back so each returned row can be matched to
+        // the input it came from — needed for the originals snapshot below.
         const { rows } = await q(
           `INSERT INTO company_contacts
              (company, name, role, email, email_alt, phone, phone_type, phone2, phone2_type,
               linkedin, notes, seniority, department, city, country, state, is_primary)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           VALUES ${values}
            ON CONFLICT (lower(company), lower(name)) WHERE deleted_at IS NULL DO UPDATE
-              SET role        = COALESCE(EXCLUDED.role,        company_contacts.role),
-                  email       = COALESCE(EXCLUDED.email,       company_contacts.email),
-                  email_alt   = COALESCE(EXCLUDED.email_alt,   company_contacts.email_alt),
-                  country     = COALESCE(EXCLUDED.country,     company_contacts.country),
-                  state       = COALESCE(EXCLUDED.state,       company_contacts.state),
-                  phone       = COALESCE(EXCLUDED.phone,       company_contacts.phone),
-                  phone_type  = COALESCE(EXCLUDED.phone_type,  company_contacts.phone_type),
-                  phone2      = COALESCE(EXCLUDED.phone2,      company_contacts.phone2),
-                  phone2_type = COALESCE(EXCLUDED.phone2_type, company_contacts.phone2_type),
-                  linkedin    = COALESCE(EXCLUDED.linkedin,    company_contacts.linkedin),
-                  notes       = COALESCE(EXCLUDED.notes,       company_contacts.notes),
-                  seniority   = COALESCE(EXCLUDED.seniority,   company_contacts.seniority),
-                  department  = COALESCE(EXCLUDED.department,  company_contacts.department),
-                  city        = COALESCE(EXCLUDED.city,        company_contacts.city),
-                  is_primary  = company_contacts.is_primary OR EXCLUDED.is_primary
-           WHERE (company_contacts.role, company_contacts.email, company_contacts.email_alt,
-                  company_contacts.phone, company_contacts.phone2, company_contacts.linkedin,
-                  company_contacts.seniority, company_contacts.department,
-                  company_contacts.city, company_contacts.state, company_contacts.country)
-                 IS DISTINCT FROM
-                 (COALESCE(EXCLUDED.role,       company_contacts.role),
-                  COALESCE(EXCLUDED.email,      company_contacts.email),
-                  COALESCE(EXCLUDED.email_alt,  company_contacts.email_alt),
-                  COALESCE(EXCLUDED.phone,      company_contacts.phone),
-                  COALESCE(EXCLUDED.phone2,     company_contacts.phone2),
-                  COALESCE(EXCLUDED.linkedin,   company_contacts.linkedin),
-                  COALESCE(EXCLUDED.seniority,  company_contacts.seniority),
-                  COALESCE(EXCLUDED.department, company_contacts.department),
-                  COALESCE(EXCLUDED.city,       company_contacts.city),
-                  COALESCE(EXCLUDED.state,      company_contacts.state),
-                  COALESCE(EXCLUDED.country,    company_contacts.country))
-           RETURNING id, (xmax = 0) AS inserted`,
-          [p.company, p.name, p.role, p.email, p.email_alt, p.phone, p.phone_type,
-           p.phone2, p.phone2_type, p.linkedin, p.notes, p.seniority, p.department,
-           p.city, p.country, p.state, p.is_primary]
+              SET ${SET}
+           WHERE ${CHANGED}
+           RETURNING id, company, name, (xmax = 0) AS inserted`,
+          args
         );
-        // No row comes back at all when the update WHERE clause above
-        // rejected the write — company + phone + name matched exactly what
-        // was already on file, so it's a duplicate and nothing changed.
-        if (rows[0] && rows[0].inserted) {
-          contactsAdded++;
-          // Snapshot the row as the sheet delivered it. Written once — later
+
+        const byKey = new Map();
+        for (const p of batch) byKey.set(`${p.company.toLowerCase()}|${p.name.toLowerCase()}`, p);
+
+        const fresh = [];
+        for (const r of rows) {
+          if (r.inserted) {
+            contactsAdded++;
+            const p = byKey.get(`${String(r.company).toLowerCase()}|${String(r.name).toLowerCase()}`);
+            if (p) fresh.push({ id: r.id, p });
+          } else {
+            // Existed already, and the sheet had something new to add.
+            contactsUpdated++;
+          }
+        }
+        // Rows the database never returned were rejected by the WHERE above:
+        // already on file, and the sheet told us nothing we didn't have.
+        duplicatesSkipped += batch.length - rows.length;
+
+        if (fresh.length) {
+          // Snapshot each row as the sheet delivered it. Written once — later
           // imports and edits never touch it, so "what did the file say?"
           // always has an answer.
+          const oArgs = [];
+          const oValues = fresh
+            .map(({ id, p }) => {
+              const at = oArgs.length;
+              oArgs.push(id, p.company, p.name, p.role, p.email, p.email_alt, p.phone,
+                         p.phone2, p.linkedin, p.seniority, p.department, p.city,
+                         p.country, p.state);
+              return `(${Array.from({ length: 14 }, (_, k) => `$${at + k + 1}`).join(", ")})`;
+            })
+            .join(", ");
+
           await q(
             `INSERT INTO contact_originals
                (contact_id, company, name, role, email, email_alt, phone, phone2,
                 linkedin, seniority, department, city, country, state)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             VALUES ${oValues}
              ON CONFLICT (contact_id) DO NOTHING`,
-            [rows[0].id, p.company, p.name, p.role, p.email, p.email_alt, p.phone,
-             p.phone2, p.linkedin, p.seniority, p.department, p.city, p.country, p.state]
+            oArgs
           );
-        } else if (rows[0]) {
-          // Existed already, and the sheet had something new to add.
-          contactsUpdated++;
-        } else {
-          // Existed, and the sheet told us nothing we didn't have.
-          duplicatesSkipped++;
         }
       }
     });

@@ -108,7 +108,7 @@ const CONFLICT_PREDICATE = /\)\s*WHERE deleted_at IS NULL\s*DO UPDATE/gi;
 // uses it, so the harness swaps in a condition pg-mem can evaluate: always
 // update. Assertions below therefore read the database rather than trusting
 // the reported counts.
-const ROWWISE = /WHERE \(company_contacts\.role,[\s\S]*?COALESCE\(EXCLUDED\.country,\s+company_contacts\.country\)\)/i;
+const ROWWISE = /WHERE\s+\(company_contacts\.role,[\s\S]*?company_contacts\.country\)\)/i;
 
 const rewrite = (sql) =>
   sql
@@ -179,6 +179,113 @@ function call(method, path, body) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+/**
+ * A sheet the size of a real export.
+ *
+ * This is the case that was failing in production: 7.3 MB of CSV, rejected
+ * outright by Express's 1 MB body limit and reported as a generic 500. Even
+ * past that, one round trip per row would have run for minutes.
+ */
+async function bigSheetScenario() {
+  console.log("\n  --- a full-size export ---\n");
+
+  const lines = [HEADER];
+  const COMPANIES = 1700;
+  const PER_COMPANY = 12;
+  for (let c = 0; c < COMPANIES; c++) {
+    for (let p = 0; p < PER_COMPANY; p++) {
+      lines.push(
+        `Company ${c},First${p},Last${c}x${p},Manager,p${c}x${p}@co${c}.com,` +
+          `98${String(c).padStart(4, "0")}${String(p).padStart(3, "0")},mobile,,,` +
+          `https://linkedin.com/in/p${c}x${p},Consumer,500,Mumbai,India`
+      );
+    }
+  }
+  const csv = lines.join("\n");
+  const mb = Buffer.byteLength(csv) / 1048576;
+  console.log(`      generated ${lines.length - 1} rows, ${mb.toFixed(1)} MB`);
+
+  const started = Date.now();
+  const res = await call("POST", "/api/admin/import", { csv });
+  const secs = (Date.now() - started) / 1000;
+
+  check("A multi-megabyte sheet is accepted", res.status === 200,
+    res.status === 200 ? `${mb.toFixed(1)} MB went through` : `${res.status}: ${res.raw}`);
+  if (res.status !== 200) return;
+
+  const n = mem.public.many("select count(*)::int as n from company_contacts")[0].n;
+  check("Every row landed", n === COMPANIES * PER_COMPANY + 4,
+    `${n} contacts in the database`);
+
+  const queries = COMPANIES * PER_COMPANY;
+  console.log(`      took ${secs.toFixed(1)}s in memory — batched into ~${
+    Math.ceil(COMPANIES / 250) + Math.ceil(queries / 250) * 2
+  } round trips instead of ${queries * 2}`);
+}
+
+/**
+ * The browser sends big sheets in parts. Prove the parts add up to the same
+ * result as one upload would have — because they're what production will
+ * actually do on Vercel, where a 4.5 MB body is a hard ceiling.
+ */
+async function slicedUploadScenario() {
+  console.log("\n  --- sliced upload, as the browser does it ---\n");
+
+  mem.public.none("delete from contact_originals; delete from company_contacts; delete from leads; delete from companies;");
+
+  const lines = [HEADER];
+  for (let c = 0; c < 60; c++) {
+    for (let p = 0; p < 10; p++) {
+      lines.push(
+        `Sliced ${c},First${p},Last${c}x${p},Manager,s${c}x${p}@co.com,` +
+          `97${String(c).padStart(4, "0")}${String(p).padStart(3, "0")},mobile,,,` +
+          `https://linkedin.com/in/s${c}x${p},Consumer,500,Pune,India`
+      );
+    }
+  }
+
+  // Same slicing rule the browser uses: header on every part.
+  const header = lines[0];
+  const body = lines.slice(1);
+  const PART = 137;                       // deliberately not a round number
+  const parts = [];
+  for (let i = 0; i < body.length; i += PART) {
+    parts.push([header, ...body.slice(i, i + PART)].join("\n"));
+  }
+
+  let addedTotal = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const r = await call("POST", "/api/admin/import", {
+      csv: parts[i], part: i + 1, parts: parts.length,
+    });
+    if (r.status !== 200) {
+      check(`Part ${i + 1} imports`, false, r.raw);
+      return;
+    }
+    addedTotal += r.json.contactsAdded;
+  }
+
+  const n = mem.public.many(
+    "select count(*)::int as n from company_contacts where company like 'Sliced %'"
+  )[0].n;
+  check(`Sliced upload lands every row (${parts.length} parts)`, n === 600,
+    `${n} contacts (want 600), reported ${addedTotal} added`);
+
+  const companies = mem.public.many(
+    "select count(*)::int as n from companies where name like 'Sliced %'"
+  )[0].n;
+  check("Companies are created once, not once per part", companies === 60,
+    `${companies} companies (want 60)`);
+
+  // A part sent twice — a retry after a dropped connection — must not
+  // duplicate anyone.
+  await call("POST", "/api/admin/import", { csv: parts[0], part: 1, parts: parts.length });
+  const again = mem.public.many(
+    "select count(*)::int as n from company_contacts where company like 'Sliced %'"
+  )[0].n;
+  check("Re-sending a part is safe", again === 600, `${again} contacts after a repeat`);
 }
 
 let pass = 0, fail = 0;
@@ -278,6 +385,9 @@ async function run() {
     contacts.status === 200
       ? `${(contacts.json.contacts || []).length} contacts for Zepto`
       : contacts.raw);
+
+  await bigSheetScenario();
+  await slicedUploadScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();

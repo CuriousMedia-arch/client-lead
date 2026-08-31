@@ -53,6 +53,16 @@ function schedule(expression, mode, label) {
 }
 
 function start() {
+  // Serverless has no always-on process: a function instance exists only for
+  // the length of one request, so an in-process timer would be registered and
+  // then thrown away without ever firing. Bail out before registering
+  // anything rather than after — GitHub Actions and Vercel Cron drive the
+  // schedules for a serverless deployment instead. See DEPLOY.md.
+  if (process.env.VERCEL) {
+    console.log("[scheduler] Serverless deployment — schedules run from GitHub Actions.");
+    return;
+  }
+
   // The Fresh Leads checkpoints are time-based, so they need a heartbeat as
   // well as the on-request check — a lead should be released twelve hours
   // after it went quiet, not the next time somebody happens to load a page.
@@ -82,10 +92,6 @@ function start() {
     },
     { timezone: process.env.TZ_NAME || "Asia/Kolkata" }
   );
-
-  // Serverless has no always-on process, so an in-process cron would never
-  // fire. GitHub Actions runs both schedules for the deployed app instead.
-  if (process.env.VERCEL) return;
 
   if (process.env.DISABLE_SCHEDULER === "true") {
     console.log("[scheduler] Disabled via DISABLE_SCHEDULER.");

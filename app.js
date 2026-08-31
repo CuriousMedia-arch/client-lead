@@ -14,6 +14,23 @@ const { attachUser } = require("./lib/auth");
 
 const app = express();
 
+/*
+ * 1 MB is plenty for every request the portal makes except one: the contact
+ * sheet import, which sends a whole CSV as a JSON string and is routinely
+ * several megabytes. That route gets its own parser below.
+ *
+ * Kept as two limits rather than raising the global one, so a 25 MB body can
+ * only be aimed at the single endpoint that has a reason to accept it.
+ */
+/*
+ * The import route needs a bigger body than everything else, but note the
+ * ceiling is not ours to set on serverless hosting: Vercel caps a function's
+ * request body at 4.5 MB at the infrastructure level, and no setting here or
+ * in vercel.json changes that. The browser therefore sends large sheets in
+ * slices (see importInSlices in public/app.js) and each slice arrives well
+ * under both limits. This value only has to be generous enough for one slice.
+ */
+app.use("/api/admin/import", express.json({ limit: process.env.IMPORT_LIMIT || "8mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 // Minimal cookie setter so we don't need cookie-parser.
@@ -91,6 +108,28 @@ app.get("*", (req, res) => {
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  /*
+   * A body over the limit was being reported as a generic 500 "something broke
+   * on our side", which is how a 7 MB contact sheet failed to import for days
+   * without anyone being able to tell why. Say the actual numbers.
+   */
+  if (err && err.type === "entity.too.large") {
+    const mb = (n) => `${(Number(n) / 1048576).toFixed(1)} MB`;
+    console.error("[server] payload too large:", err.length, "limit", err.limit);
+    return res.status(413).json({
+      error:
+        `That file is ${mb(err.length)} and the limit is ${mb(err.limit)}. ` +
+        `Split the sheet into smaller files and import them one after another — ` +
+        `importing the same people twice is safe, they just get topped up.`,
+    });
+  }
+
+  // Malformed JSON deserves its own answer too; it is a client mistake, not
+  // a server fault, and "check the server log" sends people to the wrong place.
+  if (err && err.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "That request wasn't valid JSON." });
+  }
+
   console.error("[server]", err);
   res.status(500).json({ error: "Something broke on our side. Check the server log." });
 });
