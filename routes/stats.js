@@ -10,7 +10,23 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    await lifecycle.sweepExpired();
+    /*
+     * The expiry sweep, but not on every single request.
+     *
+     * /api/stats is hit on every page load and every tab switch, and the sweep
+     * is two UPDATEs that scan for overdue claims. Running it thirty times a
+     * minute across the team to find nothing overdue is pure cost, and it is
+     * on the path of the one call that gates the whole interface.
+     *
+     * Once a minute per warm instance is plenty — deadlines are measured in
+     * hours, the scheduled job runs every fifteen minutes anyway, and this is
+     * only here so a page someone is looking at is never stale.
+     */
+    const SWEEP_EVERY_MS = 60_000;
+    if (!globalThis.__cmLastSweep || Date.now() - globalThis.__cmLastSweep > SWEEP_EVERY_MS) {
+      globalThis.__cmLastSweep = Date.now();
+      await lifecycle.sweepExpired();
+    }
     // This used to be ten separate COUNT queries. Over a remote connection
     // that's ten lots of latency for numbers that all fit in one row, so
     // they're scalar subqueries in a single round trip instead.

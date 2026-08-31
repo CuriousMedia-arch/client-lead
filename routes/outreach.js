@@ -57,6 +57,44 @@ const LOSS_REASONS = [
   ["other", "Other"],
 ];
 
+/*
+ * Two selects, on purpose.
+ *
+ * OPP_LIST is what Today, the pipeline and the bell use. OPP_ONE adds the
+ * company profile (industry, size, website) that only the open workspace and
+ * the AI prompts need.
+ *
+ * They were one query, and the joined-in company profile made every list cost
+ * grow with the size of the COMPANIES table rather than with the number of
+ * opportunities returned — because `lower(c.name) = lower(o.company)` is a
+ * join on a computed value. Measured: 150ms at 100 companies, 1.2s at 600,
+ * while still returning the same twenty rows. Splitting it removes the work
+ * rather than optimising it.
+ */
+const OPP_LIST = `
+  SELECT o.*,
+         u.display_name           AS owner_name,
+         cc.name                  AS contact_name,
+         cc.role                  AS contact_role,
+         cc.email                 AS contact_email,
+         cc.phone                 AS contact_phone,
+         cc.phone2                AS contact_phone2,
+         cc.linkedin              AS contact_linkedin,
+         cc.deadline_at           AS contact_deadline,
+         cc.closed_at             AS contact_closed,
+         fc.name                  AS focus_name,
+         fc.role                  AS focus_role,
+         fc.email                 AS focus_email,
+         fc.phone                 AS focus_phone,
+         fc.linkedin              AS focus_linkedin,
+         l.fresh_deadline_at      AS lead_deadline
+    FROM opportunities o
+    LEFT JOIN users            u  ON u.id  = o.owner_id
+    LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+    LEFT JOIN company_contacts fc ON fc.id = o.focus_contact_id
+    LEFT JOIN leads            l  ON l.id  = o.lead_id`;
+
+/** The same, plus the company profile. Only for opening one opportunity. */
 const OPP_SELECT = `
   SELECT o.*,
          u.display_name           AS owner_name,
@@ -66,13 +104,13 @@ const OPP_SELECT = `
          cc.phone                 AS contact_phone,
          cc.phone2                AS contact_phone2,
          cc.linkedin              AS contact_linkedin,
+         cc.deadline_at           AS contact_deadline,
+         cc.closed_at             AS contact_closed,
          fc.name                  AS focus_name,
          fc.role                  AS focus_role,
          fc.email                 AS focus_email,
          fc.phone                 AS focus_phone,
          fc.linkedin              AS focus_linkedin,
-         cc.deadline_at           AS contact_deadline,
-         cc.closed_at             AS contact_closed,
          l.fresh_deadline_at      AS lead_deadline,
          c.industry, c.employees, c.revenue, c.website, c.domain,
          c.linkedin               AS company_linkedin
@@ -379,7 +417,7 @@ router.get("/today", async (req, res, next) => {
     await sweeps.sweepSilent();
 
     const mine = await db.all(
-      `${OPP_SELECT} WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')
+      `${OPP_LIST} WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')
        ORDER BY o.updated_at DESC`,
       [req.user.id]
     );
@@ -484,7 +522,7 @@ router.get("/", async (req, res, next) => {
 
     const all = req.query.all === "1" && req.user.role === "admin";
     const rows = await db.all(
-      `${OPP_SELECT} ${all ? "" : "WHERE o.owner_id = $1"}
+      `${OPP_LIST} ${all ? "" : "WHERE o.owner_id = $1"}
        ORDER BY
          CASE o.stage WHEN 'won' THEN 2 WHEN 'lost' THEN 3 ELSE 1 END,
          o.updated_at DESC
@@ -626,6 +664,33 @@ router.post("/open", async (req, res, next) => {
  */
 async function ensureOpportunities(userId) {
   try {
+    /*
+     * Ask the cheap question first.
+     *
+     * This runs on Today, on the pipeline, AND on the bell — which polls every
+     * sixty seconds for everyone signed in. The work below is two
+     * INSERT ... SELECT statements that scan every contact and lead the user
+     * owns, plus a third over their opportunities. Doing that once a minute
+     * per person, forever, to discover that nothing has changed is the kind of
+     * waste that shows up as "the whole thing feels slow".
+     *
+     * Both counts below hit indexes on owner_id, so the common answer — zero —
+     * costs one fast query instead of three scans and three writes.
+     */
+    const gap = await db.one(
+      `SELECT
+         (SELECT COUNT(*) FROM company_contacts cc
+           LEFT JOIN opportunities o ON o.contact_id = cc.id
+          WHERE cc.owner_id = $1 AND cc.deleted_at IS NULL
+            AND COALESCE(cc.claim_source, 'all') <> 'fresh'
+            AND o.id IS NULL)
+       + (SELECT COUNT(*) FROM leads l
+           LEFT JOIN opportunities o ON o.lead_id = l.id
+          WHERE l.fresh_owner_id = $1 AND o.id IS NULL) AS missing`,
+      [userId]
+    );
+    if (!gap || !Number(gap.missing)) return 0;
+
     const created = await db.one(
       `WITH ins_contacts AS (
          INSERT INTO opportunities (contact_id, company, owner_id, source, stage, silent_until)
@@ -1230,7 +1295,7 @@ router.post("/:id/plan", async (req, res, next) => {
 router.get("/meta/approvals", requireAdmin, async (req, res, next) => {
   try {
     const rows = await db.all(
-      `${OPP_SELECT} WHERE o.approval_status = 'pending' ORDER BY o.updated_at DESC`
+      `${OPP_LIST} WHERE o.approval_status = 'pending' ORDER BY o.updated_at DESC`
     );
     res.json({ approvals: rows });
   } catch (err) {

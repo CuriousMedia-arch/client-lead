@@ -47,6 +47,33 @@ const pool = globalThis.__cmPool || (globalThis.__cmPool = makePool());
 
 pool.on("error", (err) => console.error("[db] idle client error:", err.message));
 
+/*
+ * Say which query was slow, in the logs.
+ *
+ * Without this, "the portal is slow" is unanswerable: the deploy logs show a
+ * request took two seconds and nothing about why. A threshold rather than
+ * every query, so normal traffic stays quiet and only the outliers speak up.
+ *
+ * SLOW_QUERY_MS=0 turns it off; lower it to see more.
+ */
+const SLOW_MS = Number(process.env.SLOW_QUERY_MS ?? 250);
+
+if (SLOW_MS > 0) {
+  const original = pool.query.bind(pool);
+  pool.query = async (...args) => {
+    const started = Date.now();
+    try {
+      return await original(...args);
+    } finally {
+      const ms = Date.now() - started;
+      if (ms >= SLOW_MS) {
+        const text = typeof args[0] === "string" ? args[0] : (args[0] && args[0].text) || "";
+        console.warn(`[db] ${ms}ms — ${text.replace(/\s+/g, " ").trim().slice(0, 160)}`);
+      }
+    }
+  };
+}
+
 /** Every row. */
 async function all(text, params = []) {
   const { rows } = await pool.query(text, params);

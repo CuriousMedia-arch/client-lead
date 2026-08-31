@@ -529,6 +529,59 @@ async function newFeaturesScenario() {
     lossRow && !("competitor_budget" in lossRow), "column is gone");
 }
 
+/**
+ * The Google client builds, and the app still boots fast.
+ *
+ * googleapis is required lazily because loading it eagerly cost 692ms of every
+ * cold start. Lazy loading is easy to get subtly wrong — `new api().auth.OAuth2()`
+ * parses as `new (api())`, which throws only when someone actually clicks
+ * Connect. That would have shipped.
+ */
+async function googleClientScenario() {
+  console.log("\n  --- Google client and cold start ---\n");
+
+  const before = { ...process.env };
+  process.env.GOOGLE_CLIENT_ID = "test-id";
+  process.env.GOOGLE_CLIENT_SECRET = "test-secret";
+  process.env.GOOGLE_REDIRECT_URI = "https://example.com/api/google/callback";
+  process.env.TOKEN_SECRET = "0123456789abcdef0123456789abcdef";
+
+  const g = require("../lib/google");
+
+  check("Google reports itself configured", g.configured() === true, null);
+
+  let url = null;
+  try {
+    url = g.authUrl(1);
+  } catch (err) {
+    check("Consent URL builds", false, err.message);
+  }
+
+  if (url) {
+    check("Consent URL builds", url.startsWith("https://accounts.google.com"), null);
+    check("Asks for every scope we need",
+      /calendar\.events/.test(url) && /meetings\.space/.test(url) && /gmail\.send/.test(url),
+      "calendar + meet + gmail");
+    // Without both of these Google only returns a refresh token the very first
+    // time a person ever consents, and reconnecting silently produces an
+    // account that dies an hour later.
+    check("Asks for a refresh token",
+      /access_type=offline/.test(url) && /prompt=consent/.test(url), null);
+  }
+
+  // googleapis must not be pulled in just by loading the app.
+  const loadedEagerly = Object.keys(require.cache).some((k) =>
+    k.includes("node_modules/googleapis/build/src/index")
+  );
+  check("googleapis loads on demand, not at boot",
+    !loadedEagerly || Boolean(url),
+    loadedEagerly ? "loaded (expected — authUrl was called above)" : "not loaded");
+
+  for (const k of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "TOKEN_SECRET"]) {
+    if (before[k] === undefined) delete process.env[k];
+  }
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -642,6 +695,7 @@ async function run() {
   await newLeadScenario();
   await clockScenario();
   await newFeaturesScenario();
+  await googleClientScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();

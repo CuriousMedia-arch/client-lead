@@ -130,9 +130,11 @@ GitHub Action below, whose request also wakes the instance.
 
 ### Vercel
 
-There is no always-on process for a timer to live in, and Vercel Cron on the
-Hobby plan allows only one run a day. `vercel.json` includes an hourly cron
-entry which works on Pro; on Hobby, use the GitHub Action.
+There is no always-on process for a timer to live in, so nothing schedules
+itself. Vercel Cron is not used at all: the Hobby plan rejects any schedule
+that runs more than once a day, and once a day is far too coarse for claim
+deadlines measured in hours. **The GitHub Action below is the scheduler on
+Vercel, not a fallback.**
 
 ### GitHub Action (works on any host)
 

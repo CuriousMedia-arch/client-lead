@@ -33,6 +33,37 @@ const app = express();
 app.use("/api/admin/import", express.json({ limit: process.env.IMPORT_LIMIT || "8mb" }));
 app.use(express.json({ limit: "1mb" }));
 
+/*
+ * How long did this request take, and was it the server or the network?
+ *
+ * The Server-Timing header shows up in the browser's Network tab next to each
+ * request, so "the portal is slow" can be answered by looking rather than
+ * guessing: if the header says 40ms and the request took 2 seconds, the time
+ * went on a cold start or the connection, not on our code.
+ *
+ * Anything genuinely slow is also logged, so it is visible in the deploy logs
+ * without anyone having devtools open.
+ */
+app.use((req, res, next) => {
+  const started = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - started;
+    if (ms >= Number(process.env.SLOW_REQUEST_MS || 800)) {
+      console.warn(`[slow] ${ms}ms ${req.method} ${req.originalUrl}`);
+    }
+  });
+
+  const send = res.setHeader.bind(res);
+  res.setHeader = (name, value) => {
+    if (String(name).toLowerCase() === "content-type") {
+      try { send("Server-Timing", `app;dur=${Date.now() - started}`); } catch { /* already sent */ }
+    }
+    return send(name, value);
+  };
+
+  next();
+});
+
 // Minimal cookie setter so we don't need cookie-parser.
 app.use((req, res, next) => {
   res.cookie = (name, value, opts = {}) => {

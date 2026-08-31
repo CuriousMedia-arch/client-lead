@@ -167,6 +167,11 @@ save without a Meet link and notes get typed by hand.
 This is what releases overdue leads when nobody is logged in. Without it, a
 lead due back on Saturday sits claimed until Monday.
 
+**This is not optional on Vercel.** Vercel's own cron is unused — the Hobby
+plan refuses any schedule more frequent than once a day, which is useless for
+deadlines measured in hours. GitHub Actions runs it every 15 minutes instead,
+and that is free on any plan.
+
 GitHub → your repo → **Settings → Secrets and variables → Actions** → add:
 
 | Secret | Value |
