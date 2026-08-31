@@ -80,7 +80,18 @@ async function api(path, opts = {}) {
     /* an empty body is fine for some responses */
   }
 
-  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // A 413 from the hosting platform never carries a JSON body, so without
+    // this it surfaces as a bare "Request failed (413)" with no clue what to
+    // do. Say what it means in words.
+    if (res.status === 413 && !(data && data.error)) {
+      throw new Error(
+        "That file is too big to send in one go. If this was an import, refresh " +
+          "the page and try again — large sheets are meant to upload in parts."
+      );
+    }
+    throw new Error((data && data.error) || `Request failed (${res.status})`);
+  }
   return data || {};
 }
 
@@ -1943,7 +1954,15 @@ function wireListActions() {
       if (!file) return;
       try {
         const csv = await file.text();
-        const r = await api("/api/admin/import", { method: "POST", body: { csv } });
+        // Sliced, exactly like the Admin tab's importer. This is the upload
+        // button on the leads list — it sent the whole file in one request and
+        // was missed when the other one was fixed, so a large sheet failed
+        // here with a bare 413 from the platform while the same file imported
+        // fine from Admin.
+        toast("Importing…");
+        const r = await importInSlices(csv, (done, total) => {
+          if (total > 1) toast(`Importing part ${done} of ${total}…`);
+        });
 
         if (r.warning) {
           toast(r.warning, true);
