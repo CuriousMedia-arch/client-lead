@@ -846,3 +846,135 @@
   font-style: normal;
   margin-left: 6px;
 }
+
+/* ── Workspace: tabs and the stage rail ───────────────────────────────────── */
+
+/*
+ * The panel is now a fixed head (company, contact, stage, tabs) over a
+ * scrolling body, so the tabs and the stage stay put while you read. Before
+ * this the whole thing was one scroll and you lost track of which deal you
+ * were even in.
+ */
+.ws-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 22px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.ws-tab {
+  position: relative;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-tab:hover { color: var(--ink); }
+.ws-tab.is-on { color: var(--ink); border-bottom-color: var(--teal); font-weight: 600; }
+
+/* A count is what makes a hidden tab discoverable. Without it, work sits
+   behind a label nobody thinks to click. */
+.ws-tab-badge {
+  font-family: var(--mono);
+  font-style: normal;
+  font-size: 10px;
+  background: var(--coral);
+  color: #fff;
+  border-radius: 999px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+}
+
+.stage-rail {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 22px;
+  background: var(--surface);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.rail-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.rail-step > i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  flex-shrink: 0;
+}
+/* The connecting line lives on the step, not between them, so the rail keeps
+   its shape however many stages there are. */
+.rail-step + .rail-step::before {
+  content: "";
+  height: 1px;
+  background: var(--line-strong);
+  flex: 1;
+  margin-right: 6px;
+  min-width: 10px;
+}
+.rail-step.is-done { color: var(--ink-soft); }
+.rail-step.is-done > i { background: var(--teal); }
+.rail-step.is-here { color: var(--ink); font-weight: 600; }
+.rail-step.is-here > i {
+  background: var(--teal);
+  box-shadow: 0 0 0 3px var(--teal-tint);
+}
+.rail-step > span { overflow: hidden; text-overflow: ellipsis; }
+
+.stage-rail.is-closed { padding: 10px 22px; }
+.rail-closed {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+.rail-won { background: var(--green-tint); color: var(--green); }
+.rail-lost { background: var(--coral-tint); color: var(--coral); }
+
+/* ── The Now tab ──────────────────────────────────────────────────────────── */
+
+/* One line, big enough to read without looking for it. This is the whole
+   point of the tab. */
+.ws-next { background: var(--teal-tint); border-color: var(--teal); }
+.ws-next-line { font-size: 15px; font-weight: 600; margin: 4px 0 0; }
+.ws-next .ws-actions { margin-top: 12px; }
+
+/* Something is actually waiting on you. */
+.ws-urgent { border-left: 3px solid var(--coral); }
+
+.ws-contact { border-radius: 0; border-left: 0; border-right: 0; border-top: 0; margin-bottom: 0; }
+
+@media (max-width: 720px) {
+  .ws-tabs { padding: 0 14px; }
+  .stage-rail { padding: 10px 14px; }
+  /* Dots only — the labels don't fit and the position still reads. */
+  .rail-step > span { display: none; }
+  .rail-step.is-here > span { display: inline; }
+}

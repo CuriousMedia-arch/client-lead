@@ -395,6 +395,42 @@ async function drive(window) {
     const ov = window.getComputedStyle(body).overflowY;
     return ov === "auto" || ov === "scroll" ? ov : `overflow-y is "${ov}"`;
   });
+  // --- the tabbed layout ---
+  check("Workspace opens on the Now tab", () => {
+    const on = $(".ws-tab.is-on");
+    return on && on.textContent.trim().startsWith("Now") ? "Now" : `on "${on && on.textContent.trim()}"`;
+  });
+  check("All five tabs are there", () => {
+    const tabs = $$("[data-ws-tab]").map((t) => t.dataset.wsTab);
+    return tabs.length === 5 ? tabs.join(", ") : `${tabs.length}: ${tabs.join(", ")}`;
+  });
+  check("The stage rail shows where the deal is", () => {
+    const here = $(".rail-step.is-here");
+    return here ? here.textContent.trim() : "no current stage marked";
+  });
+  check("Now tab says what to do next", () => {
+    const line = $(".ws-next-line");
+    return line ? line.textContent.trim().slice(0, 60) : "no next action";
+  });
+
+  // Every tab must render without throwing — a tab that blanks is worse than
+  // no tab, because the work looks lost.
+  for (const key of ["message", "meetings", "delivery", "history", "now"]) {
+    const btn = $$("[data-ws-tab]").find((t) => t.dataset.wsTab === key);
+    click(btn);
+    await wait(150);
+    check(`Tab "${key}" renders`, () => {
+      const body = $(".ws-body");
+      if (!body) return "no body";
+      const text = body.textContent.trim();
+      return text.length > 20 ? `${text.length} chars` : `looks empty: "${text}"`;
+    });
+  }
+
+  // Back to Message for the checks below, which live there now.
+  click($$("[data-ws-tab]").find((t) => t.dataset.wsTab === "message"));
+  await wait(200);
+
   check("Suggests a service without being asked", () => {
     const box = $(".rec-box");
     if (!box) return "no recommendation appeared";
@@ -408,8 +444,8 @@ async function drive(window) {
 
   check("Workspace has all sections", () => {
     const heads = $$(".ws-section h3").map((h) => h.textContent.trim());
-    const want = ["What we should sell them", "Package", "Message to send", "Replies",
-                  "Reminder schedule", "Meetings", "History"];
+    // The Message tab holds the three that are now one job.
+    const want = ["What we should sell them", "What we", "Message to send"];
     const missing = want.filter((w) => !heads.some((h) => h.startsWith(w)));
     return missing.length ? `missing ${missing.join(", ")}` : `${heads.length} sections`;
   });
@@ -431,10 +467,16 @@ async function drive(window) {
   });
   check("Custom package builder is gone", () =>
     !$("#plan-builder") && !$("#toggle-builder") ? "removed" : "builder still present");
-  check("Proposal versions show the delta", () => {
+  // Price history moved to the History tab — it is a record, not a working
+  // screen, so it should not be in the way while you write a message.
+  click($$("[data-ws-tab]").find((t) => t.dataset.wsTab === "history"));
+  await wait(200);
+  check("Price history lives under History", () => {
     const d = $$(".ver-delta").map((e) => e.textContent.trim());
-    return d.length ? d.join(" / ") : false;
+    return d.length ? d.join(" / ") : "no price versions shown";
   });
+  click($$("[data-ws-tab]").find((t) => t.dataset.wsTab === "message"));
+  await wait(150);
   check("Timeline renders", () => `${$$(".tl-row").length} events`);
 
   /* Pick a plan — the bug that ate the price field */
@@ -485,7 +527,9 @@ async function drive(window) {
       ? "whatsapp copy shown, subject hidden"
       : false);
 
-  /* Loss interview */
+  /* Loss interview — on the Now tab, where you close a deal */
+  click($$("[data-ws-tab]").find((t) => t.dataset.wsTab === "now"));
+  await wait(200);
   click($("#open-lost"));
   await wait(80);
   check("Loss interview opens", () => {

@@ -1330,6 +1330,41 @@ router.post("/:id/sent", async (req, res, next) => {
     // Item 18 — the sequence starts when the first message goes out.
     await scheduleFollowups(opp.id);
 
+    /*
+     * Record the price as a version, if it moved.
+     *
+     * Package, price and message are one job in the UI now, so there is no
+     * separate "save the proposal" step to hang this off — but the record of
+     * how a price got discounted is exactly what management asked for, and
+     * losing it because the button disappeared would be a silent regression.
+     * So a send at a new price writes a version by itself.
+     */
+    if (opp.quoted_price) {
+      const last = await db.one(
+        `SELECT version, price FROM opportunity_proposals
+          WHERE opportunity_id = $1 ORDER BY version DESC LIMIT 1`,
+        [opp.id]
+      );
+      const moved = !last || Number(last.price) !== Number(opp.quoted_price);
+      if (moved) {
+        await db.run(
+          `INSERT INTO opportunity_proposals
+             (opportunity_id, version, price, service, plan_name, body, change_note, sent_at, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)`,
+          [
+            opp.id,
+            (last ? Number(last.version) : 0) + 1,
+            opp.quoted_price,
+            opp.service_primary,
+            opp.plan_name,
+            body,
+            last ? "Price changed and re-sent" : "First quote sent",
+            req.user.id,
+          ]
+        );
+      }
+    }
+
     res.json({ opportunity: await loadOpp(opp.id, req.user) });
   } catch (err) {
     next(err);

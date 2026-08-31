@@ -34,6 +34,7 @@ const outreach = {
   focus: null,
   recommending: false,
   pitchTab: "email",
+  wsTab: "now",
   google: {},              // whether Google is set up / connected
   deckLink: null,          // the packages deck, from the admin templates
   noteMessages: {},        // per-meeting explanation of why notes aren't ready
@@ -769,44 +770,160 @@ async function reloadWorkspace() {
   paintWorkspace();
 }
 
+/**
+ * The five tabs, and what lives in each.
+ *
+ * The workspace used to be ten sections stacked in one scroll, all open, all
+ * the same weight. Nothing said where the deal was or what to do next — you
+ * read the whole thing every time to find the one part that mattered.
+ *
+ *   Now       what this deal needs today: the reply waiting, the reminder
+ *             due, and the buttons that close it
+ *   Message   one place to decide what you're selling, at what price, and to
+ *             write the message that says so — package, price and pitch are
+ *             one job, so they are one screen
+ *   Meetings  booking, notes, forwarding them on
+ *   Delivery  what we've promised, once there is something to promise
+ *   History   everything that has happened, including how the price moved
+ */
+const WS_TABS = [
+  ["now", "Now"],
+  ["message", "Message"],
+  ["meetings", "Meetings"],
+  ["delivery", "Delivery"],
+  ["history", "History"],
+];
+
+/** The funnel as a rail, so position is visible without reading anything. */
+function wsStageRail(o) {
+  const steps = [
+    ["new", "Not started"],
+    ["contacted", "Contacted"],
+    ["replied", "Replied"],
+    ["meeting", "Meeting"],
+    ["proposal", "Quoted"],
+    ["negotiation", "Negotiating"],
+  ];
+
+  if (o.stage === "won" || o.stage === "lost") {
+    return `<div class="stage-rail is-closed">
+              <span class="rail-closed rail-${esc(o.stage)}">
+                ${o.stage === "won" ? "Won" : "Lost"}
+              </span>
+            </div>`;
+  }
+
+  const here = steps.findIndex(([k]) => k === o.stage);
+
+  return `
+    <div class="stage-rail">
+      ${steps
+        .map(
+          ([key, label], i) => `
+        <span class="rail-step ${i < here ? "is-done" : ""} ${i === here ? "is-here" : ""}">
+          <i></i><span>${esc(label)}</span>
+        </span>`
+        )
+        .join("")}
+    </div>`;
+}
+
+/**
+ * How many things in each tab want attention. A number on a tab is what makes
+ * a collapsed section discoverable — without it, work hides behind a label
+ * nobody clicks.
+ */
+function wsTabBadges(d) {
+  const o = d.opportunity;
+  const waiting =
+    o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at) ? 1 : 0;
+  const dueReminders = (d.followups || []).filter(
+    (f) => f.status === "due" && new Date(f.due_at) <= new Date()
+  ).length;
+  const notesToWrite = (d.meetings || []).filter(
+    (m) => !m.notes && new Date(m.scheduled_at) < new Date()
+  ).length;
+
+  return {
+    now: waiting + dueReminders + (o.approval_status === "pending" ? 1 : 0),
+    meetings: notesToWrite,
+    message: 0,
+    delivery: (d.execution || []).filter((e) => e.status === "blocked").length,
+    history: 0,
+  };
+}
+
 function paintWorkspace() {
   const { panel } = workspaceEls();
   const d = outreach.opp;
   const o = d.opportunity;
+  const tab = outreach.wsTab || "now";
+  const badges = wsTabBadges(d);
 
-  // Every action in here repaints the whole panel, which resets the scroll to
-  // the top. Generating a pitch is the worst case: you press the button near
-  // the middle of a long panel and get thrown back to the company name, with
-  // the thing you asked for now somewhere off screen. Remember where they
-  // were and put them back.
+  // Every action repaints the whole panel, which resets the scroll to the top.
+  // Generating a message is the worst case: you press a button in the middle
+  // of the panel and get thrown back to the company name with the thing you
+  // asked for somewhere off screen.
   const wasScrolled = $(".ws-body", panel) ? $(".ws-body", panel).scrollTop : 0;
+
+  const bodies = {
+    now: () => wsNowTab(d),
+    message: () => wsServiceBlock(d) + wsPlanBlock(d) + wsPitchBlock(d),
+    meetings: () => wsMeetingBlock(d),
+    delivery: () => wsExecutionBlock(d) || emptyTab("Nothing to deliver yet.",
+      "Once a price is out, plan what we've promised here."),
+    history: () => wsTimelineBlock(d) + wsPriceHistory(d) + wsHistoryBlock(d),
+  };
 
   panel.innerHTML = `
     <header class="ws-head">
       <div>
         <p class="eyebrow"><span class="dot"></span>${esc(STAGE_LABEL[o.stage] || o.stage)}</p>
-        <h2>${esc(o.company)} — ${esc(o.service_primary || "Opportunity")}</h2>
+        <h2>${esc(o.company)}</h2>
       </div>
       <button class="drawer-close" id="ws-close" aria-label="Close">×</button>
     </header>
 
+    ${wsContactBlock(d)}
+    ${wsStageRail(o)}
+
+    <nav class="ws-tabs">
+      ${WS_TABS.map(
+        ([key, label]) => `
+        <button class="ws-tab ${key === tab ? "is-on" : ""}" data-ws-tab="${key}">
+          ${esc(label)}${badges[key] ? `<i class="ws-tab-badge">${badges[key]}</i>` : ""}
+        </button>`
+      ).join("")}
+    </nav>
+
     <div class="ws-body">
-      ${wsContactBlock(d)}
-      ${wsServiceBlock(d)}
-      ${wsPlanBlock(d)}
-      ${wsPitchBlock(d)}
-      ${wsReplyBlock(d)}
-      ${wsFollowupBlock(d)}
-      ${wsMeetingBlock(d)}
-      ${wsExecutionBlock(d)}
-      ${wsHistoryBlock(d)}
-      ${wsTimelineBlock(d)}
-      ${wsCloseBlock(d)}
+      ${(bodies[tab] || bodies.now)()}
     </div>`;
 
   // Restore before the browser paints, so there is no visible jump.
   const body = $(".ws-body", panel);
   if (body && wasScrolled) body.scrollTop = wasScrolled;
+
+  for (const btn of $$("[data-ws-tab]", panel)) {
+    btn.addEventListener("click", () => {
+      outreach.wsTab = btn.dataset.wsTab;
+      paintWorkspace();
+      // A new tab starts at the top; carrying the old tab's scroll into it
+      // lands you halfway down something you have not seen.
+      const body = $(".ws-body", $("#ws-panel"));
+      if (body) body.scrollTop = 0;
+    });
+  }
+
+  // Buttons on the Now tab that send you somewhere to act.
+  for (const btn of $$("[data-goto-tab]", panel)) {
+    btn.addEventListener("click", () => {
+      outreach.wsTab = btn.dataset.gotoTab;
+      paintWorkspace();
+      const body = $(".ws-body", $("#ws-panel"));
+      if (body) body.scrollTop = 0;
+    });
+  }
 
   $("#ws-close").addEventListener("click", closeWorkspace);
   wireWorkspace();
@@ -824,6 +941,113 @@ function paintAndReveal(selector) {
   const el = $(selector, $("#ws-panel"));
   if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
+
+function emptyTab(title, hint) {
+  return `<section class="ws-section"><p class="muted">${esc(title)}</p>
+            ${hint ? `<p class="hint">${esc(hint)}</p>` : ""}</section>`;
+}
+
+/**
+ * The Now tab: what this deal needs from you today, and nothing else.
+ *
+ * Ordered by what it costs to ignore — an unanswered reply first, because
+ * somebody is sitting there waiting, then a reminder that has fallen due,
+ * then the clock, then closing it out.
+ */
+function wsNowTab(d) {
+  const o = d.opportunity;
+  const waiting =
+    o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at);
+  const dueReminder = (d.followups || []).find(
+    (f) => f.status === "due" && new Date(f.due_at) <= new Date()
+  );
+  const lastReply = (d.messages || []).find((m) => m.direction === "in");
+
+  // One line at the top saying what to do. The classifier's own words when it
+  // has read a reply, otherwise derived from the stage.
+  const nextAction =
+    o.next_action ||
+    {
+      new: "Send the first message — open the Message tab.",
+      contacted: "Waiting on a reply. Send a reminder when one falls due.",
+      replied: "They've answered. Read it and decide the next move.",
+      meeting: "Meeting booked. Write the notes straight after it.",
+      proposal: "Price is out. Chase it, or close the deal.",
+      negotiation: "Close it — won or lost.",
+    }[o.stage] ||
+    "Keep this moving.";
+
+  return `
+    <section class="ws-section ws-next">
+      <span class="mono-label">What to do next</span>
+      <p class="ws-next-line">${esc(nextAction)}</p>
+      ${
+        o.stage === "new"
+          ? `<button class="btn btn-sm btn-primary" data-goto-tab="message">Write the first message</button>`
+          : ""
+      }
+    </section>
+
+    ${
+      waiting && lastReply
+        ? `<section class="ws-section ws-urgent">
+             <h3>They replied — your turn</h3>
+             <div class="reply-box reply-${esc(lastReply.sentiment || "neutral")}">
+               <div class="reply-head">
+                 <span class="reply-verdict">${esc((lastReply.intent || "reply").replace(/_/g, " "))}</span>
+                 <span class="muted">${esc(shortDateTime(lastReply.created_at))}</span>
+               </div>
+               <p class="reply-body">${esc(lastReply.body)}</p>
+               ${
+                 lastReply.ai_next_action
+                   ? `<p class="reply-action"><span class="mono-label">Suggested</span>${esc(
+                       lastReply.ai_next_action
+                     )}</p>`
+                   : ""
+               }
+             </div>
+             <div class="ws-actions">
+               <button class="btn btn-sm btn-primary" data-goto-tab="message">Reply</button>
+               <button class="btn btn-sm" data-goto-tab="meetings">Book a meeting</button>
+             </div>
+           </section>`
+        : ""
+    }
+
+    ${
+      dueReminder
+        ? `<section class="ws-section ws-urgent">
+             <h3>Reminder ${dueReminder.step} is due</h3>
+             <p class="hint">${esc(FOLLOWUP_KIND[dueReminder.kind] || dueReminder.kind)}</p>
+             ${dueReminder.suggestion ? `<pre class="fu-suggestion">${esc(dueReminder.suggestion)}</pre>` : ""}
+             <div class="ws-actions">
+               <button class="btn btn-sm btn-primary" data-fu-draft="${dueReminder.step}">Write it for me</button>
+               <button class="btn btn-sm btn-ghost" data-fu-done="${dueReminder.step}">Mark done</button>
+             </div>
+           </section>`
+        : ""
+    }
+
+    ${
+      o.approval_status === "pending"
+        ? `<section class="ws-section ws-urgent">
+             <h3>Waiting on your manager</h3>
+             <p class="hint">${esc(o.approval_reason || "This price is discounted past the limit.")}</p>
+           </section>`
+        : ""
+    }
+
+    ${wsLogReplyBlock(d)}
+    ${wsFollowupBlock(d)}
+    ${wsCloseBlock(d)}`;
+}
+
+const FOLLOWUP_KIND = {
+  reminder: "A gentle nudge — no new pitch, no pressure.",
+  value: "Share something useful, rather than asking again.",
+  angle: "Try a different angle. Reference something recent about them.",
+  nurture: "Stop chasing. Leave the door open.",
+};
 
 /* --- contact header (item 3) --- */
 
@@ -964,14 +1188,14 @@ function wsPlanBlock(d) {
 
   if (!o.service_primary) {
     return `<section class="ws-section" id="package-section">
-              <h3>Package &amp; proposal</h3>
-              <p class="muted">Pick what you're selling first.</p>
+              <h3>What we’re selling, and for how much</h3>
+              <p class="muted">Choose a service above first.</p>
             </section>`;
   }
 
   return `
     <section class="ws-section" id="package-section">
-      <h3>Package &amp; proposal</h3>
+      <h3>What we’re selling, and for how much</h3>
 
       ${
         group
@@ -1005,59 +1229,6 @@ function wsPlanBlock(d) {
 
       <button class="btn btn-primary" id="save-plan">Save package &amp; price</button>
 
-      <div class="section-split"></div>
-
-      <h4 class="ws-subhead">Proposal</h4>
-
-      ${
-        d.proposals.length
-          ? `<div class="ver-list">
-               ${d.proposals
-                 .map(
-                   (p, i) => `
-                 <details class="ver-row-wrap">
-                   <summary class="ver-row">
-                     <span class="ver-tag">V${p.version}</span>
-                     <span class="ver-price">${inrShort(p.price)}</span>
-                     ${
-                       i < d.proposals.length - 1
-                         ? `<span class="ver-delta">${deltaLabel(p.price, d.proposals[i + 1].price)}</span>`
-                         : `<span class="ver-delta">—</span>`
-                     }
-                     <span class="muted">${esc(p.user_name || "")} · ${esc(dateOnly(p.created_at))}</span>
-                     <span class="ver-note">${esc(p.change_note || "")}</span>
-                   </summary>
-                   <pre class="ver-body">${esc(p.body || "(no text saved for this version)")}</pre>
-                   <button class="btn btn-sm" data-copy-proposal="${p.id}">Copy this version</button>
-                 </details>`
-                 )
-                 .join("")}
-             </div>`
-          : `<p class="muted">No proposal written yet.</p>`
-      }
-
-      <div class="ws-actions">
-        <button class="btn btn-sm btn-primary" id="gen-proposal">Write the proposal</button>
-        ${
-          outreach.deckLink
-            ? `<a class="btn btn-sm" href="${esc(outreach.deckLink)}" target="_blank" rel="noopener">Open the deck</a>`
-            : ""
-        }
-      </div>
-
-      ${
-        draft
-          ? `<label class="field"><span>Proposal text</span>
-               <textarea id="prop-body" rows="14">${esc(draft.body)}</textarea></label>
-             <div class="grid-2">
-               <label class="field"><span>Price ₹</span>
-                 <input type="number" id="prop-price" value="${Number(o.quoted_price || 0)}" /></label>
-               <label class="field"><span>What changed</span>
-                 <input id="prop-note" placeholder="e.g. dropped to match their budget" /></label>
-             </div>
-             <button class="btn btn-primary" id="save-proposal">Save as V${d.proposals.length + 1}</button>`
-          : ""
-      }
     </section>`;
 }
 
@@ -1171,6 +1342,11 @@ function wsPitchBlock(d) {
 
                <div class="ws-actions">
                  <button class="btn btn-sm" id="copy-pitch">Copy</button>
+                 ${
+                   outreach.deckLink
+                     ? `<a class="btn btn-sm" href="${esc(outreach.deckLink)}" target="_blank" rel="noopener">Open the deck</a>`
+                     : ""
+                 }
                  <button class="btn btn-sm ${alreadySent ? "" : "btn-primary"}" id="log-sent">
                    ${alreadySent ? "Send this again" : "Mark as sent"}
                  </button>
@@ -1272,37 +1448,24 @@ function wsSentBlock(d) {
 
 /* --- items 11 & 17: log a reply, get it classified --- */
 
-function wsReplyBlock(d) {
-  const inbound = d.messages.filter((m) => m.direction === "in").slice(0, 3);
-
+/**
+ * Logging what came back.
+ *
+ * The reply itself is shown at the top of the Now tab, where it can't be
+ * missed. This is only the box for pasting in a new one — previously the two
+ * were the same section, which meant the most important thing on the screen
+ * sat underneath a text area.
+ */
+function wsLogReplyBlock(d) {
   return `
     <section class="ws-section">
-      <h3>Replies</h3>
-
-      ${inbound
-        .map(
-          (m) => `
-        <div class="reply-box reply-${esc(m.sentiment || "neutral")}">
-          <div class="reply-head">
-            <span class="reply-verdict">${esc((m.intent || "reply").replace(/_/g, " "))}</span>
-            <span class="muted">${esc(shortDateTime(m.created_at))}</span>
-          </div>
-          <p class="reply-body">${esc(m.body)}</p>
-          ${
-            m.ai_next_action
-              ? `<p class="reply-action"><span class="mono-label">Recommended</span>${esc(m.ai_next_action)}</p>`
-              : ""
-          }
-        </div>`
-        )
-        .join("")}
-
+      <h3>Did they reply?</h3>
       <label class="field">
         <span>Paste what they wrote back</span>
         <textarea id="reply-body" rows="3" placeholder="e.g. Sounds interesting, send me your deck"></textarea>
       </label>
       <button class="btn btn-sm btn-primary" id="log-reply">Save their reply</button>
-      <p class="hint">Saving a reply switches off your pending reminders, so you never send "just following up" after they have already written back.</p>
+      <p class="hint">Saving a reply switches off your pending reminders, so you never send "just following up" after they've already written back.</p>
     </section>`;
 }
 
@@ -1538,6 +1701,46 @@ function wsExecutionBlock(d) {
         <label class="field"><span>Owner</span><input id="ex-owner" placeholder="who's responsible" /></label>
       </div>
       <button class="btn btn-sm" id="add-exec">Add to the plan</button>
+    </section>`;
+}
+
+/**
+ * How the price moved, under History.
+ *
+ * Package, price and message are one job now, so there is no Proposal section
+ * to hang this off — but the record still matters. V1 ₹10L → V2 ₹8.5L → V3
+ * ₹7.5L, with who changed it and why, is the only way to see how much gets
+ * discounted away and by whom. It just belongs in the record rather than in
+ * the middle of the working screen.
+ */
+function wsPriceHistory(d) {
+  const versions = d.proposals || [];
+  if (!versions.length) return "";
+
+  return `
+    <section class="ws-section">
+      <h3>How the price moved</h3>
+      <div class="ver-list">
+        ${versions
+          .map(
+            (p, i) => `
+          <details class="ver-row-wrap">
+            <summary class="ver-row">
+              <span class="ver-tag">V${p.version}</span>
+              <span class="ver-price">${inrShort(p.price)}</span>
+              ${
+                i < versions.length - 1
+                  ? `<span class="ver-delta">${deltaLabel(p.price, versions[i + 1].price)}</span>`
+                  : `<span class="ver-delta">—</span>`
+              }
+              <span class="muted">${esc(p.user_name || "")} · ${esc(dateOnly(p.created_at))}</span>
+              <span class="ver-note">${esc(p.change_note || "")}</span>
+            </summary>
+            ${p.body ? `<pre class="ver-body">${esc(p.body)}</pre>` : ""}
+          </details>`
+          )
+          .join("")}
+      </div>
     </section>`;
 }
 
@@ -2113,44 +2316,6 @@ function wireWorkspace() {
   }
 
   /* items 22-23 */
-  on("#gen-proposal", "click", () =>
-    guard(async () => {
-      toast("Drafting…");
-      const { draft } = await api(`/api/outreach/${id}/proposal/draft`, { method: "POST" });
-      outreach.proposalDraft = draft;
-      paintAndReveal("#proposal-section");
-    })
-  );
-
-  on("#save-proposal", "click", () =>
-    guard(async () => {
-      const { quote } = await api(`/api/outreach/${id}/proposal`, {
-        method: "POST",
-        body: {
-          body: $("#prop-body", panel).value,
-          price: Number($("#prop-price", panel).value),
-          change_note: $("#prop-note", panel).value,
-        },
-      });
-      outreach.proposalDraft = null;
-      toast(
-        quote.requires_approval ? "Saved — that discount needs your manager's approval" : "Proposal saved",
-        quote.requires_approval
-      );
-      await reloadWorkspace();
-    })
-  );
-
-  for (const btn of $$("[data-copy-proposal]", panel)) {
-    btn.addEventListener("click", () => {
-      const pre = btn.previousElementSibling;
-      navigator.clipboard.writeText(pre ? pre.textContent : "").then(
-        () => toast("Copied"),
-        () => toast("Couldn't copy — select the text and copy manually", true)
-      );
-    });
-  }
-
   /* items 12 & 14 */
   on("#mark-won", "click", () =>
     guard(async () => {
