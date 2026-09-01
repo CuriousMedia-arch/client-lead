@@ -978,3 +978,43 @@
   .rail-step > span { display: none; }
   .rail-step.is-here > span { display: inline; }
 }
+
+/* ── Setup check ──────────────────────────────────────────────────────────── */
+
+/*
+ * Every step shown at once, passed and failed alike. Showing only the first
+ * failure would mean going back to whoever administers the tenant once per
+ * problem — and they are not the person reading this screen.
+ */
+.setup-check {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin: 12px 0;
+  overflow: hidden;
+}
+
+.setup-step {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.setup-step:last-child { border-bottom: 0; }
+.setup-step strong { font-weight: 600; }
+
+.setup-mark {
+  font-size: 14px;
+  line-height: 1.2;
+  flex-shrink: 0;
+  width: 16px;
+}
+.setup-ok   { background: var(--green-tint); }
+.setup-ok   .setup-mark { color: var(--green); }
+.setup-bad  { background: var(--coral-tint); }
+.setup-bad  .setup-mark { color: var(--coral); }
+.setup-skip .setup-mark { color: var(--ink-faint); }
+
+.setup-detail { margin: 2px 0 0; color: var(--ink-soft); }
+/* The instruction is the useful part, so it gets the emphasis. */
+.setup-fix { margin: 6px 0 0; color: var(--ink); font-weight: 500; }

@@ -97,6 +97,7 @@ app.use("/api/outreach", require("./routes/outreach"));
 // that this one is not for humans.
 app.use("/api/cron", require("./routes/cron"));
 app.use("/api/google", require("./routes/google"));
+app.use("/api/microsoft", require("./routes/microsoft"));
 
 // Cheap way to confirm a deploy can reach the database.
 app.get("/api/health", async (req, res) => {

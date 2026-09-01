@@ -121,9 +121,9 @@ async function renderOutreach() {
   // Cheap, cached for the session, and both are needed by the workspace — so
   // fetch them here rather than on every panel open.
   try {
-    outreach.google = await api("/api/google/status");
+    outreach.google = await api("/api/microsoft/status");
   } catch {
-    outreach.google = { configured: false, connected: false };
+    outreach.google = { available: [], connected: null };
   }
   try {
     const { templates } = await api("/api/outreach/meta/templates");
@@ -1524,15 +1524,30 @@ function wsMeetingBlock(d) {
       <h3>Meetings</h3>
 
       ${
-        g.configured && !g.connected
-          ? `<p class="tag-warn">Connect your Google account and meetings booked here get a Meet link automatically, and notes afterwards.
-               <button class="btn btn-sm" id="connect-google">Connect Google</button></p>`
+        !(g.available || []).length
+          ? `<p class="tag-warn">Microsoft isn't set up on this deployment yet, so meetings won't get a Teams link.
+               <button class="btn btn-sm" id="check-ms">Check what's missing</button></p>`
+          : ""
+      }
+      <div id="ms-check"></div>
+      ${
+        (g.available || []).length && !g.connected
+          ? `<p class="tag-warn">Connect your account and meetings booked here get a
+               ${g.available.includes("microsoft") ? "Teams" : "Meet"} link automatically, plus notes afterwards.
+               ${(g.available || [])
+                 .map(
+                   (p) =>
+                     `<button class="btn btn-sm" data-connect="${p}">Connect ${
+                       p === "microsoft" ? "Microsoft" : "Google"
+                     }</button>`
+                 )
+                 .join(" ")}</p>`
           : ""
       }
       ${
         g.connected && g.last_error
-          ? `<p class="tag-warn">Google refused the last request — you may need to reconnect.
-               <button class="btn btn-sm" id="connect-google">Reconnect</button></p>`
+          ? `<p class="tag-warn">${esc(g.label || "Your account")} refused the last request — you may need to reconnect.
+               <button class="btn btn-sm" data-connect="${esc(g.connected)}">Reconnect</button></p>`
           : ""
       }
 
@@ -1550,11 +1565,13 @@ function wsMeetingBlock(d) {
         <label class="field"><span>Anyone else (email)</span><input id="mt-who" placeholder="optional, comma separated" /></label>
       </div>
       <button class="btn btn-sm btn-primary" id="add-meeting">
-        ${g.connected ? "Book it and send a Meet link" : "Add meeting"}
+        ${g.connected ? `Book it and send a ${g.connected === "microsoft" ? "Teams" : "Meet"} link` : "Add meeting"}
       </button>
       ${
         g.connected
-          ? `<p class="hint">This creates the calendar invite, generates the Google Meet link and emails everyone. Your contact is invited automatically.</p>`
+          ? `<p class="hint">This creates the calendar invite, generates the ${
+                 g.connected === "microsoft" ? "Teams" : "Google Meet"
+               } link and emails everyone. Your contact is invited automatically.</p>`
           : ""
       }
     </section>`;
@@ -1569,7 +1586,9 @@ function meetingCard(m) {
         <strong>${esc(shortDateTime(m.scheduled_at))}</strong>
         ${
           m.meet_link
-            ? `<a class="meet-join" href="${esc(m.meet_link)}" target="_blank" rel="noopener">Join Meet</a>`
+            ? `<a class="meet-join" href="${esc(m.meet_link)}" target="_blank" rel="noopener">Join ${
+                m.provider === "microsoft" ? "Teams" : "Meet"
+              }</a>`
             : m.link
             ? `<a href="${esc(m.link)}" target="_blank" rel="noopener">Join</a>`
             : ""
@@ -2182,12 +2201,41 @@ function wireWorkspace() {
   }
 
   /* items 20-21 */
-  on("#connect-google", "click", () =>
+  on("#check-ms", "click", () =>
     guard(async () => {
-      const { url } = await api("/api/google/connect");
-      window.location.href = url;
+      const box = $("#ms-check", panel);
+      box.innerHTML = `<p class="hint">Checking…</p>`;
+      const r = await api("/api/microsoft/check");
+
+      // Every step, with the console that fixes it. Showing only the first
+      // failure would mean four round trips through an admin who isn't you.
+      box.innerHTML = `
+        <div class="setup-check">
+          ${r.steps
+            .map(
+              (s) => `
+            <div class="setup-step setup-${s.ok === true ? "ok" : s.ok === false ? "bad" : "skip"}">
+              <span class="setup-mark">${s.ok === true ? "✓" : s.ok === false ? "✕" : "–"}</span>
+              <div>
+                <strong>${esc(s.name)}</strong>
+                ${s.detail ? `<p class="setup-detail">${esc(s.detail)}</p>` : ""}
+                ${s.fix ? `<p class="setup-fix">${esc(s.fix)}</p>` : ""}
+              </div>
+            </div>`
+            )
+            .join("")}
+        </div>`;
     })
   );
+
+  for (const btn of $$("[data-connect]", panel)) {
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        const { url } = await api(`/api/${btn.dataset.connect}/connect`);
+        window.location.href = url;
+      })
+    );
+  }
 
   on("#add-meeting", "click", () =>
     guard(async () => {

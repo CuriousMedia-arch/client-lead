@@ -128,7 +128,36 @@ one, which catches everybody out at least once.
 
 ---
 
-## Part 4 — Google Meet, Calendar and email (30 min)
+## Part 4 — Meetings, transcripts and email (30 min)
+
+**Use Microsoft, not Google.** Your email is on Microsoft 365, which includes
+Teams — meeting links, transcripts and sending mail all work on licences you
+already pay for. Google Meet cannot produce transcripts at all without a paid
+Google Workspace plan on top.
+
+Full walkthrough: **`MICROSOFT-SETUP.md`**. It needs whoever administers your
+Microsoft tenant for the first four steps.
+
+The short version:
+
+1. Entra admin centre → register an app, redirect URI
+   `https://leads.curiousmedia.in/api/microsoft/callback`
+2. Create a client secret
+3. Add six **delegated** Graph permissions, grant admin consent
+4. Teams admin centre → **Meetings → Meeting settings → Transcript API access
+   → On**. Off by default and enforced since 29 July 2026; nothing works
+   without it.
+5. Add `MS_CLIENT_ID`, `MS_CLIENT_SECRET`, `MS_TENANT_ID`, `MS_REDIRECT_URI`
+   to Vercel → **redeploy**
+6. My Outreach → a lead → Meetings → **Connect Microsoft**
+
+Skip this entirely if you like. The portal works without it — meetings save
+without a link and notes get typed by hand.
+
+<details>
+<summary>Google instead (only if you buy Google Workspace)</summary>
+
+## Part 4b — Google Meet, Calendar and email (30 min)
 
 Full walkthrough with screenshots-worth of detail: **`GOOGLE-SETUP.md`**.
 
@@ -159,6 +188,8 @@ call" finds nothing most of the time.
 
 Skip this part entirely if you like. The portal works without it; meetings just
 save without a Meet link and notes get typed by hand.
+
+</details>
 
 ---
 

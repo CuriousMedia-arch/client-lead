@@ -19,7 +19,8 @@ const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 const pricing = require("../lib/pricing");
 const sweeps = require("../lib/sweeps");
-const gcal = require("../lib/google");
+// Whichever provider the person has connected — Teams or Meet.
+const meetings = require("../lib/meetings");
 const ai = require("../lib/outreachAI");
 
 const router = express.Router();
@@ -1594,7 +1595,7 @@ router.post("/:id/meeting", async (req, res, next) => {
 
     if (req.body.create_meet !== false) {
       try {
-        meet = await gcal.createMeeting(req.user.id, {
+        meet = await meetings.createMeeting(req.user.id, {
           summary: `${opp.company} × Curious Media`,
           description: opp.service_primary
             ? `Discussing ${opp.service_primary}.`
@@ -1615,8 +1616,8 @@ router.post("/:id/meeting", async (req, res, next) => {
     const row = await db.one(
       `INSERT INTO opportunity_meetings
          (opportunity_id, scheduled_at, link, attendees, created_by,
-          calendar_event_id, meet_link, transcript_state)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          calendar_event_id, meet_link, transcript_state, provider)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [
         opp.id,
         start.toISOString(),
@@ -1626,6 +1627,7 @@ router.post("/:id/meeting", async (req, res, next) => {
         meet && meet.eventId,
         meet && meet.meetLink,
         meet ? "pending" : null,
+        meet && meet.provider,
       ]
     );
 
@@ -1637,7 +1639,8 @@ router.post("/:id/meeting", async (req, res, next) => {
       meeting: row,
       meet_created: Boolean(meet),
       meet_error: meetError,
-      google_connected: Boolean(await gcal.accountFor(req.user.id)),
+      provider: meet && meet.provider,
+      google_connected: Boolean((await meetings.statusFor(req.user.id)).connected),
     });
   } catch (err) {
     next(err);
@@ -1669,19 +1672,10 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
       return res.status(403).json({ error: "Not your meeting." });
     }
 
-    const result = await gcal.fetchTranscript(req.user.id, {
+    const result = await meetings.fetchTranscript(req.user.id, {
       eventId: meeting.calendar_event_id,
       meetLink: meeting.meet_link,
     });
-
-    const EXPLAIN = {
-      not_connected: "Connect your Google account first — Settings, then Connect Google.",
-      no_meet_link: "This meeting has no Google Meet link, so there's nothing to fetch.",
-      no_conference_yet: "Google hasn't finished processing this call yet. Try again in a few minutes.",
-      still_processing: "Google is still preparing the transcript. Usually ready within an hour of the call.",
-      transcription_was_off: "Nobody switched transcription on during this call, so there's no record to work from. An admin can turn it on automatically for everyone.",
-      empty_transcript: "The transcript came back empty — nothing was captured.",
-    };
 
     if (result.state !== "ready") {
       await db.run(
@@ -1691,7 +1685,10 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
       );
       return res.json({
         state: result.state,
-        message: EXPLAIN[result.reason] || result.reason || "Couldn't fetch the transcript.",
+        message:
+          meetings.TRANSCRIPT_REASONS[result.reason] ||
+          result.reason ||
+          "Couldn't fetch the transcript.",
       });
     }
 
@@ -1789,14 +1786,14 @@ router.post("/meeting/:meetingId/forward", async (req, res, next) => {
     const subject = req.body.subject || `Notes from our call — ${meeting.company}`;
     const body = req.body.body || filled;
 
-    const result = await gcal.sendMail(req.user.id, { to, subject, body });
+    const result = await meetings.sendMail(req.user.id, { to, subject, body });
 
     if (!result.sent) {
       return res.status(400).json({
         error:
           result.reason === "not_connected"
-            ? "Connect your Google account first — then you can send straight from here."
-            : `Google wouldn't send it: ${result.reason}`,
+            ? "Connect your Microsoft or Google account first — then you can send straight from here."
+            : `Couldn't send it: ${result.reason}`,
         draft: { to, subject, body },
       });
     }

@@ -99,7 +99,8 @@ create table opportunity_meetings (
   structured jsonb default '{}', created_by int, created_at timestamptz default now(),
   calendar_event_id text, meet_link text, conference_record text,
   transcript_state text, transcript_text text,
-  notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text
+  notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text,
+  provider text
 );
 create table opportunity_proposals (
   id serial primary key, opportunity_id int, version int, price numeric, service text,
@@ -127,6 +128,10 @@ create table activity (
 create table contact_claims (
   id serial primary key, contact_id int, user_id int, source text,
   claimed_at timestamptz default now(), released_at timestamptz, release_note text
+);
+create table microsoft_accounts (
+  user_id int primary key, email text, refresh_token text, scopes text,
+  connected_at timestamptz default now(), last_used_at timestamptz, last_error text
 );
 create table google_accounts (
   user_id int primary key, email text, refresh_token text, scopes text,
@@ -582,6 +587,116 @@ async function googleClientScenario() {
   }
 }
 
+/**
+ * The Microsoft side: consent URL, scopes, transcript parsing, and the
+ * provider layer picking the right one.
+ */
+async function microsoftScenario() {
+  console.log("\n  --- Microsoft / Teams ---\n");
+
+  const before = { ...process.env };
+  process.env.MS_CLIENT_ID = "test-client";
+  process.env.MS_CLIENT_SECRET = "test-secret";
+  process.env.MS_TENANT_ID = "test-tenant";
+  process.env.MS_REDIRECT_URI = "https://example.com/api/microsoft/callback";
+  process.env.TOKEN_SECRET = "0123456789abcdef0123456789abcdef";
+
+  const ms = require("../lib/microsoft");
+  const meetings = require("../lib/meetings");
+
+  check("Microsoft reports itself configured", ms.configured() === true, null);
+
+  const url = decodeURIComponent(ms.authUrl(7));
+  check("Consent URL points at the tenant",
+    url.startsWith("https://login.microsoftonline.com/test-tenant/"), null);
+  check("Asks for the transcript scope",
+    /OnlineMeetingTranscript\.Read\.All/.test(url), "delegated, least-privileged");
+  check("Asks for calendar, meetings and mail",
+    /Calendars\.ReadWrite/.test(url) && /OnlineMeetings\.ReadWrite/.test(url) && /Mail\.Send/.test(url),
+    null);
+  // Without offline_access there is no refresh token, and the connection dies
+  // an hour after it is made.
+  check("Asks for offline access", /offline_access/.test(url), null);
+  check("Carries the user id in state", /state=7/.test(url), null);
+
+  // Teams hands back WebVTT; the notes prompt wants speaker-attributed lines.
+  const vtt = [
+    "WEBVTT", "", "1", "00:00:01.000 --> 00:00:04.000",
+    "<v Rahul Sharma>We need pricing by Friday.</v>", "",
+    "2", "00:00:04.500 --> 00:00:06.000",
+    "<v Rahul Sharma>Around eight lakh.</v>", "",
+    "3", "00:00:07.000 --> 00:00:09.000",
+    "<v Priya Nair>I will send it over.</v>",
+  ].join("\n");
+  const lines = ms.vttToLines(vtt).split("\n");
+  check("Transcript strips VTT timing", !/-->/.test(lines.join(" ")), null);
+  check("Transcript keeps speaker names",
+    lines[0].startsWith("Rahul Sharma:") && lines[1].startsWith("Priya Nair:"), null);
+  check("Consecutive lines from one speaker are merged",
+    lines.length === 2 && lines[0].includes("eight lakh"),
+    `${lines.length} lines: ${lines[0].slice(0, 50)}…`);
+
+  // The Graph filter that finds a meeting by its join URL. A Teams link
+  // carries ?context={"Tid":"..."} — braces and quotes that terminate a query
+  // string early if they aren't escaped, and raw spaces in the OData
+  // expression that Graph rejects outright. This is the call the whole
+  // transcript feature depends on.
+  const joinUrl =
+    'https://teams.microsoft.com/l/meetup-join/19:meeting_ZjJl@thread.v2/0' +
+    '?context={"Tid":"abc-123","Oid":"def-456"}';
+  const filter = encodeURIComponent(`JoinWebUrl eq '${joinUrl.replace(/'/g, "''")}'`);
+  const probe = `https://graph.microsoft.com/v1.0/me/onlineMeetings?$filter=${filter}`;
+
+  check("Meeting lookup URL has no raw spaces or braces",
+    !/[ {}"]/.test(probe.split("?$filter=")[1]), null);
+  check("Meeting lookup URL survives a round trip", () => {
+    const back = decodeURIComponent(new URL(probe).searchParams.get("$filter"));
+    return back.includes(joinUrl) ? "join URL intact" : `mangled: ${back.slice(0, 60)}`;
+  });
+
+  // Provider routing: nobody connected yet.
+  const status = await meetings.statusFor(1);
+  check("Both providers are offered when neither is connected",
+    status.available.includes("microsoft") && !status.connected,
+    `available: ${status.available.join(", ")}`);
+
+  // Connect Microsoft, and it must win over Google.
+  const { encrypt } = require("../lib/tokens");
+  mem.public.none(
+    `insert into microsoft_accounts (user_id, email, refresh_token)
+     values (1, 'vihith@curiousmedia.in', '${encrypt("fake-refresh")}')`
+  );
+  const after = await meetings.statusFor(1);
+  check("Connecting Microsoft makes it the active provider",
+    after.connected === "microsoft" && after.label === "Microsoft Teams",
+    `${after.label} (${after.email})`);
+
+  check("A blocked tenant is explained, not just failed",
+    /Teams admin centre/.test(meetings.TRANSCRIPT_REASONS.tenant_switch_off),
+    "names the exact setting");
+
+  // The setup check has to survive being run before anything is configured —
+  // that is exactly when someone reaches for it.
+  const diag = await ms.diagnose(1);
+  check("Setup check runs and reports steps",
+    Array.isArray(diag.steps) && diag.steps.length > 0, `${diag.steps.length} steps`);
+  check("Setup check names a fix for whatever failed", () => {
+    const failed = diag.steps.filter((x) => x.ok === false);
+    if (!failed.length) return "nothing failed";
+    return failed.every((x) => x.fix) ? `${failed.length} failure(s), all with a fix` : "a failure had no fix text";
+  });
+
+  mem.public.none("delete from microsoft_accounts");
+  const bare = await ms.diagnose(1);
+  check("Setup check tells an unconnected user to connect",
+    bare.steps.some((x) => /connected your Microsoft/i.test(x.name) && x.ok === false),
+    "stops at the right step");
+
+  for (const k of ["MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID", "MS_REDIRECT_URI"]) {
+    if (before[k] === undefined) delete process.env[k];
+  }
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -696,6 +811,7 @@ async function run() {
   await clockScenario();
   await newFeaturesScenario();
   await googleClientScenario();
+  await microsoftScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();
