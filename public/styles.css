@@ -2560,3 +2560,35 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 
 /* Why something was handed back, wherever it can be picked up again. */
 .release-note .mono-label { display: block; margin-bottom: 2px; color: var(--amber-ink); opacity: .75; }
+
+/* ── News watchlist ───────────────────────────────────────────────────────── */
+
+/* The cost sits at the top because it is the reason this screen exists. */
+.wl-summary {
+  background: var(--surface-sunk);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.wl-bulk { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+
+.wl-list { max-height: 380px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+
+.wl-row {
+  display: grid;
+  grid-template-columns: 22px minmax(140px, 1.6fr) minmax(100px, 1fr) 90px 100px;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.wl-row:last-child { border-bottom: 0; }
+.wl-row:hover { background: var(--surface-sunk); }
+.wl-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Watched rows are the ones costing money, so they are the ones that stand out. */
+.wl-row.is-on .wl-name { font-weight: 600; }
+.wl-name { color: var(--ink); }
+.wl-quiet { color: var(--coral); }

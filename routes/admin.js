@@ -344,6 +344,116 @@ router.patch("/users/:id", async (req, res, next) => {
 
 
 
+/* ── which companies get scanned for news ─────────────────────────────────── */
+
+/**
+ * The news watchlist.
+ *
+ * `active` on a company has always decided whether the scraper looks for news
+ * about it — services/pipeline.js reads `WHERE active`. What was missing was
+ * any way to manage that in bulk, so an import of 4,000 companies quietly put
+ * all 4,000 on the watchlist.
+ *
+ * That matters because the news provider charges per company per scan. At
+ * 4,000 companies scanned every three days it is roughly ₹52,000 a month;
+ * watching only the 500 you are actually working is about a tenth of that.
+ * This screen is the difference.
+ */
+router.get("/watchlist", requireAdmin, async (req, res, next) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const only = req.query.only;         // watched | unwatched | undefined
+
+    const where = ["c.is_sample = false", "c.approval = 'approved'"];
+    const args = [];
+    if (q) {
+      args.push(`%${q}%`);
+      where.push(`(lower(c.name) LIKE $${args.length} OR lower(COALESCE(c.industry,'')) LIKE $${args.length})`);
+    }
+    if (only === "watched") where.push("c.active");
+    if (only === "unwatched") where.push("NOT c.active");
+
+    const [rows, totals] = await Promise.all([
+      db.all(
+        `SELECT c.id, c.name, c.industry, c.active,
+                (SELECT COUNT(*)::int FROM company_contacts cc
+                  WHERE lower(cc.company) = lower(c.name) AND cc.deleted_at IS NULL) AS contacts,
+                (SELECT COUNT(*)::int FROM signals s
+                  WHERE lower(s.company) = lower(c.name)
+                    AND s.created_at > now() - interval '90 days') AS signals_90d
+           FROM companies c
+          WHERE ${where.join(" AND ")}
+          ORDER BY c.active DESC, lower(c.name)
+          LIMIT 300`,
+        args
+      ),
+      db.one(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE active)::int AS watched
+           FROM companies
+          WHERE is_sample = false AND approval = 'approved'`
+      ),
+    ]);
+
+    res.json({ companies: rows, ...totals });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/watchlist", requireAdmin, async (req, res, next) => {
+  try {
+    const on = Boolean(req.body.active);
+
+    // Bulk actions come as a filter rather than 4,000 ids, because sending
+    // every id would blow the request body limit at exactly the size where
+    // someone most wants a bulk action.
+    if (req.body.scope === "all") {
+      await db.run(
+        `UPDATE companies SET active = $1 WHERE is_sample = false AND approval = 'approved'`,
+        [on]
+      );
+    } else if (req.body.scope === "no_signals") {
+      // Nothing newsworthy in three months. These are what you stop paying
+      // to watch first — the scan finds nothing and costs the same.
+      await db.run(
+        `UPDATE companies c SET active = $1
+          WHERE c.is_sample = false AND c.approval = 'approved'
+            AND NOT EXISTS (
+              SELECT 1 FROM signals s
+               WHERE lower(s.company) = lower(c.name)
+                 AND s.created_at > now() - interval '90 days')`,
+        [on]
+      );
+    } else if (req.body.scope === "unclaimed") {
+      // Nobody is working them, so nobody reads the news about them.
+      await db.run(
+        `UPDATE companies c SET active = $1
+          WHERE c.is_sample = false AND c.approval = 'approved'
+            AND NOT EXISTS (
+              SELECT 1 FROM company_contacts cc
+               WHERE lower(cc.company) = lower(c.name)
+                 AND cc.owner_id IS NOT NULL AND cc.deleted_at IS NULL)`,
+        [on]
+      );
+    } else {
+      const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+      if (!ids.length) return res.status(400).json({ error: "Nothing selected." });
+      for (const id of ids) {
+        await db.run("UPDATE companies SET active = $1 WHERE id = $2", [on, id]);
+      }
+    }
+
+    const totals = await db.one(
+      `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE active)::int AS watched
+         FROM companies WHERE is_sample = false AND approval = 'approved'`
+    );
+    res.json({ ok: true, ...totals });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- CSV import --------------------------------------------------------------
 
 /**

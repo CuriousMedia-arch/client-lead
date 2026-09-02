@@ -35,6 +35,7 @@ const outreach = {
   recommending: false,
   pitchTab: "email",
   wsTab: "now",
+  editingExec: null,
   google: {},              // whether Google is set up / connected
   deckLink: null,          // the packages deck, from the admin templates
   noteMessages: {},        // per-meeting explanation of why notes aren't ready
@@ -204,7 +205,7 @@ async function renderToday() {
     ["new", "Not started", c.new, "you haven't contacted them yet", ""],
     ["replied", "They replied", c.replied, "waiting for your answer", c.replied ? "is-urgent" : ""],
     ["meeting", "Meetings today", c.meeting, "happening today", ""],
-    ["proposal", "Waiting on price approval", c.proposal, "sent, or with your manager", ""],
+    ["proposal", "Quoted", c.proposal, "price is out with them", ""],
     ["working", "In progress", c.working || 0, "live conversations, nothing due", ""],
   ];
 
@@ -228,6 +229,7 @@ async function renderToday() {
 
   body.innerHTML = `
     <div class="stats today-slabs">
+      ${targetSlab(data.target)}
       ${slabs
         .map(
           ([key, label, value, note, tone]) => `
@@ -284,6 +286,39 @@ async function renderToday() {
  * Where the classifier has written one it wins, because it read the actual
  * reply and this function only knows which bucket the card is in.
  */
+/**
+ * This month's target.
+ *
+ * Sits before the workload counts because it is the only number on the screen
+ * that says whether the month is going well — the rest say how busy you are,
+ * which is not the same thing.
+ *
+ * Shows what is LEFT rather than what is done: "₹4L to go" is a decision about
+ * today, "₹6L achieved" is a fact about the past.
+ */
+function targetSlab(t) {
+  if (!t || !t.target) return "";
+
+  const done = t.pct != null && t.pct >= 100;
+  const pct = Math.min(t.pct || 0, 100);
+
+  return `
+    <div class="target-slab ${done ? "is-done" : ""}">
+      <div class="target-head">
+        <span class="mono-label">This month</span>
+        <span class="target-figure">
+          ${done
+            ? `Target met — ${inrShort(t.achieved)} of ${inrShort(t.target)}`
+            : `${inrShort(t.remaining)} to go`}
+        </span>
+      </div>
+      <div class="target-bar"><i style="width:${pct}%"></i></div>
+      <p class="target-note">
+        ${inrShort(t.achieved)} of ${inrShort(t.target)} · ${t.deals} deal${t.deals === 1 ? "" : "s"} won
+      </p>
+    </div>`;
+}
+
 function todayCard(o, bucket) {
   const action =
     o.next_action ||
@@ -611,6 +646,13 @@ async function renderPricing() {
     </section>
 
     <section class="intel-block">
+      <h3>This month's targets</h3>
+      <p class="hint">What each salesperson is aiming for. Only you can change these, and they apply to the current month — raising someone's target now doesn't rewrite what they were measured against last month.</p>
+      <div id="target-rows"><p class="hint">Loading…</p></div>
+      <button class="btn btn-primary" id="save-targets">Save targets</button>
+    </section>
+
+    <section class="intel-block">
       <h3>Wording and templates</h3>
       <p class="hint">Everything the portal writes on your behalf. Change it here and it applies everywhere — no code change needed. Placeholders like <code>{{company}}</code> get filled in automatically.</p>
       ${templates
@@ -661,6 +703,43 @@ async function renderPricing() {
       await api("/api/outreach/meta/rate-card", { method: "PUT", body: payload });
       toast("Saved");
       renderPricing();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  // Targets load after the page so a slow query doesn't hold up Settings.
+  api("/api/outreach/meta/targets")
+    .then(({ targets }) => {
+      $("#target-rows").innerHTML = targets.length
+        ? targets
+            .map(
+              (t) => `
+          <div class="target-row" data-target-user="${t.id}">
+            <span>${esc(t.display_name)}</span>
+            <input type="number" value="${Number(t.amount) || 0}" data-target-amount />
+            <span class="muted">${inrShort(t.achieved)} won so far</span>
+          </div>`
+            )
+            .join("")
+        : `<p class="muted">No salespeople to set targets for.</p>`;
+    })
+    .catch((err) => {
+      $("#target-rows").innerHTML = `<p class="hint">Couldn't load targets: ${esc(err.message)}</p>`;
+    });
+
+  $("#save-targets").addEventListener("click", async () => {
+    try {
+      await api("/api/outreach/meta/targets", {
+        method: "PUT",
+        body: {
+          targets: $$("[data-target-user]").map((el) => ({
+            user_id: Number(el.dataset.targetUser),
+            amount: Number(el.querySelector("[data-target-amount]").value) || 0,
+          })),
+        },
+      });
+      toast("Targets saved");
     } catch (err) {
       toast(err.message, true);
     }
@@ -1611,6 +1690,7 @@ function meetingCard(m) {
                <p class="meet-notes">${esc(m.notes)}</p>
                <div class="ws-actions">
                  <button class="btn btn-sm" data-forward-notes="${m.id}">Email these notes</button>
+                 <a class="btn btn-sm" href="/api/outreach/meeting/${m.id}/pdf" target="_blank" rel="noopener">Save as PDF</a>
                  ${
                    m.notes_sent_at
                      ? `<span class="muted">Sent to ${esc(m.notes_sent_to || "")} on ${esc(dateOnly(m.notes_sent_at))}</span>`
@@ -1675,8 +1755,21 @@ function wsExecutionBlock(d) {
 
   return `
     <section class="ws-section" id="execution-section">
-      <h3>Execution plan</h3>
-      <p class="hint">What we've promised to deliver, by when, and who owns it.</p>
+      <h3>Delivery</h3>
+      <p class="hint">What we've promised, by when, and who owns it.</p>
+
+      <div class="grid-3">
+        <label class="field"><span>Budget ₹</span>
+          <input type="number" id="dl-budget" value="${Number(o.delivery_budget || 0)}" /></label>
+        <label class="field"><span>Client contact</span>
+          <input id="dl-client" value="${esc(o.delivery_client_poc || "")}" placeholder="their side" /></label>
+        <label class="field"><span>Our contact</span>
+          <input id="dl-agency" value="${esc(o.delivery_agency_poc || "")}" placeholder="who runs it here" /></label>
+      </div>
+      <button class="btn btn-sm" id="save-delivery">Save details</button>
+
+      <div class="section-split"></div>
+      <h4 class="ws-subhead">Deliverables and timeline</h4>
 
       ${
         items.length
@@ -1685,8 +1778,21 @@ function wsExecutionBlock(d) {
                  <span>Deliverable</span><span>Due</span><span>Owner</span><span>Status</span><span></span>
                </div>
                ${items
-                 .map(
-                   (it) => `
+                 .map((it) =>
+                   outreach.editingExec === it.id
+                     ? `<div class="exec-row exec-editing">
+                          <input class="exec-edit" data-e="deliverable" value="${esc(it.deliverable)}" />
+                          <input class="exec-edit" data-e="due_date" type="date" value="${
+                            it.due_date ? String(it.due_date).slice(0, 10) : ""
+                          }" />
+                          <input class="exec-edit" data-e="owner_name" value="${esc(it.owner_name || "")}" />
+                          <span></span>
+                          <span>
+                            <button class="btn btn-sm btn-primary" data-exec-save="${it.id}">Save</button>
+                            <button class="btn btn-sm btn-ghost" data-exec-cancel="1">Cancel</button>
+                          </span>
+                        </div>`
+                     : `
                  <div class="exec-row exec-${esc(it.status)}">
                    <span class="exec-what">${esc(it.deliverable)}</span>
                    <span class="exec-due ${
@@ -1705,7 +1811,10 @@ function wsExecutionBlock(d) {
                          .join("")}
                      </select>
                    </span>
-                   <span><button class="btn btn-sm btn-ghost" data-exec-remove="${it.id}">Remove</button></span>
+                   <span>
+                     <button class="btn btn-sm btn-ghost" data-exec-edit="${it.id}">Edit</button>
+                     <button class="btn btn-sm btn-ghost" data-exec-remove="${it.id}">Remove</button>
+                   </span>
                  </div>`
                  )
                  .join("")}
@@ -1719,7 +1828,7 @@ function wsExecutionBlock(d) {
         <label class="field"><span>Due</span><input type="date" id="ex-due" /></label>
         <label class="field"><span>Owner</span><input id="ex-owner" placeholder="who's responsible" /></label>
       </div>
-      <button class="btn btn-sm" id="add-exec">Add to the plan</button>
+      <button class="btn btn-sm" id="add-exec">Save</button>
     </section>`;
 }
 
@@ -1868,6 +1977,15 @@ function wsCloseBlock(d) {
       <div class="ws-actions">
         <button class="btn btn-sm btn-primary" id="mark-won">We won this</button>
         <button class="btn btn-sm btn-danger" id="open-lost">We lost this</button>
+      </div>
+
+      <div id="won-form" hidden>
+        <label class="field">
+          <span>What did it close for? ₹</span>
+          <input type="number" id="won-value" value="${Number(o.quoted_price || 0)}" />
+        </label>
+        <p class="hint">This is what counts toward your monthly target — the signed figure, not the quote.</p>
+        <button class="btn btn-primary" id="mark-won-confirm">Confirm won</button>
       </div>
       ${
         o.approval_status === "pending"
@@ -2336,6 +2454,55 @@ function wireWorkspace() {
     );
   }
 
+  on("#save-delivery", "click", () =>
+    guard(async () => {
+      await api(`/api/outreach/${id}/delivery`, {
+        method: "POST",
+        body: {
+          budget: Number($("#dl-budget", panel).value) || null,
+          client_poc: $("#dl-client", panel).value || null,
+          agency_poc: $("#dl-agency", panel).value || null,
+        },
+      });
+      toast("Delivery details saved");
+      await reloadWorkspace();
+    })
+  );
+
+  for (const btn of $$("[data-exec-edit]", panel)) {
+    btn.addEventListener("click", () => {
+      outreach.editingExec = Number(btn.dataset.execEdit);
+      paintWorkspace();
+    });
+  }
+
+  on("[data-exec-cancel]", "click", () => {
+    outreach.editingExec = null;
+    paintWorkspace();
+  });
+
+  for (const btn of $$("[data-exec-save]", panel)) {
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        const row = btn.closest(".exec-row");
+        const field = (name) => {
+          const el = row.querySelector(`[data-e="${name}"]`);
+          return el && el.value ? el.value : null;
+        };
+        await api(`/api/outreach/execution/${btn.dataset.execSave}`, {
+          method: "PATCH",
+          body: {
+            deliverable: field("deliverable"),
+            due_date: field("due_date"),
+            owner_name: field("owner_name"),
+          },
+        });
+        outreach.editingExec = null;
+        await reloadWorkspace();
+      })
+    );
+  }
+
   for (const btn of $$("[data-exec-remove]", panel)) {
     btn.addEventListener("click", () =>
       guard(async () => {
@@ -2365,14 +2532,32 @@ function wireWorkspace() {
 
   /* items 22-23 */
   /* items 12 & 14 */
-  on("#mark-won", "click", () =>
+  const confirmWon = () => {
+    // Ask what it actually closed for. The quote and the signature are rarely
+    // the same number, and this is the figure that counts toward the target —
+    // so guessing it from the quote would quietly overstate the month.
+    const box = $("#won-form", panel);
+    if (box && box.hidden) {
+      box.hidden = false;
+      const input = $("#won-value", panel);
+      if (input) input.focus();
+      return;
+    }
+
     guard(async () => {
-      await api(`/api/outreach/${id}/stage`, { method: "POST", body: { stage: "won" } });
-      toast("Marked won");
+      const value = Number($("#won-value", panel).value);
+      await api(`/api/outreach/${id}/stage`, {
+        method: "POST",
+        body: { stage: "won", closed_value: value > 0 ? value : null },
+      });
+      toast(value > 0 ? `Won at ${inrShort(value)}` : "Marked won");
       await reloadWorkspace();
       renderOutreach();
-    })
-  );
+    });
+  };
+
+  on("#mark-won", "click", confirmWon);
+  on("#mark-won-confirm", "click", confirmWon);
 
   on("#open-lost", "click", () => {
     const form = $("#lost-form", panel);

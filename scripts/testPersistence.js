@@ -74,7 +74,8 @@ create table opportunities (
   approved_by int, approval_at timestamptz,
   next_action text, next_action_at timestamptz,
   last_contacted_at timestamptz, last_reply_at timestamptz,
-  won_at timestamptz, lost_at timestamptz, won_value numeric,
+  won_at timestamptz, lost_at timestamptz, won_value numeric, closed_value numeric,
+  delivery_budget numeric, delivery_client_poc text, delivery_agency_poc text,
   silent_until timestamptz, focus_contact_id int,
   deadline_at timestamptz, deadline_kind text,
   created_at timestamptz default now(), updated_at timestamptz
@@ -100,7 +101,8 @@ create table opportunity_meetings (
   calendar_event_id text, meet_link text, conference_record text,
   transcript_state text, transcript_text text,
   notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text,
-  provider text
+  provider text, transcript_source text, fathom_recording_id text,
+  fathom_share_url text, fathom_summary text
 );
 create table opportunity_proposals (
   id serial primary key, opportunity_id int, version int, price numeric, service text,
@@ -129,6 +131,11 @@ create table contact_claims (
   id serial primary key, contact_id int, user_id int, source text,
   claimed_at timestamptz default now(), released_at timestamptz, release_note text
 );
+create table fathom_unmatched (
+  id serial primary key, recording_id text unique, title text,
+  started_at timestamptz, emails jsonb default '[]', share_url text,
+  transcript text, created_at timestamptz default now()
+);
 create table microsoft_accounts (
   user_id int primary key, email text, refresh_token text, scopes text,
   connected_at timestamptz default now(), last_used_at timestamptz, last_error text
@@ -143,6 +150,11 @@ create table opportunity_execution (
   sort int default 0, created_by int,
   created_at timestamptz default now(), updated_at timestamptz default now()
 );
+create table sales_targets (
+  id serial primary key, user_id int, period date, amount numeric default 0,
+  set_by int, updated_at timestamptz default now()
+);
+create unique index idx_target_up on sales_targets (user_id, period);
 create table content_templates (
   key text primary key, label text, body text, hint text, sort int default 0,
   updated_by int, updated_at timestamptz default now()
@@ -172,7 +184,8 @@ insert into content_templates (key,label,sort,body) values
   ('deck_link','Deck',3,''),
   ('followup_1','FU1',4,''),('followup_2','FU2',5,''),
   ('followup_3','FU3',6,''),('followup_4','FU4',7,''),
-  ('meeting_notes_email','Notes email',8,'Hi {{contact}},\n\n{{notes}}\n\nBest,\n{{sender}}');
+  ('meeting_notes_email','Notes email',8,'Hi {{contact}},\n\n{{notes}}\n\nBest,\n{{sender}}'),
+  ('notes_source','Who writes the summary',9,'fathom');
 insert into pricing_settings (key,value) values
   ('guardrail','{"max_discount_pct":20}'),
   ('followup_cadence','{"step1_days":3,"step2_days":7,"step3_days":14,"step4_days":30,"nudge_after_hours":12,"release_after_hours":24}');
@@ -565,8 +578,11 @@ async function googleClientScenario() {
   if (url) {
     check("Consent URL builds", url.startsWith("https://accounts.google.com"), null);
     check("Asks for every scope we need",
-      /calendar\.events/.test(url) && /meetings\.space/.test(url) && /gmail\.send/.test(url),
-      "calendar + meet + gmail");
+      /calendar\.events/.test(url) && /meetings\.space/.test(url),
+      "calendar + meet");
+    // No Gmail: these are free Google accounts on an existing address, so
+    // there is no mailbox to send from and the scope would never be usable.
+    check("Doesn't ask for Gmail it can't use", !/gmail/.test(url), null);
     // Without both of these Google only returns a refresh token the very first
     // time a person ever consents, and reconnecting silently produces an
     // account that dies an hour later.
@@ -697,6 +713,165 @@ async function microsoftScenario() {
   }
 }
 
+/**
+ * Fathom: signature checking, transcript shaping, and matching a recording to
+ * the right meeting. Matching is the part worth testing hardest — attaching a
+ * client's transcript to the wrong company would be far worse than attaching
+ * it to none.
+ */
+async function fathomScenario() {
+  console.log("\n  --- Fathom ---\n");
+
+  const crypto = require("crypto");
+  process.env.FATHOM_WEBHOOK_SECRET = "test-webhook-secret";
+  process.env.FATHOM_API_KEY = "test-api-key";
+  const f = require("../lib/fathom");
+
+  // --- signature ---
+  const body = Buffer.from(JSON.stringify({ recording_id: "rec_1" }));
+  const good = crypto.createHmac("sha256", "test-webhook-secret").update(body).digest("hex");
+
+  check("A correctly signed webhook is accepted", f.verifySignature(body, good).ok, null);
+  check("A wrongly signed webhook is rejected", !f.verifySignature(body, "deadbeef").ok, null);
+  check("An unsigned webhook is rejected", !f.verifySignature(body, null).ok, null);
+  check("The sha256= prefix is tolerated", f.verifySignature(body, `sha256=${good}`).ok, null);
+  // The signature covers the raw bytes; re-serialising changes them.
+  const reserialised = Buffer.from(JSON.stringify({ recording_id: "rec_1", extra: 1 }));
+  check("A tampered body is rejected", !f.verifySignature(reserialised, good).ok, null);
+
+  // --- transcript shaping ---
+  const lines = f.transcriptToLines([
+    { speaker: { display_name: "Rahul Sharma" }, text: "We need pricing by Friday." },
+    { speaker: { display_name: "Rahul Sharma" }, text: "Around eight lakh." },
+    { speaker: { display_name: "Riya" }, text: "I will send it over." },
+  ]).split("\n");
+  check("Transcript keeps speakers and merges their runs",
+    lines.length === 2 && lines[0].includes("eight lakh"),
+    `${lines.length} lines`);
+  check("A plain-string transcript still works",
+    f.transcriptToLines("Rahul: hello") === "Rahul: hello", null);
+
+  // --- matching ---
+  mem.public.none(`
+    insert into companies (name, industry) values ('Fathom Co','Retail');
+    insert into company_contacts (company, name, email, owner_id, claim_source, status)
+      values ('Fathom Co','Neha S','neha@fathomco.com',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Fathom Co'")[0].id;
+  const oid = (await call("POST", "/api/outreach/open", { contact_id: cid })).json.opportunity.id;
+
+  const when = new Date(Date.now() + 3600e3).toISOString();
+  const created = await call("POST", `/api/outreach/${oid}/meeting`, {
+    scheduled_at: when, attendees: "neha@fathomco.com",
+  });
+  const meetingId = created.json.meeting.id;
+  mem.public.none(
+    `update opportunity_meetings set meet_link = 'https://meet.google.com/abc-defg-hij' where id = ${meetingId}`
+  );
+
+  const byLink = await f.matchMeeting({
+    meetingUrl: "https://meet.google.com/abc-defg-hij", startedAt: when, emails: [],
+  });
+  check("Matches on the meeting link",
+    byLink && String(byLink.meeting.id) === String(meetingId), byLink && byLink.how);
+
+  const byEmail = await f.matchMeeting({
+    meetingUrl: null, startedAt: when, emails: ["neha@fathomco.com"],
+  });
+  check("Matches on who was invited",
+    byEmail && String(byEmail.meeting.id) === String(meetingId), byEmail && byEmail.how);
+
+  const byTime = await f.matchMeeting({ meetingUrl: null, startedAt: when, emails: [] });
+  check("Falls back to the time when only one meeting fits",
+    byTime && String(byTime.meeting.id) === String(meetingId), byTime && byTime.how);
+
+  // The important negative: an unrelated internal call must not be attached.
+  const unrelated = await f.matchMeeting({
+    meetingUrl: null,
+    startedAt: new Date(Date.now() + 20 * 864e5).toISOString(),
+    emails: ["someone@elsewhere.com"],
+  });
+  check("Refuses to attach an unrelated recording", unrelated === null,
+    unrelated ? `wrongly matched meeting ${unrelated.meeting.id}` : "left unmatched");
+
+  // --- whose summary shows up ---
+  const routes = require("../routes/fathom");
+
+  check("Fathom's summary is the default", (await routes.notesSource()) === "fathom", null);
+
+  mem.public.none("update content_templates set body = 'portal' where key = 'notes_source'");
+  check("It can be switched back without a deploy",
+    (await routes.notesSource()) === "portal", "read from settings");
+  mem.public.none("update content_templates set body = 'fathom' where key = 'notes_source'");
+
+  // Fathom's summary arrives in two shapes and both have to work.
+  check("Reads a markdown summary object",
+    f.summaryText({ markdown_formatted: "## Recap\nThey want pricing." }).includes("pricing"), null);
+  check("Reads a plain string summary",
+    f.summaryText("They want pricing.") === "They want pricing.", null);
+  check("Action items become a list", () => {
+    const out = f.actionItemsText([
+      { description: "Send the deck", assignee: { name: "Riya" } },
+      "Follow up Friday",
+    ]);
+    return out.includes("Send the deck — Riya") && out.includes("Follow up Friday")
+      ? "formatted"
+      : `got: ${out}`;
+  });
+
+  delete process.env.FATHOM_WEBHOOK_SECRET;
+  delete process.env.FATHOM_API_KEY;
+}
+
+/** Monthly targets, and a won deal counting against them. */
+async function targetScenario() {
+  console.log("\n  --- monthly target ---\n");
+
+  const period = new Date();
+  const first = new Date(Date.UTC(period.getUTCFullYear(), period.getUTCMonth(), 1))
+    .toISOString().slice(0, 10);
+
+  const saved = await call("PUT", "/api/outreach/meta/targets", {
+    targets: [{ user_id: 1, amount: 1000000 }],
+  });
+  check("An admin can set a target", saved.status === 200, saved.status === 200 ? null : saved.raw);
+
+  // Measured as a delta, not an absolute — earlier scenarios in this file have
+  // already won deals, and hard-coding a starting figure would make this test
+  // fail whenever one of those changes.
+  const before = await call("GET", "/api/outreach/meta/target");
+  check("Target reads back what was set", Number(before.json.target) === 1000000,
+    `target ${before.json.target}, ${before.json.achieved} already won`);
+
+  // Win something for less than it was quoted.
+  mem.public.none(`
+    insert into companies (name) values ('Target Co');
+    insert into company_contacts (company, name, owner_id, claim_source, status)
+      values ('Target Co','Ravi K',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Target Co'")[0].id;
+  const oid = (await call("POST", "/api/outreach/open", { contact_id: cid })).json.opportunity.id;
+  mem.public.none(`update opportunities set quoted_price = 500000 where id = ${oid}`);
+
+  const won = await call("POST", `/api/outreach/${oid}/stage`, {
+    stage: "won", closed_value: 400000,
+  });
+  check("Closing won takes a figure", won.status === 200, won.status === 200 ? null : won.raw);
+
+  const row = mem.public.many(`select closed_value, quoted_price from opportunities where id = ${oid}`)[0];
+  // The signed figure, not the quote — otherwise the month is overstated.
+  check("The signed figure is stored, not the quote",
+    Number(row.closed_value) === 400000 && Number(row.quoted_price) === 500000,
+    `closed ${row.closed_value} vs quoted ${row.quoted_price}`);
+
+  const after = await call("GET", "/api/outreach/meta/target");
+  const gained = Number(after.json.achieved) - Number(before.json.achieved);
+  check("The signed figure comes off the target", gained === 400000,
+    `achieved rose by ${gained}, now ${after.json.achieved} of ${after.json.target}`);
+  check("Remaining never goes negative", Number(after.json.remaining) >= 0,
+    `${after.json.remaining} to go`);
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -812,6 +987,8 @@ async function run() {
   await newFeaturesScenario();
   await googleClientScenario();
   await microsoftScenario();
+  await fathomScenario();
+  await targetScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();

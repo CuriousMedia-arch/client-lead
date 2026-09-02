@@ -21,6 +21,7 @@ const pricing = require("../lib/pricing");
 const sweeps = require("../lib/sweeps");
 // Whichever provider the person has connected — Teams or Meet.
 const meetings = require("../lib/meetings");
+const fathom = require("../lib/fathom");
 const ai = require("../lib/outreachAI");
 
 const router = express.Router();
@@ -492,7 +493,7 @@ router.get("/today", async (req, res, next) => {
       if (waitingOnUs) buckets.replied.push(o);
       else if (o.countdown && (o.countdown.overdue || o.countdown.urgent)) buckets.urgent.push(o);
       else if (o.meeting_today) buckets.meeting.push(o);
-      else if (o.approval_status === "pending" || o.stage === "proposal") buckets.proposal.push(o);
+      else if (o.stage === "proposal" || o.stage === "negotiation") buckets.proposal.push(o);
       else if (o.due_followup) buckets.followup.push(o);
       else if (o.stage === "new") buckets.new.push(o);
       else buckets.working.push(o);
@@ -500,6 +501,7 @@ router.get("/today", async (req, res, next) => {
 
     res.json({
       buckets,
+      target: await targetFor(req.user.id),
       counts: {
         urgent: buckets.urgent.length,
         followup: buckets.followup.length,
@@ -1672,10 +1674,26 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
       return res.status(403).json({ error: "Not your meeting." });
     }
 
-    const result = await meetings.fetchTranscript(req.user.id, {
+    let result = await meetings.fetchTranscript(req.user.id, {
       eventId: meeting.calendar_event_id,
       meetLink: meeting.meet_link,
     });
+
+    /*
+     * Fathom as the fallback.
+     *
+     * The meeting provider only has a transcript when the plan allows it and
+     * someone switched it on — a free Google account never does. Fathom's bot
+     * records the call itself, so when the provider comes back empty we ask
+     * Fathom whether it caught this one.
+     *
+     * Second, not first: when Teams or Meet does have the transcript it is
+     * free, instant, and there is no bot sitting in the client's call.
+     */
+    if (result.state !== "ready" && fathom.configured()) {
+      const caught = await fathomTranscriptFor(meeting);
+      if (caught) result = { state: "ready", text: caught.text, source: "fathom", info: caught.info };
+    }
 
     if (result.state !== "ready") {
       await db.run(
@@ -1686,6 +1704,9 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
       return res.json({
         state: result.state,
         message:
+          (fathom.configured() && result.reason === "transcription_was_off"
+            ? "Neither the meeting platform nor Fathom has a recording of this call. Check the Fathom bot was invited."
+            : null) ||
           meetings.TRANSCRIPT_REASONS[result.reason] ||
           result.reason ||
           "Couldn't fetch the transcript.",
@@ -1720,6 +1741,7 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
       `UPDATE opportunity_meetings
           SET transcript_state = 'ready',
               transcript_text = $2,
+              transcript_source = COALESCE($9, transcript_source, 'provider'),
               conference_record = COALESCE($3, conference_record),
               notes = COALESCE(NULLIF(notes, ''), $4),
               outcome = COALESCE(outcome, $5),
@@ -1735,10 +1757,17 @@ router.post("/meeting/:meetingId/fetch-notes", async (req, res, next) => {
         structured.outcome || null,
         structured.requirement || null,
         JSON.stringify(structured),
+        result.source || null,
       ]
     );
 
-    res.json({ state: "ready", meeting: row, structured, ai_source: structured.source });
+    res.json({
+      state: "ready",
+      meeting: row,
+      structured,
+      ai_source: structured.source,
+      transcript_source: result.source || "provider",
+    });
   } catch (err) {
     next(err);
   }
@@ -1810,6 +1839,125 @@ router.post("/meeting/:meetingId/forward", async (req, res, next) => {
     );
 
     res.json({ sent: true, to });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Did Fathom record this meeting?
+ *
+ * Matches on the same rules the webhook uses, so the button and the automatic
+ * path can never disagree about which recording belongs to which meeting.
+ */
+async function fathomTranscriptFor(meeting) {
+  try {
+    // Fathom's own list endpoint, narrowed to the day of the meeting.
+    const day = new Date(meeting.scheduled_at).toISOString().slice(0, 10);
+    const res = await fetch(
+      `https://api.fathom.ai/external/v1/meetings?created_after=${day}&include_transcript=true`,
+      { headers: { "X-Api-Key": process.env.FATHOM_API_KEY, Accept: "application/json" } }
+    );
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    for (const item of data.items || data.meetings || []) {
+      const info = fathom.normalise(item);
+      if (!info.transcript) continue;
+
+      const match = await fathom.matchMeeting(info);
+      if (match && String(match.meeting.id) === String(meeting.id)) {
+        return { text: info.transcript, info };
+      }
+    }
+    return null;
+  } catch (err) {
+    console.warn("[fathom] lookup failed:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Meeting notes as a PDF.
+ *
+ * Generated as HTML and handed to the browser to print, rather than built with
+ * a PDF library. A PDF toolkit is a heavy dependency on the cold-start path —
+ * the exact thing that was making the whole portal slow — and every browser
+ * already has a good PDF writer built in. The page opens with the print dialog
+ * up; "Save as PDF" is the default destination.
+ */
+router.get("/meeting/:meetingId/pdf", async (req, res, next) => {
+  try {
+    const m = await db.one(
+      `SELECT mt.*, o.company, o.service_primary, o.plan_name, o.quoted_price,
+              u.display_name AS owner_name,
+              COALESCE(fc.name, cc.name)  AS contact_name,
+              COALESCE(fc.role, cc.role)  AS contact_role
+         FROM opportunity_meetings mt
+         JOIN opportunities o ON o.id = mt.opportunity_id
+         LEFT JOIN users u ON u.id = o.owner_id
+         LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+         LEFT JOIN company_contacts fc ON fc.id = o.focus_contact_id
+        WHERE mt.id = $1`,
+      [req.params.meetingId]
+    );
+    if (!m) return res.status(404).send("No such meeting.");
+
+    const esc = (v) =>
+      String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const when = new Date(m.scheduled_at).toLocaleString("en-IN", {
+      day: "numeric", month: "long", year: "numeric", hour: "numeric", minute: "2-digit",
+    });
+
+    const st = m.structured || {};
+    const rows = [
+      ["What they need", st.requirement || m.requirement],
+      ["Budget mentioned", st.budget_mentioned],
+      ["Timeline", st.timeline],
+      ["In the room", (st.decision_makers || []).join(", ")],
+      ["Concerns raised", (st.objections || []).join("; ")],
+      ["Next step", st.next_step],
+    ].filter(([, v]) => v);
+
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.send(`<!doctype html>
+<html><head><meta charset="utf-8" />
+<title>${esc(m.company)} — meeting notes</title>
+<style>
+  @page { margin: 18mm; }
+  body { font: 11pt/1.55 -apple-system, "Segoe UI", Roboto, sans-serif; color: #1a1a1a; max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 19pt; margin: 0 0 2px; }
+  .sub { color: #666; font-size: 10pt; margin-bottom: 22px; }
+  h2 { font-size: 11pt; text-transform: uppercase; letter-spacing: .06em; color: #666;
+       margin: 26px 0 8px; font-weight: 600; }
+  dl { display: grid; grid-template-columns: 150px 1fr; gap: 5px 16px; margin: 0; }
+  dt { color: #666; }
+  dd { margin: 0; }
+  .notes { white-space: pre-wrap; }
+  footer { margin-top: 34px; padding-top: 10px; border-top: 1px solid #ddd;
+           color: #888; font-size: 9pt; }
+  /* Nothing on screen that shouldn't be on paper. */
+  @media print { .noprint { display: none; } }
+</style></head>
+<body>
+  <h1>${esc(m.company)}</h1>
+  <p class="sub">
+    Meeting notes · ${esc(when)}${m.contact_name ? ` · with ${esc(m.contact_name)}${m.contact_role ? `, ${esc(m.contact_role)}` : ""}` : ""}
+  </p>
+
+  ${rows.length ? `<h2>Summary</h2><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
+
+  ${m.notes ? `<h2>Notes</h2><p class="notes">${esc(m.notes)}</p>` : ""}
+
+  <footer>
+    ${esc(m.service_primary || "")}${m.plan_name ? ` · ${esc(m.plan_name)}` : ""}
+    ${m.owner_name ? ` · ${esc(m.owner_name)}` : ""} · Curious Media
+  </footer>
+
+  <script>window.onload = () => window.print();</script>
+</body></html>`);
   } catch (err) {
     next(err);
   }
@@ -2024,7 +2172,16 @@ router.post("/:id/stage", async (req, res, next) => {
 
     await moveStage(opp.id, to, req.user.id);
     if (to === "won") {
-      await db.run(`UPDATE opportunities SET won_value = quoted_price WHERE id = $1`, [opp.id]);
+      // What was actually signed, which is rarely the quoted price. Falls back
+      // to the quote if nobody typed a figure, so the target still moves.
+      const signed = Number(req.body.closed_value);
+      await db.run(
+        `UPDATE opportunities
+            SET closed_value = COALESCE($2, quoted_price),
+                won_value    = COALESCE($2, quoted_price)
+          WHERE id = $1`,
+        [opp.id, Number.isFinite(signed) && signed > 0 ? signed : null]
+      );
       await db.run(
         `UPDATE opportunity_followups SET status = 'cancelled'
           WHERE opportunity_id = $1 AND status = 'due'`,
@@ -2256,6 +2413,35 @@ function fillTemplate(text, values) {
  * Separate from the package because a package is what was sold and this is
  * what was promised. They drift, and being able to see the drift is the point.
  */
+/** Budget and the two points of contact — they belong to the engagement,
+ *  not to each deliverable line. */
+router.post("/:id/delivery", async (req, res, next) => {
+  try {
+    const opp = await loadOpp(req.params.id, req.user);
+    if (!opp) return res.status(404).json({ error: "No such opportunity." });
+    if (!assertOwner(opp, req.user, res)) return;
+
+    await db.run(
+      `UPDATE opportunities
+          SET delivery_budget     = $2,
+              delivery_client_poc = $3,
+              delivery_agency_poc = $4,
+              updated_at = now()
+        WHERE id = $1`,
+      [
+        opp.id,
+        Number(req.body.budget) || null,
+        req.body.client_poc || null,
+        req.body.agency_poc || null,
+      ]
+    );
+
+    res.json({ opportunity: await loadOpp(opp.id, req.user) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/:id/execution", async (req, res, next) => {
   try {
     const rows = await db.all(
@@ -2349,6 +2535,116 @@ router.delete("/execution/:itemId", async (req, res, next) => {
       return res.status(403).json({ error: "Not yours to remove." });
     }
     await db.run("DELETE FROM opportunity_execution WHERE id = $1", [item.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/* ── monthly targets ──────────────────────────────────────────────────────── */
+
+/** First day of this month, which is how a target period is keyed. */
+const thisPeriod = () => {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+};
+
+/**
+ * How this person is doing this month.
+ *
+ * Counts closed_value — what was actually signed — not quoted_price. The gap
+ * between the two is the whole reason they are separate columns.
+ */
+async function targetFor(userId) {
+  const period = thisPeriod();
+
+  try {
+    return await computeTarget(userId, period);
+  } catch (err) {
+    // Today is the screen people live on. A broken target query must not blank
+    // it — the counts and the cards matter far more than the progress bar.
+    console.warn("[outreach] target unavailable:", err.message);
+    return { period, target: 0, achieved: 0, remaining: 0, deals: 0, pct: null };
+  }
+}
+
+async function computeTarget(userId, period) {
+  const [target, won] = await Promise.all([
+    db.one(`SELECT amount FROM sales_targets WHERE user_id = $1 AND period = $2`, [userId, period]),
+    db.one(
+      `SELECT COALESCE(SUM(COALESCE(closed_value, won_value, quoted_price)), 0) AS total,
+              COUNT(*)::int AS deals
+         FROM opportunities
+        WHERE owner_id = $1 AND stage = 'won'
+          AND won_at >= $2::timestamptz
+          AND won_at <  $2::timestamptz + interval '1 month'`,
+      [userId, period]
+    ),
+  ]);
+
+  const amount = Number(target && target.amount) || 0;
+  const achieved = Number(won.total) || 0;
+
+  return {
+    period,
+    target: amount,
+    achieved,
+    // What is left to find. Never negative — "you are 20% over" is the useful
+    // reading of a beaten target, not "minus two lakh to go".
+    remaining: Math.max(amount - achieved, 0),
+    deals: won.deals,
+    pct: amount > 0 ? Math.round((achieved / amount) * 100) : null,
+  };
+}
+
+router.get("/meta/target", async (req, res, next) => {
+  try {
+    res.json(await targetFor(req.user.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Everyone's target for this month, for the admin screen. */
+router.get("/meta/targets", requireAdmin, async (req, res, next) => {
+  try {
+    const period = thisPeriod();
+    const rows = await db.all(
+      `SELECT u.id, u.display_name,
+              COALESCE(t.amount, 0) AS amount,
+              COALESCE(w.total, 0)  AS achieved
+         FROM users u
+         LEFT JOIN sales_targets t ON t.user_id = u.id AND t.period = $1::date
+         LEFT JOIN (
+           SELECT owner_id, SUM(COALESCE(closed_value, won_value, quoted_price)) AS total
+             FROM opportunities
+            WHERE stage = 'won' AND won_at >= $1::timestamptz
+              AND won_at <  $1::timestamptz + interval '1 month'
+            GROUP BY owner_id
+         ) w ON w.owner_id = u.id
+        WHERE u.active AND u.role <> 'admin'
+        ORDER BY u.display_name`,
+      [period]
+    );
+    res.json({ period, targets: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/meta/targets", requireAdmin, async (req, res, next) => {
+  try {
+    const period = thisPeriod();
+    for (const t of Array.isArray(req.body.targets) ? req.body.targets : []) {
+      if (!t.user_id) continue;
+      await db.run(
+        `INSERT INTO sales_targets (user_id, period, amount, set_by, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (user_id, period) DO UPDATE
+            SET amount = EXCLUDED.amount, set_by = EXCLUDED.set_by, updated_at = now()`,
+        [t.user_id, period, Number(t.amount) || 0, req.user.id]
+      );
+    }
     res.json({ ok: true });
   } catch (err) {
     next(err);

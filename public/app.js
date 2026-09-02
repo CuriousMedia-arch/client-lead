@@ -2901,6 +2901,120 @@ function wireDrawer(lead) {
 
 // ── Admin ──────────────────────────────────────────────────────────────────
 
+/**
+ * Which companies get searched for news.
+ *
+ * Kept out of renderAdmin's main flow and loaded after it, because this query
+ * counts contacts and signals per company and shouldn't hold up the rest of
+ * the page.
+ */
+async function loadWatchlist(opts = {}) {
+  const box = $("#watchlist");
+  if (!box) return;
+
+  const q = opts.q != null ? opts.q : (($("#wl-search") || {}).value || "");
+  const only = opts.only != null ? opts.only : (($("#wl-filter") || {}).value || "");
+
+  let data;
+  try {
+    data = await api(`/api/admin/watchlist?q=${encodeURIComponent(q)}&only=${only}`);
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Couldn't load: ${esc(err.message)}</p>`;
+    return;
+  }
+
+  // Roughly what the current watchlist costs, at the current sweep frequency.
+  // A number beats a warning: nobody trims a list because they were told to.
+  const perScan = data.watched;
+  const scansPerMonth = 10;                    // every 3 days
+  const included = 5000;
+  const extra = Math.max(perScan * scansPerMonth - included, 0);
+  const usd = 90 + extra * 0.015;
+  const inrMonth = Math.round(usd * 85);
+
+  box.innerHTML = `
+    <div class="wl-summary">
+      <strong>${data.watched.toLocaleString()}</strong> of ${data.total.toLocaleString()} companies watched
+      · roughly <strong>₹${inrMonth.toLocaleString("en-IN")}</strong>/month at the current sweep rate
+    </div>
+
+    <div class="inline-form" style="margin:10px 0">
+      <input id="wl-search" placeholder="Search companies…" value="${esc(q)}" />
+      <select id="wl-filter">
+        <option value="">All</option>
+        <option value="watched" ${only === "watched" ? "selected" : ""}>Watched only</option>
+        <option value="unwatched" ${only === "unwatched" ? "selected" : ""}>Not watched</option>
+      </select>
+    </div>
+
+    <div class="wl-bulk">
+      <span class="mono-label">Bulk</span>
+      <button class="btn btn-sm" data-wl-scope="no_signals" data-wl-on="false">Stop watching those with no news in 90 days</button>
+      <button class="btn btn-sm" data-wl-scope="unclaimed" data-wl-on="false">Stop watching unclaimed ones</button>
+      <button class="btn btn-sm btn-ghost" data-wl-scope="all" data-wl-on="true">Watch everything</button>
+    </div>
+
+    <div class="wl-list">
+      ${data.companies
+        .map(
+          (c) => `
+        <label class="wl-row ${c.active ? "is-on" : ""}">
+          <input type="checkbox" data-wl-id="${c.id}" ${c.active ? "checked" : ""} />
+          <span class="wl-name">${esc(c.name)}</span>
+          <span class="muted">${esc(c.industry || "—")}</span>
+          <span class="mono-label">${c.contacts} contact${c.contacts === 1 ? "" : "s"}</span>
+          <span class="mono-label ${c.signals_90d ? "" : "wl-quiet"}">${
+            c.signals_90d ? `${c.signals_90d} in 90d` : "no news 90d"
+          }</span>
+        </label>`
+        )
+        .join("")}
+    </div>
+    ${data.companies.length === 300 ? `<p class="hint">Showing the first 300 — search to narrow it.</p>` : ""}`;
+
+  let timer;
+  $("#wl-search").addEventListener("input", (e) => {
+    clearTimeout(timer);
+    const v = e.target.value;
+    timer = setTimeout(() => loadWatchlist({ q: v }), 300);
+  });
+  $("#wl-filter").addEventListener("change", (e) => loadWatchlist({ only: e.target.value }));
+
+  for (const cb of $$("[data-wl-id]")) {
+    cb.addEventListener("change", async () => {
+      try {
+        const r = await api("/api/admin/watchlist", {
+          method: "POST",
+          body: { ids: [Number(cb.dataset.wlId)], active: cb.checked },
+        });
+        cb.closest(".wl-row").classList.toggle("is-on", cb.checked);
+        $(".wl-summary").innerHTML =
+          `<strong>${r.watched.toLocaleString()}</strong> of ${r.total.toLocaleString()} companies watched`;
+      } catch (err) {
+        cb.checked = !cb.checked;
+        toast(err.message, true);
+      }
+    });
+  }
+
+  for (const btn of $$("[data-wl-scope]")) {
+    btn.addEventListener("click", async () => {
+      const on = btn.dataset.wlOn === "true";
+      if (!confirm(`${on ? "Watch" : "Stop watching"} these companies?`)) return;
+      try {
+        const r = await api("/api/admin/watchlist", {
+          method: "POST",
+          body: { scope: btn.dataset.wlScope, active: on },
+        });
+        toast(`${r.watched.toLocaleString()} companies now watched`);
+        loadWatchlist();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  }
+}
+
 async function renderAdmin() {
   const content = $("#content");
   content.innerHTML = `<div class="empty"><p>Loading…</p></div>`;
@@ -3010,6 +3124,16 @@ async function renderAdmin() {
         <button class="btn btn-primary" id="csv-go">Upload</button>
       </div>
       <div id="csv-result"></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
+      <h3>News watchlist</h3>
+      <p class="hint">
+        Which companies we search the news for. This is the one setting that costs
+        real money — the news provider charges per company per sweep, so watching
+        everything you have ever imported is expensive and mostly finds nothing.
+      </p>
+      <div id="watchlist"><p class="hint">Loading…</p></div>
     </div>
 
     <div class="admin-block" style="margin-bottom:16px">
@@ -3157,6 +3281,9 @@ async function renderAdmin() {
     </div>`;
 
   wireAdmin();
+  // Loaded after the page paints — it counts contacts and signals per company
+  // and shouldn't hold up everything else on the screen.
+  loadWatchlist();
   if (runs.running) pollRun();
 }
 

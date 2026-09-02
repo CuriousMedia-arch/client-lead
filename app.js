@@ -23,6 +23,15 @@ const app = express();
  * only be aimed at the single endpoint that has a reason to accept it.
  */
 /*
+ * Fathom's webhook is verified by an HMAC over the RAW request body, so it has
+ * to be mounted before express.json() gets its hands on it. Re-serialising the
+ * parsed object changes key order and whitespace, the signature stops
+ * matching, and every webhook is rejected — with the confusing symptom that
+ * the payload looks perfectly fine in the logs.
+ */
+app.use("/api/fathom/webhook", express.raw({ type: "*/*", limit: "8mb" }));
+
+/*
  * The import route needs a bigger body than everything else, but note the
  * ceiling is not ours to set on serverless hosting: Vercel caps a function's
  * request body at 4.5 MB at the infrastructure level, and no setting here or
@@ -98,6 +107,7 @@ app.use("/api/outreach", require("./routes/outreach"));
 app.use("/api/cron", require("./routes/cron"));
 app.use("/api/google", require("./routes/google"));
 app.use("/api/microsoft", require("./routes/microsoft"));
+app.use("/api/fathom", require("./routes/fathom"));
 
 // Cheap way to confirm a deploy can reach the database.
 app.get("/api/health", async (req, res) => {
