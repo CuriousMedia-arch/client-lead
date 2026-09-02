@@ -872,6 +872,29 @@ async function targetScenario() {
     `${after.json.remaining} to go`);
 }
 
+/** The tab badge must equal the number of cards on Today. */
+async function badgeScenario() {
+  console.log("\n  --- tab badge vs Today ---\n");
+
+  const today = await call("GET", "/api/outreach/today");
+  if (today.status !== 200) return check("Badge matches Today", false, today.raw);
+
+  const cards = Object.values(today.json.buckets).reduce((n, l) => n + l.length, 0);
+
+  // The badge's own query, run directly. /api/stats can't complete under
+  // pg-mem — an unrelated correlated subquery elsewhere in it — and the point
+  // here is whether the COUNTING agrees, not whether the endpoint responds.
+  const badge = Number(
+    mem.public.many(
+      `select count(*)::int as n from opportunities
+        where owner_id = 1 and stage not in ('won','lost')`
+    )[0].n
+  );
+
+  check("The tab badge equals the cards on Today", badge === cards,
+    `badge ${badge}, ${cards} cards`);
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -989,6 +1012,7 @@ async function run() {
   await microsoftScenario();
   await fathomScenario();
   await targetScenario();
+  await badgeScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   server.close();

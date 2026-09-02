@@ -63,12 +63,18 @@ router.get("/", async (req, res, next) => {
                             AND COALESCE(s.published, s.created_at) >= now() - ($2 || ' days')::interval))
                                                                                AS fresh_new,
            -- My Outreach has two halves and the count must match them exactly:
-           -- people claimed in All Leads, plus companies claimed in Fresh Leads.
-           -- It used to count leads.owner_id, a company-level All Leads claim
-           -- that no longer has a view to appear in — hence a count of 3 over
-           -- an empty page.
-           ((SELECT COUNT(*) FROM company_contacts WHERE owner_id = $1 AND deleted_at IS NULL)
-            + (SELECT COUNT(*) FROM leads WHERE fresh_owner_id = $1))          AS mine,
+           -- Count the CARDS on the Today screen, not the claims behind them.
+           --
+           -- This counted claims: every contact plus every fresh lead. But a
+           -- Fresh claim sweeps up all of that company's contacts, so claiming
+           -- one company with 28 people showed 29 while Today showed a single
+           -- card — the company is one thing to work, not twenty-nine.
+           --
+           -- Opportunities are exactly what Today lists, so counting those
+           -- makes the badge and the page agree by construction rather than by
+           -- two queries happening to stay in step.
+           (SELECT COUNT(*) FROM opportunities
+             WHERE owner_id = $1 AND stage NOT IN ('won','lost'))              AS mine,
            (SELECT COUNT(*) FROM leads WHERE in_newspaper = true)              AS newspaper,
            ((SELECT COUNT(*) FROM company_contacts
               WHERE owner_id = $1 AND deleted_at IS NULL AND closed_at IS NULL AND deadline_at IS NOT NULL
