@@ -2278,25 +2278,6 @@ function wireListActions() {
 }
 
 /** Watches a running refresh so the button and counts settle on their own. */
-function pollRun() {
-  clearInterval(state.runPoll);
-  state.runPoll = setInterval(async () => {
-    try {
-      const { run } = await api("/api/stats");
-      if (!run.running) {
-        clearInterval(state.runPoll);
-        state.scanning = false;
-        state.lastRun = run.last;
-        toast("Sync finished");
-        refresh();
-      }
-    } catch {
-      clearInterval(state.runPoll);
-      state.scanning = false;
-    }
-  }, 4000);
-}
-
 function shortDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -3735,17 +3716,37 @@ function wireAdmin() {
   });
 }
 
+/**
+ * Watch a sync while it runs.
+ *
+ * There were two functions with this name — an earlier one that watched
+ * /api/stats and a later one that watched /api/admin/runs. The later silently
+ * replaced the earlier, so the Sync button on Fresh Leads got the Admin
+ * version, which bailed out the moment it couldn't find #run-progress. That
+ * element only exists on the Admin page, so on Fresh Leads polling stopped
+ * immediately: the button stayed on "Syncing…", nothing refreshed, and the
+ * sync appeared not to work while running perfectly on the server.
+ *
+ * One function now, and the progress bar is optional rather than required.
+ */
 function pollRun() {
   clearInterval(state.runPoll);
+
   state.runPoll = setInterval(async () => {
     let data;
-    try { data = await api("/api/admin/runs"); }
-    catch { return clearInterval(state.runPoll); }
+    try {
+      data = await api("/api/admin/runs");
+    } catch {
+      clearInterval(state.runPoll);
+      state.scanning = false;
+      renderContent();
+      return;
+    }
 
+    // Draw progress if there is somewhere to draw it. Its absence is normal
+    // on every page except Admin, and is not a reason to stop watching.
     const box = $("#run-progress");
-    if (!box) return clearInterval(state.runPoll);
-
-    if (data.running && data.current) {
+    if (box && data.running && data.current) {
       const c = data.current;
       const pct = c.total ? Math.round((c.done / c.total) * 100) : 0;
       box.innerHTML = `
@@ -3753,12 +3754,18 @@ function pollRun() {
           ${c.done} of ${c.total} queries · ${c.fetched} articles fetched · ${c.errors} errors
         </p>
         <div class="progress"><div style="width:${pct}%"></div></div>`;
-    } else {
-      clearInterval(state.runPoll);
-      toast("Cycle finished");
-      renderAdmin();
-      loadStats();
     }
+
+    if (data.running) return;
+
+    clearInterval(state.runPoll);
+    state.scanning = false;
+    toast("Sync finished");
+    loadStats();
+
+    // Redraw whichever page is actually open, not always Admin.
+    if (state.tab === "admin") renderAdmin();
+    else refresh();
   }, 2000);
 }
 /* ── Generic modal ────────────────────────────────────────────────────────
