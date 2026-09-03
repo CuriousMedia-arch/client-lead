@@ -2428,6 +2428,7 @@ router.post("/:id/delivery", async (req, res, next) => {
     await db.run(
       `UPDATE opportunities
           SET delivery_budget     = $2,
+              delivery_timeline   = $5,
               delivery_client_poc = $3,
               delivery_agency_poc = $4,
               updated_at = now()
@@ -2437,6 +2438,7 @@ router.post("/:id/delivery", async (req, res, next) => {
         Number(req.body.budget) || null,
         req.body.client_poc || null,
         req.body.agency_poc || null,
+        req.body.timeline || null,
       ]
     );
 

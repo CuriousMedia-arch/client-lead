@@ -439,6 +439,18 @@ async function drive(window) {
     const btn = $$("[data-ws-tab]").find((t) => t.dataset.wsTab === key);
     click(btn);
     await wait(150);
+    if (key === "delivery") {
+      // Must show all five fields even on a lead with nothing filled in —
+      // it used to hide entirely until proposal stage, so people assumed the
+      // section did not exist.
+      check("Delivery shows all five fields when empty", () => {
+        const t = $(".ws-body").textContent;
+        const want = ["Deliverable", "Timeline", "Budget", "Client POC", "Agency POC"];
+        const missing = want.filter((w) => !t.includes(w));
+        return missing.length ? `missing: ${missing.join(", ")}` : "all five";
+      });
+    }
+
     check(`Tab "${key}" renders`, () => {
       const body = $(".ws-body");
       if (!body) return "no body";

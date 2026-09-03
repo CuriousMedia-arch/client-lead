@@ -970,8 +970,7 @@ function paintWorkspace() {
     now: () => wsNowTab(d),
     message: () => wsServiceBlock(d) + wsPlanBlock(d) + wsPitchBlock(d),
     meetings: () => wsMeetingBlock(d),
-    delivery: () => wsExecutionBlock(d) || emptyTab("Nothing to deliver yet.",
-      "Once a price is out, plan what we've promised here."),
+    delivery: () => wsExecutionBlock(d),
     history: () => wsTimelineBlock(d) + wsPriceHistory(d) + wsHistoryBlock(d),
   };
 
@@ -1764,8 +1763,9 @@ function meetingCard(m) {
 function wsExecutionBlock(d) {
   const o = d.opportunity;
   const items = d.execution || [];
-  const relevant = ["proposal", "negotiation", "won"].includes(o.stage) || items.length;
-  if (!relevant) return "";
+  // Always shown. Budget, timeline and who the contacts are get agreed while
+  // the deal is still being discussed — gating this behind 'proposal' meant
+  // there was nowhere to record any of it until after it was needed.
 
   const STATUS = {
     pending: "Not started",
@@ -1782,10 +1782,15 @@ function wsExecutionBlock(d) {
       <div class="grid-3">
         <label class="field"><span>Budget ₹</span>
           <input type="number" id="dl-budget" value="${Number(o.delivery_budget || 0)}" /></label>
-        <label class="field"><span>Client contact</span>
-          <input id="dl-client" value="${esc(o.delivery_client_poc || "")}" placeholder="their side" /></label>
-        <label class="field"><span>Our contact</span>
-          <input id="dl-agency" value="${esc(o.delivery_agency_poc || "")}" placeholder="who runs it here" /></label>
+        <label class="field"><span>Timeline</span>
+          <input id="dl-timeline" value="${esc(o.delivery_timeline || "")}"
+                 placeholder="e.g. 6 weeks from signing" /></label>
+        <label class="field"><span>Client POC</span>
+          <input id="dl-client" value="${esc(o.delivery_client_poc || "")}"
+                 placeholder="their side" /></label>
+        <label class="field"><span>Agency POC</span>
+          <input id="dl-agency" value="${esc(o.delivery_agency_poc || "")}"
+                 placeholder="who runs it here" /></label>
       </div>
       <button class="btn btn-sm" id="save-delivery">Save details</button>
 
@@ -1796,7 +1801,7 @@ function wsExecutionBlock(d) {
         items.length
           ? `<div class="exec-list">
                <div class="exec-head">
-                 <span>Deliverable</span><span>Due</span><span>Owner</span><span>Status</span><span></span>
+                 <span>Deliverable</span><span>Timeline</span><span>Owner</span><span>Status</span><span></span>
                </div>
                ${items
                  .map((it) =>
@@ -1846,7 +1851,7 @@ function wsExecutionBlock(d) {
       <div class="grid-3">
         <label class="field"><span>Deliverable</span>
           <input id="ex-what" placeholder="e.g. 50 creator reels live" /></label>
-        <label class="field"><span>Due</span><input type="date" id="ex-due" /></label>
+        <label class="field"><span>Timeline (due date)</span><input type="date" id="ex-due" /></label>
         <label class="field"><span>Owner</span><input id="ex-owner" placeholder="who's responsible" /></label>
       </div>
       <button class="btn btn-sm" id="add-exec">Save</button>
@@ -2481,6 +2486,7 @@ function wireWorkspace() {
         method: "POST",
         body: {
           budget: Number($("#dl-budget", panel).value) || null,
+          timeline: $("#dl-timeline", panel).value || null,
           client_poc: $("#dl-client", panel).value || null,
           agency_poc: $("#dl-agency", panel).value || null,
         },
