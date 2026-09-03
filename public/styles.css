@@ -2603,3 +2603,8 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   background: var(--surface);
   max-width: 220px;
 }
+
+/* The sync picker needs room — it is a list you scroll and search, not a
+   confirmation dialog. */
+.sync-box { max-width: 780px; width: 92vw; }
+.sync-box .wl-list { max-height: 46vh; }

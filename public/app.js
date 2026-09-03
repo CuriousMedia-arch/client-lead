@@ -635,6 +635,139 @@ async function loadWatchedCompanies() {
   }
 }
 
+/**
+ * Tick the companies you want watched for news.
+ *
+ * Opens over Fresh Leads rather than sending people to Admin, because
+ * "which companies am I getting news about" is a question you ask while
+ * looking at the news, not while looking at settings.
+ *
+ * Changes are saved as you tick, one company at a time, rather than batched
+ * behind a Save button. With 15,000 companies and a search box, a Save button
+ * is a good way to lose twenty minutes of ticking to a stray refresh.
+ */
+async function openSyncPicker() {
+  const existing = $("#sync-picker");
+  if (existing) existing.remove();
+
+  const box = document.createElement("div");
+  box.id = "sync-picker";
+  box.className = "modal-backdrop";
+  box.innerHTML = `
+    <div class="modal-box sync-box">
+      <h3>Which companies to watch for news</h3>
+      <p class="hint">
+        Ticked companies get searched for news every few days. This is the one
+        setting that costs money — the news provider charges per company per
+        sweep, so watch the ones you are working, not everything you have imported.
+      </p>
+
+      <div class="inline-form" style="margin:10px 0">
+        <input id="sp-search" placeholder="Search companies…" autocomplete="off" />
+        <select id="sp-filter">
+          <option value="">All</option>
+          <option value="watched">Watched only</option>
+          <option value="unwatched">Not watched</option>
+        </select>
+      </div>
+
+      <div id="sp-summary" class="wl-summary"></div>
+      <div id="sp-list" class="wl-list" style="margin-top:10px"><p class="hint">Loading…</p></div>
+
+      <div class="ws-actions" style="margin-top:14px">
+        <button class="btn btn-sm" data-sp-scope="no_signals" data-sp-on="false">Untick those with no news in 90 days</button>
+        <button class="btn btn-sm" data-sp-scope="unclaimed" data-sp-on="false">Untick unclaimed</button>
+        <button class="btn btn-primary" id="sp-done">Done</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(box);
+
+  const close = () => {
+    box.remove();
+    // The picker changed what syncs, so the dropdown behind it is stale.
+    state.freshCompanies = [];
+    loadWatchedCompanies();
+  };
+  box.addEventListener("click", (e) => { if (e.target === box) close(); });
+  $("#sp-done", box).addEventListener("click", close);
+
+  async function load() {
+    const q = $("#sp-search", box).value;
+    const only = $("#sp-filter", box).value;
+    const list = $("#sp-list", box);
+
+    try {
+      const d = await api(`/api/admin/watchlist?q=${encodeURIComponent(q)}&only=${only}`);
+
+      $("#sp-summary", box).innerHTML =
+        `<strong>${d.watched.toLocaleString()}</strong> of ${d.total.toLocaleString()} companies watched`;
+
+      list.innerHTML = d.companies.length
+        ? d.companies
+            .map(
+              (c) => `
+          <label class="wl-row ${c.active ? "is-on" : ""}">
+            <input type="checkbox" data-sp-id="${c.id}" ${c.active ? "checked" : ""} />
+            <span class="wl-name">${esc(c.name)}</span>
+            <span class="muted">${esc(c.industry || "—")}</span>
+            <span class="mono-label">${c.contacts} contact${c.contacts === 1 ? "" : "s"}</span>
+            <span class="mono-label ${c.signals_90d ? "" : "wl-quiet"}">${
+              c.signals_90d ? `${c.signals_90d} in 90d` : "no news 90d"
+            }</span>
+          </label>`
+            )
+            .join("")
+        : `<p class="hint" style="padding:12px">Nothing matches.</p>`;
+
+      for (const cb of $$("[data-sp-id]", box)) {
+        cb.addEventListener("change", async () => {
+          try {
+            const r = await api("/api/admin/watchlist", {
+              method: "POST",
+              body: { ids: [Number(cb.dataset.spId)], active: cb.checked },
+            });
+            cb.closest(".wl-row").classList.toggle("is-on", cb.checked);
+            $("#sp-summary", box).innerHTML =
+              `<strong>${r.watched.toLocaleString()}</strong> of ${r.total.toLocaleString()} companies watched`;
+          } catch (err) {
+            cb.checked = !cb.checked;   // put it back — the save didn't happen
+            toast(err.message, true);
+          }
+        });
+      }
+    } catch (err) {
+      list.innerHTML = `<p class="hint" style="padding:12px">Couldn't load: ${esc(err.message)}</p>`;
+    }
+  }
+
+  let timer;
+  $("#sp-search", box).addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(load, 300);
+  });
+  $("#sp-filter", box).addEventListener("change", load);
+
+  for (const btn of $$("[data-sp-scope]", box)) {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Untick these companies? They'll stop being searched for news.")) return;
+      try {
+        const r = await api("/api/admin/watchlist", {
+          method: "POST",
+          body: { scope: btn.dataset.spScope, active: btn.dataset.spOn === "true" },
+        });
+        toast(`${r.watched.toLocaleString()} companies now watched`);
+        load();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  }
+
+  load();
+  $("#sp-search", box).focus();
+}
+
 function freshSubtabs() {
   const view = state.freshView === "new" ? "new" : "company";
   return `
@@ -662,7 +795,7 @@ function freshSubtabs() {
              </select>
              ${
                state.user.role === "admin"
-                 ? `<button class="btn btn-sm btn-ghost" id="f-choose">Choose what syncs</button>`
+                 ? `<button class="btn btn-sm" id="f-choose">Choose what syncs</button>`
                  : ""
              }`
           : ""
@@ -3763,11 +3896,7 @@ document.addEventListener("click", async (e) => {
   // workspace opens over whatever list you happened to be looking at and
   // closing it drops you somewhere unrelated.
   if (e.target.id === "f-choose") {
-    // Choosing WHAT syncs is a watchlist decision, and the watchlist lives in
-    // Admin because it is what costs money.
-    state.tab = "admin";
-    $$(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.tab === "admin"));
-    renderContent();
+    openSyncPicker();
     return;
   }
 
