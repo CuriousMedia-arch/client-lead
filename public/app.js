@@ -617,6 +617,24 @@ function actionBar() {
  * everything else the discovery sweep turned up — claimable here, but not in
  * the contact database and not going there without an admin approving it.
  */
+/**
+ * The watchlist, fetched once and kept for the session.
+ *
+ * These are the companies the news sweep actually searches, which is what
+ * someone opening this dropdown wants to know — not which ones happen to have
+ * a story today.
+ */
+async function loadWatchedCompanies() {
+  if (state.freshCompanies.length) return;
+  try {
+    const { companies } = await api("/api/leads/meta/watched");
+    state.freshCompanies = companies || [];
+    if (state.tab === "fresh") renderContent();
+  } catch {
+    /* the dropdown just stays on "All" */
+  }
+}
+
 function freshSubtabs() {
   const view = state.freshView === "new" ? "new" : "company";
   return `
@@ -630,14 +648,23 @@ function freshSubtabs() {
       ${
         view === "company"
           ? `<select class="fresh-company-filter" id="f-company">
-               <option value="">All companies</option>
-               ${(state.freshCompanies || [])
+               <option value="">All watched companies${
+                 state.freshCompanies.length ? ` (${state.freshCompanies.length})` : ""
+               }</option>
+               ${state.freshCompanies
                  .map(
                    (c) =>
-                     `<option value="${esc(c)}" ${state.company === c ? "selected" : ""}>${esc(c)}</option>`
+                     `<option value="${esc(c.name)}" ${state.company === c.name ? "selected" : ""}>${esc(
+                       c.name
+                     )}${c.recent ? ` — ${c.recent} recent` : ""}</option>`
                  )
                  .join("")}
-             </select>`
+             </select>
+             ${
+               state.user.role === "admin"
+                 ? `<button class="btn btn-sm btn-ghost" id="f-choose">Choose what syncs</button>`
+                 : ""
+             }`
           : ""
       }
       <span class="subtab-note">
@@ -722,11 +749,11 @@ async function renderContent(opts = {}) {
     return;
   }
 
-  // The dropdown lists companies that actually have news right now. Offering
-  // all 4,000 would be a scroll, and most of them have nothing to show.
-  if (state.tab === "fresh" && !state.company) {
-    state.freshCompanies = [...new Set(leads.map((l) => l.company).filter(Boolean))].sort();
-  }
+  // The picker is loaded separately — see loadWatchedCompanies. Building it
+  // from `leads` meant it was empty on exactly the days there was no news,
+  // which is when you most want to see what is being watched.
+
+  if (state.tab === "fresh") loadWatchedCompanies();
 
   const body =
     state.tab === "fresh"
@@ -3735,6 +3762,15 @@ document.addEventListener("click", async (e) => {
   // Jumping to the opportunity from the bell has to switch tabs too, or the
   // workspace opens over whatever list you happened to be looking at and
   // closing it drops you somewhere unrelated.
+  if (e.target.id === "f-choose") {
+    // Choosing WHAT syncs is a watchlist decision, and the watchlist lives in
+    // Admin because it is what costs money.
+    state.tab = "admin";
+    $$(".tab").forEach((t) => t.classList.toggle("is-active", t.dataset.tab === "admin"));
+    renderContent();
+    return;
+  }
+
   const rmBtn = e.target.closest("[data-remove-lead]");
   if (rmBtn) {
     e.stopPropagation();

@@ -904,6 +904,32 @@ router.delete("/meta/blocklist/:id", requireAdmin, async (req, res, next) => {
   }
 });
 
+/**
+ * Companies on the news watchlist, for the Fresh Leads picker.
+ *
+ * Read from the database rather than from whatever news happens to be on
+ * screen. The picker used to be built from the visible results, so on the day
+ * there was no news — exactly when you want to check what is being watched —
+ * it was empty.
+ */
+router.get("/meta/watched", async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT c.name,
+              (SELECT COUNT(*)::int FROM signals s
+                WHERE lower(s.company) = lower(c.name)
+                  AND s.created_at > now() - interval '30 days') AS recent
+         FROM companies c
+        WHERE c.active AND c.is_sample = false AND c.approval = 'approved'
+        ORDER BY lower(c.name)
+        LIMIT 1000`
+    );
+    res.json({ companies: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
 module.exports.STATUSES = STATUSES;
 module.exports.OPEN_STATUSES = OPEN_STATUSES;

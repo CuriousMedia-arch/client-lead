@@ -141,7 +141,7 @@ async function renderOutreach() {
 
   wireOutreachNav();
 
-  if (outreach.view === "today") return renderToday();
+  if (outreach.view === "today") return renderToday({ reload: true });
   if (outreach.view === "pipeline") return renderPipeline();
   if (outreach.view === "intel") return renderIntel();
   if (outreach.view === "pricing") return renderPricing();
@@ -182,15 +182,29 @@ function wireOutreachNav() {
  * asked for exactly this and it is right: a salesperson opening the portal at
  * 10am needs to be told what to do, not handed a table to sort.
  */
-async function renderToday() {
+async function renderToday(opts = {}) {
   const body = $("#outreach-body");
 
-  let data;
-  try {
-    data = await api("/api/outreach/today");
-  } catch (err) {
-    body.innerHTML = `<div class="empty"><h2>Couldn't load today</h2><p>${esc(err.message)}</p></div>`;
-    return;
+  /*
+   * Clicking a slab is a filter, not a reload.
+   *
+   * It used to re-fetch /api/outreach/today on every click — a full round trip
+   * to Mumbai and back, plus the sweeps that run on that endpoint, to show
+   * cards already sitting in memory. That is why picking a slab felt slow
+   * while the rest of the page felt fine.
+   *
+   * Anything that CHANGES the data still passes reload:true.
+   */
+  let data = !opts.reload && outreach.today ? outreach.today : null;
+
+  if (!data) {
+    if (!outreach.today) body.innerHTML = `<p class="muted" style="padding:24px">Loading…</p>`;
+    try {
+      data = await api("/api/outreach/today");
+    } catch (err) {
+      body.innerHTML = `<div class="empty"><h2>Couldn't load today</h2><p>${esc(err.message)}</p></div>`;
+      return;
+    }
   }
   outreach.today = data;
 
@@ -2559,6 +2573,7 @@ function wireWorkspace() {
       });
       toast(value > 0 ? `Won at ${inrShort(value)}` : "Marked won");
       await reloadWorkspace();
+      outreach.today = null;
       renderOutreach();
     });
   };
@@ -2607,6 +2622,7 @@ function wireWorkspace() {
       });
       toast("Recorded — it'll show up in Intelligence");
       await reloadWorkspace();
+      outreach.today = null;      // it left the board; fetch a fresh one
       renderOutreach();
     })
   );

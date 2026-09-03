@@ -245,8 +245,10 @@ async function boot() {
   process.exit(problems.length ? 1 : 0);
 }
 
+const calls = [];
+
 function makeFetch(base, window) {
-  return (url, opts = {}) =>
+  return (url, opts = {}) => (calls.push(String(url)), true) &&
     new Promise((resolve, reject) => {
       const full = url.startsWith("http") ? url : base + url;
       const u = new URL(full);
@@ -366,6 +368,20 @@ async function drive(window) {
   const liveKey = liveSlab && liveSlab.dataset.slab;
   click(liveSlab);
   await wait(250);
+  // Filtering must not hit the network — that round trip is what made picking
+  // a slab feel slow when the cards were already in memory.
+  const before = calls.length;
+  click(liveSlab);
+  await wait(250);
+  check("Filtering a slab makes no server call", () => {
+    const made = calls.slice(before).filter((c) => c.includes("/api/outreach/today"));
+    return made.length === 0 ? "no refetch" : `${made.length} refetch(es)`;
+  });
+  click(liveSlab);   // back to all
+  await wait(150);
+  click(liveSlab);   // and into the group again for the checks below
+  await wait(250);
+
   check("Clicking a slab filters to that group", () => {
     const groups = $$(".today-group").map((g) => g.dataset.group);
     if (groups.length !== 1) return `showed ${groups.length} groups: ${groups.join(",")}`;
