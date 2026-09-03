@@ -503,6 +503,10 @@ router.get("/today", async (req, res, next) => {
       buckets,
       target: await targetFor(req.user.id),
       counts: {
+        // Cross-cutting, not a bucket: a Newspaper claim can also be urgent or
+        // waiting on a reply, and it should still appear there. This counts
+        // where the lead CAME FROM so you can filter to it.
+        newspaper: mine.filter((o) => o.source === "newspaper").length,
         urgent: buckets.urgent.length,
         followup: buckets.followup.length,
         new: buckets.new.length,

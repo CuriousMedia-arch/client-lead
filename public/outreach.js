@@ -207,6 +207,7 @@ async function renderToday() {
     ["meeting", "Meetings today", c.meeting, "happening today", ""],
     ["proposal", "Quoted", c.proposal, "price is out with them", ""],
     ["working", "In progress", c.working || 0, "live conversations, nothing due", ""],
+    ["newspaper", "From Newspaper", c.newspaper || 0, "picked up from the archive", ""],
   ];
 
   const groups = [
@@ -218,10 +219,16 @@ async function renderToday() {
     ["new", "⚪ Not contacted yet", data.buckets.new],
     ["working", "🔵 In progress", data.buckets.working],
   ]
+    // "From Newspaper" is about where a lead came from, not what it needs
+    // today — so it filters the cards inside every group rather than picking
+    // one group. A Newspaper claim that is also urgent still shows as urgent.
+    .map(([key, title, list]) =>
+      outreach.focus === "newspaper"
+        ? [key, title, list.filter((o) => o.source === "newspaper")]
+        : [key, title, list]
+    )
     .filter(([, , list]) => list && list.length)
-    // Drilling into a slab hides the other groups rather than scrolling to
-    // one, so the screen shows only the job they picked.
-    .filter(([key]) => !outreach.focus || key === outreach.focus);
+    .filter(([key]) => !outreach.focus || outreach.focus === "newspaper" || key === outreach.focus);
 
   const focusedLabel = outreach.focus
     ? (slabs.find(([k]) => k === outreach.focus) || [null, outreach.focus])[1]

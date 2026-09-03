@@ -212,6 +212,8 @@ const state = {
   // synced every 3 days) or "new" (discovered, synced daily, not in All Leads
   // until an admin approves it).
   freshView: "company",
+  company: "",
+  freshCompanies: [],
   freshCounts: { company: 0, new: 0 },
   search: "",
   types: new Set(),
@@ -402,6 +404,12 @@ function wireEvents() {
   });
 
   $("#content").addEventListener("change", (e) => {
+    if (e.target.id === "f-company") {
+      state.company = e.target.value;
+      state.pageSize = 50;
+      renderContent();
+      return;
+    }
     const el = e.target;
     if (el.id === "f-tier") state.tier = el.value;
     else if (el.id === "f-type") {
@@ -501,6 +509,7 @@ function currentQuery() {
   p.set("tab", state.tab);
   if (state.tab === "fresh") p.set("freshKind", state.freshView === "new" ? "new" : "company");
   if (state.search) p.set("q", state.search);
+  if (state.company) p.set("company", state.company);
   if (state.freshness) p.set("freshness", state.freshness);
   if (state.types.size) p.set("types", [...state.types].join(","));
   if (state.statuses.size) p.set("status", [...state.statuses].join(","));
@@ -618,6 +627,19 @@ function freshSubtabs() {
       <button class="chip ${view === "new" ? "is-on" : ""}" data-freshview="new">
         New Leads <span class="pill">${state.freshCounts.new || 0}</span>
       </button>
+      ${
+        view === "company"
+          ? `<select class="fresh-company-filter" id="f-company">
+               <option value="">All companies</option>
+               ${(state.freshCompanies || [])
+                 .map(
+                   (c) =>
+                     `<option value="${esc(c)}" ${state.company === c ? "selected" : ""}>${esc(c)}</option>`
+                 )
+                 .join("")}
+             </select>`
+          : ""
+      }
       <span class="subtab-note">
         ${
           view === "new"
@@ -698,6 +720,12 @@ async function renderContent(opts = {}) {
   } catch (err) {
     content.innerHTML = `<div class="empty"><h2>Couldn't load leads</h2><p>${esc(err.message)}</p></div>`;
     return;
+  }
+
+  // The dropdown lists companies that actually have news right now. Offering
+  // all 4,000 would be a scroll, and most of them have nothing to show.
+  if (state.tab === "fresh" && !state.company) {
+    state.freshCompanies = [...new Set(leads.map((l) => l.company).filter(Boolean))].sort();
   }
 
   const body =

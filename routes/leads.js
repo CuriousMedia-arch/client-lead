@@ -98,6 +98,11 @@ async function queryLeads(params, user) {
   const statuses = list(params.status).filter((s) => STATUSES.includes(s));
   if (statuses.length) where.push(`l.status = ANY(${bind(statuses)})`);
 
+  // One company, chosen from the Fresh Leads dropdown.
+  if (params.company) {
+    where.push(`lower(c.name) = lower(${bind(params.company)})`);
+  }
+
   if (params.q) {
     // Company, industry, and the people at that company.
     //

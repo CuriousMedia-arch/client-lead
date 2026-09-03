@@ -355,8 +355,12 @@ async function drive(window) {
 
   check("Slabs are clickable", () => {
     const n = $$("[data-slab]").length;
-    return n === 7 ? "7 clickable counts" : `${n} slabs`;
+    return n === 8 ? "8 clickable counts" : `${n} slabs`;
   });
+  check("There's a Newspaper segment", () =>
+    $$("[data-slab]").some((b) => b.dataset.slab === "newspaper")
+      ? "present"
+      : "no newspaper slab");
 
   const liveSlab = $$("[data-slab]").find((b) => !b.disabled);
   const liveKey = liveSlab && liveSlab.dataset.slab;

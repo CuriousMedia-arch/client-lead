@@ -32,10 +32,11 @@ router.post("/webhook", async (req, res) => {
     req.get("x-signature") ||
     req.get("fathom-signature");
 
-  const check = fathom.verifySignature(raw, signature);
-  if (!check.ok) {
-    console.warn("[fathom] rejected a webhook:", check.reason);
-    return res.status(401).json({ error: check.reason });
+  // Which connected account signed this? Also authenticates it.
+  const sender = await fathom.accountForWebhook(raw, signature);
+  if (!sender) {
+    console.warn("[fathom] rejected a webhook: no connected account matched the signature");
+    return res.status(401).json({ error: "Signature did not match any connected Fathom account." });
   }
 
   let payload;
@@ -50,15 +51,15 @@ router.post("/webhook", async (req, res) => {
 
     // The webhook can carry these inline; fetch whatever is missing.
     let text = info.transcript;
-    if (!text && info.recordingId && fathom.configured()) {
-      text = await fathom.transcriptFor(info.recordingId).catch((err) => {
+    if (!text && info.recordingId) {
+      text = await fathom.transcriptFor(info.recordingId, sender.apiKey).catch((err) => {
         console.warn("[fathom] couldn't fetch transcript:", err.message);
         return "";
       });
     }
 
-    if (!info.summary && info.recordingId && fathom.configured()) {
-      info.summary = await fathom.summaryFor(info.recordingId).catch(() => "");
+    if (!info.summary && info.recordingId) {
+      info.summary = await fathom.summaryFor(info.recordingId, sender.apiKey).catch(() => "");
     }
 
     if (!text && !info.summary) {
@@ -84,7 +85,10 @@ router.post("/webhook", async (req, res) => {
       return res.json({ ok: true, matched: false, reason: "no matching meeting" });
     }
 
-    await applyTranscript(match.meeting, text, info, match.how);
+    await applyTranscript(match.meeting, text, info, match.how, sender.userId);
+    if (sender.userId) {
+      await db.run("UPDATE fathom_accounts SET last_seen_at = now() WHERE user_id = $1", [sender.userId]);
+    }
 
     res.json({ ok: true, matched: true, meeting_id: match.meeting.id, how: match.how });
   } catch (err) {
@@ -101,7 +105,7 @@ router.post("/webhook", async (req, res) => {
  * identical results — the notes are written by our own prompt, in the fields
  * the reporting already reads, with the company and the price in context.
  */
-async function applyTranscript(meeting, text, info, how) {
+async function applyTranscript(meeting, text, info, how, fathomUserId) {
   const context = await db.one(
     `SELECT o.company, o.service_primary, o.plan_name
        FROM opportunity_meetings m JOIN opportunities o ON o.id = m.opportunity_id
@@ -172,6 +176,7 @@ async function applyTranscript(meeting, text, info, how) {
             outcome = COALESCE(outcome, $6),
             requirement = COALESCE(requirement, $7),
             structured = $8,
+            fathom_user_id = COALESCE($11, fathom_user_id),
             notes_generated_at = now()
       WHERE id = $1`,
     [
@@ -184,6 +189,7 @@ async function applyTranscript(meeting, text, info, how) {
       structured.requirement || null,
       JSON.stringify(structured),
       theirs || null,
+      fathomUserId || null,
     ]
   );
 
@@ -192,6 +198,33 @@ async function applyTranscript(meeting, text, info, how) {
       `summary from ${preferFathom && theirs ? "Fathom" : "the portal"}`
   );
 }
+
+/** Each person pastes their own key and secret — one Fathom account each. */
+router.post("/connect", requireAuth, async (req, res, next) => {
+  try {
+    const webhookSecret = String(req.body.webhook_secret || "").trim();
+    if (!webhookSecret) return res.status(400).json({ error: "Paste your Fathom webhook secret." });
+
+    await fathom.saveAccount(req.user.id, {
+      apiKey: String(req.body.api_key || "").trim() || null,
+      webhookSecret,
+      label: req.body.label || req.user.display_name,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/disconnect", requireAuth, async (req, res, next) => {
+  try {
+    await fathom.forgetAccount(req.user.id);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /** Is Fathom set up, and is anything arriving? */
 router.get("/status", requireAuth, async (req, res, next) => {
@@ -204,7 +237,12 @@ router.get("/status", requireAuth, async (req, res, next) => {
       db.one(`SELECT COUNT(*)::int AS n FROM fathom_unmatched WHERE created_at > now() - interval '30 days'`),
     ]);
 
+    const mine = await fathom.accountFor(req.user.id);
+
     res.json({
+      connected: Boolean(mine),
+      connected_at: mine && mine.connected_at,
+      last_seen_at: mine && mine.last_seen_at,
       configured: fathom.configured(),
       webhook_secret_set: Boolean(process.env.FATHOM_WEBHOOK_SECRET),
       webhook_url: `${req.protocol}://${req.get("host")}/api/fathom/webhook`,

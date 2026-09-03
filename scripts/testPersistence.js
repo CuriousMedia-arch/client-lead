@@ -102,7 +102,7 @@ create table opportunity_meetings (
   transcript_state text, transcript_text text,
   notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text,
   provider text, transcript_source text, fathom_recording_id text,
-  fathom_share_url text, fathom_summary text
+  fathom_share_url text, fathom_summary text, fathom_user_id int
 );
 create table opportunity_proposals (
   id serial primary key, opportunity_id int, version int, price numeric, service text,
@@ -130,6 +130,10 @@ create table activity (
 create table contact_claims (
   id serial primary key, contact_id int, user_id int, source text,
   claimed_at timestamptz default now(), released_at timestamptz, release_note text
+);
+create table fathom_accounts (
+  user_id int primary key, api_key text, webhook_secret text, label text,
+  connected_at timestamptz default now(), last_seen_at timestamptz, last_error text
 );
 create table fathom_unmatched (
   id serial primary key, recording_id text unique, title text,
@@ -793,6 +797,24 @@ async function fathomScenario() {
   });
   check("Refuses to attach an unrelated recording", unrelated === null,
     unrelated ? `wrongly matched meeting ${unrelated.meeting.id}` : "left unmatched");
+
+  // --- one Fathom account per person ---
+  // The bot joins from each host's own calendar, so each has their own key and
+  // their own webhook secret. A single shared secret only ever worked for one
+  // person; everyone else's webhooks were rejected with no visible cause.
+  await f.saveAccount(1, { apiKey: "key-one", webhookSecret: "secret-one", label: "Vihith" });
+
+  const mine = crypto.createHmac("sha256", "secret-one").update(body).digest("hex");
+  const sender = await f.accountForWebhook(body, mine);
+  check("A webhook is traced to the account that signed it",
+    sender && sender.userId === 1 && sender.apiKey === "key-one",
+    sender ? `matched ${sender.label}` : "no account matched");
+
+  const stranger = crypto.createHmac("sha256", "somebody-else").update(body).digest("hex");
+  check("Another account's signature is refused",
+    (await f.accountForWebhook(body, stranger)) === null, "rejected");
+
+  await f.forgetAccount(1);
 
   // --- whose summary shows up ---
   const routes = require("../routes/fathom");
