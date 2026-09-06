@@ -150,7 +150,8 @@ create table google_accounts (
 );
 create table opportunity_execution (
   id serial primary key, opportunity_id int, deliverable text, owner_name text,
-  owner_id int, due_date date, status text default 'pending', notes text,
+  owner_id int, due_date date, start_date date, stakeholder text,
+  status text default 'pending', notes text,
   sort int default 0, created_by int,
   created_at timestamptz default now(), updated_at timestamptz default now()
 );
@@ -494,11 +495,12 @@ async function newFeaturesScenario() {
   // --- execution plan ---
   await call("POST", `/api/outreach/${oid}/proposal`, { price: 500000, body: "Proposal text" });
   const ex = await call("POST", `/api/outreach/${oid}/execution`, {
-    deliverable: "50 creator reels live", due_date: "2026-09-30", owner_name: "Riya",
+    deliverable: "50 creator reels live", start_date: "2026-09-01",
+    due_date: "2026-09-30", stakeholder: "Riya",
   });
   check("Execution plan takes deliverable, date and owner",
-    ex.status === 200 && ex.json.item.owner_name === "Riya",
-    ex.status === 200 ? `${ex.json.item.deliverable} / ${ex.json.item.due_date} / ${ex.json.item.owner_name}` : ex.raw);
+    ex.status === 200 && ex.json.item.stakeholder === "Riya",
+    ex.status === 200 ? `${ex.json.item.deliverable} / ${ex.json.item.start_date}→${ex.json.item.due_date} / ${ex.json.item.stakeholder}` : ex.raw);
 
   const exId = ex.json.item.id;
   const moved = await call("PATCH", `/api/outreach/execution/${exId}`, { status: "in_progress" });

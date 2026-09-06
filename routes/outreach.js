@@ -191,14 +191,27 @@ async function contextFor(opp) {
   // The newest signal on this company is what makes the pitch specific rather
   // than generic. Matched on company name, not lead id, because a Fresh claim
   // and an All Leads claim on the same brand should read the same news.
-  const signal = await db.one(
-    `SELECT s.title, s.summary, s.signal_type, s.why_it_matters
-       FROM signals s
-      WHERE lower(s.company) = lower($1)
-      ORDER BY s.published DESC NULLS LAST, s.created_at DESC
-      LIMIT 1`,
-    [opp.company]
-  ).catch(() => null);
+  /*
+   * The newest signal for this opportunity.
+   *
+   * Matched on the LEAD first and the company name second. Name matching alone
+   * kept missing: the scraper stores whatever the article called the company,
+   * so "Zepto" on the lead and "Zepto Now" on the signal never met, and the
+   * message came out with no news in it at all — which is the one thing that
+   * makes it read as written for them rather than a template.
+   */
+  const signal = await db
+    .one(
+      `SELECT s.title, s.summary, s.signal_type, s.why_it_matters
+         FROM signals s
+        WHERE ($2::bigint IS NOT NULL AND s.lead_id = $2::bigint)
+           OR lower(s.company) = lower($1)
+        ORDER BY (CASE WHEN s.lead_id = $2::bigint THEN 0 ELSE 1 END),
+                 s.published DESC NULLS LAST, s.created_at DESC
+        LIMIT 1`,
+      [opp.company, opp.lead_id || null]
+    )
+    .catch(() => null);
 
   return {
     company: opp.company,
@@ -2451,7 +2464,7 @@ router.post("/:id/delivery", async (req, res, next) => {
 router.get("/:id/execution", async (req, res, next) => {
   try {
     const rows = await db.all(
-      `SELECT * FROM opportunity_execution WHERE opportunity_id = $1 ORDER BY sort, due_date NULLS LAST, id`,
+      `SELECT * FROM opportunity_execution WHERE opportunity_id = $1 ORDER BY sort, start_date NULLS LAST, due_date NULLS LAST, id`,
       [req.params.id]
     );
     res.json({ items: rows });
@@ -2471,15 +2484,15 @@ router.post("/:id/execution", async (req, res, next) => {
 
     const row = await db.one(
       `INSERT INTO opportunity_execution
-         (opportunity_id, deliverable, owner_name, owner_id, due_date, notes, sort, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6,
+         (opportunity_id, deliverable, owner_name, stakeholder, start_date, due_date, notes, sort, created_by)
+       VALUES ($1, $2, $3, $3, $4, $5, $6,
                COALESCE((SELECT MAX(sort) + 1 FROM opportunity_execution WHERE opportunity_id = $1), 0),
                $7)
        RETURNING *`,
       [
         opp.id, deliverable,
-        req.body.owner_name || null,
-        req.body.owner_id || null,
+        req.body.stakeholder || req.body.owner_name || null,
+        req.body.start_date || null,
         req.body.due_date || null,
         req.body.notes || null,
         req.user.id,
@@ -2508,6 +2521,8 @@ router.patch("/execution/:itemId", async (req, res, next) => {
       `UPDATE opportunity_execution
           SET deliverable = COALESCE($2, deliverable),
               owner_name  = COALESCE($3, owner_name),
+              stakeholder = COALESCE($3, stakeholder),
+              start_date  = COALESCE($7, start_date),
               due_date    = COALESCE($4, due_date),
               status      = COALESCE($5, status),
               notes       = COALESCE($6, notes),
@@ -2516,10 +2531,11 @@ router.patch("/execution/:itemId", async (req, res, next) => {
       [
         item.id,
         req.body.deliverable || null,
-        req.body.owner_name || null,
+        req.body.stakeholder || req.body.owner_name || null,
         req.body.due_date || null,
         ["pending", "in_progress", "done", "blocked"].includes(req.body.status) ? req.body.status : null,
         req.body.notes || null,
+        req.body.start_date || null,
       ]
     );
     res.json({ item: row });

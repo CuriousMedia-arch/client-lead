@@ -250,7 +250,6 @@ async function renderToday(opts = {}) {
 
   body.innerHTML = `
     <div class="stats today-slabs">
-      ${targetSlab(data.target)}
       ${slabs
         .map(
           ([key, label, value, note, tone]) => `
@@ -263,6 +262,7 @@ async function renderToday(opts = {}) {
         </button>`
         )
         .join("")}
+      ${targetSlab(data.target)}
     </div>
 
     ${
@@ -320,24 +320,17 @@ async function renderToday(opts = {}) {
 function targetSlab(t) {
   if (!t || !t.target) return "";
 
+  // Rendered as an ordinary stat, in the same row as the rest. It was a wide
+  // panel with its own progress bar, which made the month's target shout over
+  // the six counts that tell you what to do today.
   const done = t.pct != null && t.pct >= 100;
-  const pct = Math.min(t.pct || 0, 100);
 
   return `
-    <div class="target-slab ${done ? "is-done" : ""}">
-      <div class="target-head">
-        <span class="mono-label">This month</span>
-        <span class="target-figure">
-          ${done
-            ? `Target met — ${inrShort(t.achieved)} of ${inrShort(t.target)}`
-            : `${inrShort(t.remaining)} to go`}
-        </span>
-      </div>
-      <div class="target-bar"><i style="width:${pct}%"></i></div>
-      <p class="target-note">
-        ${inrShort(t.achieved)} of ${inrShort(t.target)} · ${t.deals} deal${t.deals === 1 ? "" : "s"} won
-      </p>
-    </div>`;
+    <button class="stat stat-click ${done ? "is-target-done" : ""}" data-slab="target" disabled>
+      <p class="stat-label">Target left</p>
+      <p class="stat-value">${done ? "Met" : inrShort(t.remaining)}</p>
+      <p class="stat-note">${inrShort(t.achieved)} of ${inrShort(t.target)}</p>
+    </button>`;
 }
 
 function todayCard(o, bucket) {
@@ -1801,18 +1794,22 @@ function wsExecutionBlock(d) {
         items.length
           ? `<div class="exec-list">
                <div class="exec-head">
-                 <span>Deliverable</span><span>Timeline</span><span>Owner</span><span>Status</span><span></span>
+                 <span>Deliverable</span><span>Start</span><span>End</span><span>Stakeholder</span><span>Status</span><span></span>
                </div>
                ${items
                  .map((it) =>
                    outreach.editingExec === it.id
                      ? `<div class="exec-row exec-editing">
                           <input class="exec-edit" data-e="deliverable" value="${esc(it.deliverable)}" />
+                          <input class="exec-edit" data-e="start_date" type="date" value="${
+                            it.start_date ? String(it.start_date).slice(0, 10) : ""
+                          }" />
                           <input class="exec-edit" data-e="due_date" type="date" value="${
                             it.due_date ? String(it.due_date).slice(0, 10) : ""
                           }" />
-                          <input class="exec-edit" data-e="owner_name" value="${esc(it.owner_name || "")}" />
-                          <span></span>
+                          <input class="exec-edit" data-e="stakeholder" value="${esc(
+                            it.stakeholder || it.owner_name || ""
+                          )}" />
                           <span>
                             <button class="btn btn-sm btn-primary" data-exec-save="${it.id}">Save</button>
                             <button class="btn btn-sm btn-ghost" data-exec-cancel="1">Cancel</button>
@@ -1851,8 +1848,9 @@ function wsExecutionBlock(d) {
       <div class="grid-3">
         <label class="field"><span>Deliverable</span>
           <input id="ex-what" placeholder="e.g. 50 creator reels live" /></label>
-        <label class="field"><span>Timeline (due date)</span><input type="date" id="ex-due" /></label>
-        <label class="field"><span>Owner</span><input id="ex-owner" placeholder="who's responsible" /></label>
+        <label class="field"><span>Start</span><input type="date" id="ex-start" /></label>
+        <label class="field"><span>End</span><input type="date" id="ex-due" /></label>
+        <label class="field"><span>Stakeholder</span><input id="ex-owner" placeholder="who's accountable" /></label>
       </div>
       <button class="btn btn-sm" id="add-exec">Save</button>
     </section>`;
@@ -2460,8 +2458,9 @@ function wireWorkspace() {
         method: "POST",
         body: {
           deliverable: what,
+          start_date: $("#ex-start", panel).value || null,
           due_date: $("#ex-due", panel).value || null,
-          owner_name: $("#ex-owner", panel).value || null,
+          stakeholder: $("#ex-owner", panel).value || null,
         },
       });
       await reloadWorkspace();
@@ -2520,8 +2519,9 @@ function wireWorkspace() {
           method: "PATCH",
           body: {
             deliverable: field("deliverable"),
+            start_date: field("start_date"),
             due_date: field("due_date"),
-            owner_name: field("owner_name"),
+            stakeholder: field("stakeholder"),
           },
         });
         outreach.editingExec = null;
