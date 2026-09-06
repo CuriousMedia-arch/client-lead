@@ -1791,9 +1791,6 @@ function wsExecutionBlock(d) {
       <div class="grid-3">
         <label class="field"><span>Budget ₹</span>
           <input type="number" id="dl-budget" value="${Number(o.delivery_budget || 0)}" /></label>
-        <label class="field"><span>Timeline</span>
-          <input id="dl-timeline" value="${esc(o.delivery_timeline || "")}"
-                 placeholder="e.g. 6 weeks from signing" /></label>
         <label class="field"><span>Client POC</span>
           <input id="dl-client" value="${esc(o.delivery_client_poc || "")}"
                  placeholder="their side" /></label>
@@ -2501,7 +2498,6 @@ function wireWorkspace() {
         method: "POST",
         body: {
           budget: Number($("#dl-budget", panel).value) || null,
-          timeline: $("#dl-timeline", panel).value || null,
           client_poc: $("#dl-client", panel).value || null,
           agency_poc: $("#dl-agency", panel).value || null,
         },

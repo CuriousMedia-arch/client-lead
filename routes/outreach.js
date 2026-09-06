@@ -2479,9 +2479,12 @@ router.post("/:id/delivery", async (req, res, next) => {
     if (!assertOwner(opp, req.user, res)) return;
 
     await db.run(
+      // No delivery_timeline column, and there should not be one: the timeline
+      // is a start and an end date per deliverable, not one free-text field
+      // for the whole engagement. Writing to it was a guaranteed 500 on every
+      // Save details.
       `UPDATE opportunities
           SET delivery_budget     = $2,
-              delivery_timeline   = $5,
               delivery_client_poc = $3,
               delivery_agency_poc = $4,
               updated_at = now()
@@ -2491,7 +2494,6 @@ router.post("/:id/delivery", async (req, res, next) => {
         Number(req.body.budget) || null,
         req.body.client_poc || null,
         req.body.agency_poc || null,
-        req.body.timeline || null,
       ]
     );
 

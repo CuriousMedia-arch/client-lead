@@ -492,6 +492,24 @@ async function newFeaturesScenario() {
     Number(saved.quoted_price) === 500000 && !saved.vendor_cost && !saved.margin_pct,
     `price ${saved.quoted_price}, budget ${saved.client_budget}, cost ${saved.vendor_cost}`);
 
+  // --- Delivery details ---
+  // Saving these wrote to a column that was never created, so every "Save
+  // details" returned a 500. Nothing caught it because no test pressed the
+  // button.
+  const dl = await call("POST", `/api/outreach/${oid}/delivery`, {
+    budget: 750000, client_poc: "Neha", agency_poc: "Riya",
+  });
+  check("Delivery details save", dl.status === 200, dl.status === 200 ? null : dl.raw);
+
+  const saved2 = mem.public.many(
+    `select delivery_budget, delivery_client_poc, delivery_agency_poc
+       from opportunities where id = ${oid}`
+  )[0];
+  check("Budget and both contacts are stored",
+    Number(saved2.delivery_budget) === 750000 &&
+      saved2.delivery_client_poc === "Neha" && saved2.delivery_agency_poc === "Riya",
+    `${saved2.delivery_budget} / ${saved2.delivery_client_poc} / ${saved2.delivery_agency_poc}`);
+
   // --- execution plan ---
   await call("POST", `/api/outreach/${oid}/proposal`, { price: 500000, body: "Proposal text" });
   const ex = await call("POST", `/api/outreach/${oid}/execution`, {
