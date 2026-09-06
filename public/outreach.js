@@ -363,7 +363,7 @@ function todayCard(o, bucket) {
     : "";
 
   return `
-    <article class="opp-card" data-opp="${o.id}">
+    <article class="opp-card opp-${esc(o.source || "all")}" data-opp="${o.id}">
       <div class="opp-card-top">
         <div>
           <div class="company-name">${esc(o.company)}</div>
@@ -376,8 +376,24 @@ function todayCard(o, bucket) {
         ${clock}
       </div>
 
+      ${
+        o.signal
+          ? `<div class="opp-signal">
+               <span class="mono-label">${esc(
+                 (o.signal.signal_type || "news").replace(/_/g, " ")
+               )}${o.signal.published ? ` · ${esc(dateOnly(o.signal.published))}` : ""}</span>
+               <p>${esc(o.signal.title)}</p>
+             </div>`
+          : ""
+      }
+
       <div class="opp-card-tags">
         <span class="stage-chip stage-${esc(o.stage)}">${esc(STAGE_LABEL[o.stage] || o.stage)}</span>
+        ${
+          o.source && o.source !== "all"
+            ? `<span class="tag-source">${o.source === "newspaper" ? "Newspaper" : "Fresh"}</span>`
+            : ""
+        }
         ${o.service_primary ? `<span class="tag-soft">${esc(o.service_primary)}</span>` : ""}
         ${o.quoted_price ? `<span class="tag-soft">${inrShort(o.quoted_price)}</span>` : ""}
         ${

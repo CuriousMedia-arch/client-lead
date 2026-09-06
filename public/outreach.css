@@ -1057,3 +1057,31 @@
   font: inherit;
   font-size: 13px;
 }
+
+/* ── The news behind a Fresh claim ────────────────────────────────────────── */
+
+/*
+ * A Fresh Leads claim exists because of a story. Showing it on the card is
+ * what makes these visibly different from an All Leads claim, which is a
+ * person you chose rather than a moment you spotted.
+ */
+.opp-signal {
+  background: var(--amber-tint);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.opp-signal p { margin: 3px 0 0; font-size: 12.5px; line-height: 1.4; }
+.opp-signal .mono-label { color: var(--amber-ink); }
+
+.opp-fresh, .opp-newspaper { border-left: 3px solid var(--amber); }
+
+.tag-source {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  background: var(--amber-tint);
+  color: var(--amber-ink);
+  border-radius: 999px;
+  padding: 3px 8px;
+}

@@ -84,6 +84,8 @@ const OPP_LIST = `
          cc.linkedin              AS contact_linkedin,
          cc.deadline_at           AS contact_deadline,
          cc.closed_at             AS contact_closed,
+         cc.owner_id              AS contact_owner,
+         l.fresh_owner_id         AS lead_fresh_owner,
          fc.name                  AS focus_name,
          fc.role                  AS focus_role,
          fc.email                 AS focus_email,
@@ -108,6 +110,8 @@ const OPP_SELECT = `
          cc.linkedin              AS contact_linkedin,
          cc.deadline_at           AS contact_deadline,
          cc.closed_at             AS contact_closed,
+         cc.owner_id              AS contact_owner,
+         l.fresh_owner_id         AS lead_fresh_owner,
          fc.name                  AS focus_name,
          fc.role                  AS focus_role,
          fc.email                 AS focus_email,
@@ -432,8 +436,21 @@ router.get("/today", async (req, res, next) => {
     await sweeps.sweepSilent();
 
     const mine = await db.all(
-      `${OPP_LIST} WHERE o.owner_id = $1 AND o.stage NOT IN ('won','lost')
-       ORDER BY o.updated_at DESC`,
+      `${OPP_LIST}
+        WHERE o.owner_id = $1
+          AND o.stage NOT IN ('won','lost')
+          -- The claim underneath must still be theirs.
+          --
+          -- Releasing a claim clears the owner from the lead or contact, but
+          -- nothing removed the opportunity — so it stayed on the old owner's
+          -- board, and a lead someone else had since claimed showed up on the
+          -- admin's Today. Checking ownership here rather than trusting a
+          -- stored copy of it means the two can never disagree.
+          AND (
+            (o.contact_id IS NOT NULL AND cc.owner_id = $1)
+            OR (o.lead_id IS NOT NULL AND (l.fresh_owner_id = $1 OR l.owner_id = $1))
+          )
+        ORDER BY o.updated_at DESC`,
       [req.user.id]
     );
 
@@ -470,6 +487,28 @@ router.get("/today", async (req, res, next) => {
 
     const followupBy = new Map();
     for (const f of dueFollowups) if (!followupBy.has(f.opportunity_id)) followupBy.set(f.opportunity_id, f);
+    /*
+     * The news behind each Fresh claim.
+     *
+     * A Fresh Leads claim exists BECAUSE of a story — that is the whole reason
+     * it was worth picking up, and the card was showing none of it. Without
+     * the headline the card is indistinguishable from an All Leads claim, and
+     * the salesperson has to open the workspace to remember why they took it.
+     *
+     * One query for the whole board rather than one per card.
+     */
+    const freshIds = mine.filter((o) => o.lead_id).map((o) => o.lead_id);
+    const signals = freshIds.length
+      ? await db.all(
+          `SELECT DISTINCT ON (s.lead_id) s.lead_id, s.title, s.signal_type, s.published
+             FROM signals s
+            WHERE s.lead_id = ANY($1::bigint[])
+            ORDER BY s.lead_id, s.published DESC NULLS LAST, s.created_at DESC`,
+          [freshIds]
+        ).catch(() => [])
+      : [];
+    const signalBy = new Map(signals.map((sg) => [String(sg.lead_id), sg]));
+
     const nextBy = new Map();
     for (const m of nextMeetings) nextBy.set(m.opportunity_id, m);
 
@@ -491,6 +530,7 @@ router.get("/today", async (req, res, next) => {
       o.due_followup = followupBy.get(o.id) || null;
       o.meeting_today = meetingBy.get(o.id) || null;
       o.next_meeting_at = (nextBy.get(o.id) || {}).scheduled_at || null;
+      o.signal = o.lead_id ? signalBy.get(String(o.lead_id)) || null : null;
 
       const waitingOnUs =
         o.last_reply_at && (!o.last_contacted_at || o.last_reply_at > o.last_contacted_at);
