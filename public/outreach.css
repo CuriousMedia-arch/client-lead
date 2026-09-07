@@ -563,7 +563,7 @@
   border-color: var(--teal);
   box-shadow: var(--shadow-sm);
 }
-.stat-click:disabled { cursor: default; opacity: .55; }
+.stat-click:disabled { cursor: default; }
 .stat-click.is-focused { border-color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal); }
 
 .focus-bar {
@@ -1027,7 +1027,7 @@
  */
 .stats .stat.is-target-done { border-color: rgba(62, 156, 92, .4); background: var(--green-tint); }
 .stats .stat.is-target-done .stat-value { color: var(--green); }
-.stat-click:disabled { opacity: 1; }
+
 
 /* Inline editing of a delivery line. */
 .exec-editing { background: var(--surface-sunk); }

@@ -73,8 +73,19 @@ router.get("/", async (req, res, next) => {
            -- Opportunities are exactly what Today lists, so counting those
            -- makes the badge and the page agree by construction rather than by
            -- two queries happening to stay in step.
-           (SELECT COUNT(*) FROM opportunities
-             WHERE owner_id = $1 AND stage NOT IN ('won','lost'))              AS mine,
+           -- Must apply the SAME ownership rule as /api/outreach/today, which
+           -- also checks the claim underneath is still yours. Counting only
+           -- opportunities.owner_id counted rows whose claim had since been
+           -- released or taken over — so the badge said 5 while the page
+           -- showed 2, and there was no way to tell which was right.
+           (SELECT COUNT(*)
+              FROM opportunities o
+              LEFT JOIN company_contacts cc ON cc.id = o.contact_id
+              LEFT JOIN leads l ON l.id = o.lead_id
+             WHERE o.owner_id = $1
+               AND o.stage NOT IN ('won','lost')
+               AND ((o.contact_id IS NOT NULL AND cc.owner_id = $1)
+                 OR (o.lead_id IS NOT NULL AND (l.fresh_owner_id = $1 OR l.owner_id = $1))))  AS mine,
            (SELECT COUNT(*) FROM leads WHERE in_newspaper = true)              AS newspaper,
            ((SELECT COUNT(*) FROM company_contacts
               WHERE owner_id = $1 AND deleted_at IS NULL AND closed_at IS NULL AND deadline_at IS NOT NULL
