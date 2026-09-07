@@ -674,9 +674,15 @@ async function openSyncPicker() {
       <div id="sp-summary" class="wl-summary"></div>
       <div id="sp-list" class="wl-list" style="margin-top:10px"><p class="hint">Loading…</p></div>
 
-      <div class="ws-actions" style="margin-top:14px">
+      <div class="ws-actions" style="margin-top:10px">
+        <button class="btn btn-sm" id="sp-all-on">Tick everything shown</button>
+        <button class="btn btn-sm" id="sp-all-off">Untick everything shown</button>
+      </div>
+
+      <div class="ws-actions" style="margin-top:6px">
         <button class="btn btn-sm" data-sp-scope="no_signals" data-sp-on="false">Untick those with no news in 90 days</button>
         <button class="btn btn-sm" data-sp-scope="unclaimed" data-sp-on="false">Untick unclaimed</button>
+        <button class="btn btn-sm btn-ghost" data-sp-scope="all" data-sp-on="true">Watch all 15,000+</button>
         <button class="btn btn-primary" id="sp-done">Done</button>
       </div>
     </div>`;
@@ -740,6 +746,35 @@ async function openSyncPicker() {
       list.innerHTML = `<p class="hint" style="padding:12px">Couldn't load: ${esc(err.message)}</p>`;
     }
   }
+
+  /*
+   * Tick or untick everything currently listed — which respects the search and
+   * the filter above it. That is the useful version: "watch all 15,000" is
+   * rarely what anyone wants, but "watch the 40 companies matching 'bank'" is.
+   *
+   * Sent as one request rather than one per row, so ticking forty companies is
+   * one round trip instead of forty.
+   */
+  async function setAllShown(on) {
+    const ids = $$("[data-sp-id]", box).map((cb) => Number(cb.dataset.spId));
+    if (!ids.length) return;
+
+    try {
+      const r = await api("/api/admin/watchlist", { method: "POST", body: { ids, active: on } });
+      for (const cb of $$("[data-sp-id]", box)) {
+        cb.checked = on;
+        cb.closest(".wl-row").classList.toggle("is-on", on);
+      }
+      $("#sp-summary", box).innerHTML =
+        `<strong>${r.watched.toLocaleString()}</strong> of ${r.total.toLocaleString()} companies watched`;
+      toast(`${ids.length} ${on ? "now watched" : "no longer watched"}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  $("#sp-all-on", box).addEventListener("click", () => setAllShown(true));
+  $("#sp-all-off", box).addEventListener("click", () => setAllShown(false));
 
   let timer;
   $("#sp-search", box).addEventListener("input", () => {
@@ -3732,6 +3767,18 @@ function wireAdmin() {
 function pollRun() {
   clearInterval(state.runPoll);
 
+  /*
+   * Don't call it finished until we've actually seen it running.
+   *
+   * A sync takes a moment to register, so the first poll almost always reports
+   * running:false — and the old version took that as "done" and said "Sync
+   * finished" a second after you pressed the button, whether or not anything
+   * had happened. Worse, if the run failed to start at all, that was the only
+   * feedback you got.
+   */
+  let sawRunning = false;
+  let ticks = 0;
+
   state.runPoll = setInterval(async () => {
     let data;
     try {
@@ -3756,11 +3803,33 @@ function pollRun() {
         <div class="progress"><div style="width:${pct}%"></div></div>`;
     }
 
-    if (data.running) return;
+    ticks++;
+
+    if (data.running) {
+      sawRunning = true;
+      return;
+    }
+
+    // Give it half a minute to appear before deciding nothing is happening.
+    if (!sawRunning && ticks < 15) return;
 
     clearInterval(state.runPoll);
     state.scanning = false;
-    toast("Sync finished");
+
+    if (!sawRunning) {
+      toast(
+        "The sync didn't start. Check the news provider key, and that some companies are ticked to watch.",
+        true
+      );
+    } else {
+      const c = data.last || data.current || {};
+      toast(
+        c.fetched != null
+          ? `Sync finished — ${c.fetched} article${c.fetched === 1 ? "" : "s"} from ${c.done || 0} companies`
+          : "Sync finished"
+      );
+    }
+
     loadStats();
 
     // Redraw whichever page is actually open, not always Admin.
