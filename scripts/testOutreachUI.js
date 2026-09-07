@@ -443,9 +443,21 @@ async function drive(window) {
       // Must show all five fields even on a lead with nothing filled in —
       // it used to hide entirely until proposal stage, so people assumed the
       // section did not exist.
-      check("Delivery shows all five fields when empty", () => {
+      // A row with fewer cells than the header slides every column left, which
+      // showed the stakeholder under "End". Counting them catches it.
+      check("Delivery columns line up", () => {
+        const head = $(".exec-head");
+        if (!head) return "no rows yet";
+        const cols = head.children.length;
+        const row = $(".exec-row");
+        return !row || row.children.length === cols
+          ? `${cols} columns`
+          : `header ${cols}, row ${row.children.length}`;
+      });
+
+      check("Delivery shows every field when empty", () => {
         const t = $(".ws-body").textContent;
-        const want = ["Deliverable", "Timeline", "Budget", "Client POC", "Agency POC"];
+        const want = ["Deliverable", "Start", "End", "Budget", "Client POC", "Agency POC"];
         const missing = want.filter((w) => !t.includes(w));
         return missing.length ? `missing: ${missing.join(", ")}` : "all five";
       });

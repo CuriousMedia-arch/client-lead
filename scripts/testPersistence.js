@@ -102,6 +102,7 @@ create table opportunity_meetings (
   transcript_state text, transcript_text text,
   notes_generated_at timestamptz, notes_sent_at timestamptz, notes_sent_to text,
   provider text, transcript_source text, fathom_recording_id text,
+  transcript_attempts int default 0, transcript_next_try timestamptz,
   fathom_share_url text, fathom_summary text, fathom_user_id int
 );
 create table opportunity_proposals (
@@ -928,13 +929,59 @@ async function badgeScenario() {
   // here is whether the COUNTING agrees, not whether the endpoint responds.
   const badge = Number(
     mem.public.many(
-      `select count(*)::int as n from opportunities
-        where owner_id = 1 and stage not in ('won','lost')`
+      `select count(*)::int as n
+         from opportunities o
+         left join company_contacts cc on cc.id = o.contact_id
+         left join leads l on l.id = o.lead_id
+        where o.owner_id = 1
+          and o.stage not in ('won','lost')
+          and ((o.contact_id is not null and cc.owner_id = 1)
+            or (o.lead_id is not null and (l.fresh_owner_id = 1 or l.owner_id = 1)))`
     )[0].n
   );
 
   check("The tab badge equals the cards on Today", badge === cards,
     `badge ${badge}, ${cards} cards`);
+}
+
+/** Notes should write themselves on the sweep, not wait for a button. */
+async function autoNotesScenario() {
+  console.log("\n  --- automatic notes ---\n");
+
+  const sweeps = require("../lib/sweeps");
+
+  mem.public.none(`
+    insert into companies (name) values ('Auto Co');
+    insert into company_contacts (company, name, owner_id, claim_source, status)
+      values ('Auto Co','Sam A',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Auto Co'")[0].id;
+  const oid = (await call("POST", "/api/outreach/open", { contact_id: cid })).json.opportunity.id;
+
+  // A meeting that finished an hour ago, with no notes.
+  mem.public.none(`
+    insert into opportunity_meetings (opportunity_id, scheduled_at, meet_link)
+    values (${oid}, now() - interval '1 hour', 'https://meet.google.com/aaa-bbb-ccc')
+  `);
+  const mid = mem.public.many(
+    `select id from opportunity_meetings where opportunity_id = ${oid}`
+  )[0].id;
+
+  const wrote = await sweeps.sweepMeetingNotes();
+  check("The notes sweep runs without a transcript source", typeof wrote === "number",
+    `returned ${wrote}`);
+
+  const after = mem.public.many(
+    `select transcript_attempts, transcript_state, notes from opportunity_meetings where id = ${mid}`
+  )[0];
+
+  // Nobody is connected, so there is nothing to fetch — and it must stop
+  // asking rather than retrying every fifteen minutes forever.
+  check("It gives up on meetings that can never have a transcript",
+    Number(after.transcript_attempts) >= 1,
+    `attempts ${after.transcript_attempts}, state ${after.transcript_state}`);
+
+  check("It doesn't invent notes", !after.notes, after.notes ? "wrote something" : "left empty");
 }
 
 function check(label, ok, detail) {
@@ -1054,6 +1101,7 @@ async function run() {
   await microsoftScenario();
   await fathomScenario();
   await targetScenario();
+  await autoNotesScenario();
   await badgeScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);

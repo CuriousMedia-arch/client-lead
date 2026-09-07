@@ -1831,12 +1831,13 @@ function wsExecutionBlock(d) {
                      : `
                  <div class="exec-row exec-${esc(it.status)}">
                    <span class="exec-what">${esc(it.deliverable)}</span>
+                   <span class="exec-due">${it.start_date ? esc(dateOnly(it.start_date)) : "—"}</span>
                    <span class="exec-due ${
                      it.due_date && new Date(it.due_date) < new Date() && it.status !== "done"
                        ? "is-late"
                        : ""
                    }">${it.due_date ? esc(dateOnly(it.due_date)) : "—"}</span>
-                   <span>${esc(it.owner_name || "—")}</span>
+                   <span>${esc(it.stakeholder || it.owner_name || "—")}</span>
                    <span>
                      <select class="exec-status" data-exec-status="${it.id}">
                        ${Object.entries(STATUS)
@@ -1858,7 +1859,7 @@ function wsExecutionBlock(d) {
           : `<p class="muted">Nothing planned yet.</p>`
       }
 
-      <div class="grid-3">
+      <div class="grid-4">
         <label class="field"><span>Deliverable</span>
           <input id="ex-what" placeholder="e.g. 50 creator reels live" /></label>
         <label class="field"><span>Start</span><input type="date" id="ex-start" /></label>

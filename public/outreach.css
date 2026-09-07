@@ -1085,3 +1085,21 @@
   border-radius: 999px;
   padding: 3px 8px;
 }
+
+/*
+ * Four fields need four columns.
+ *
+ * The add-a-deliverable form had four inputs inside .grid-3, so End wrapped
+ * onto a second row away from its label's position in the header and looked
+ * like it wasn't there. The deliverable name gets the extra width because it
+ * is the only free-text field of the four.
+ */
+.grid-4 {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.6fr) 140px 140px minmax(130px, 1fr);
+  gap: 0 14px;
+}
+
+@media (max-width: 720px) {
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+}
