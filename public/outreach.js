@@ -255,7 +255,7 @@ async function renderToday(opts = {}) {
           ([key, label, value, note, tone]) => `
         <button class="stat stat-click ${value ? tone : ""} ${
             outreach.focus === key ? "is-focused" : ""
-          }" data-slab="${key}" ${value ? "" : "disabled"}>
+          }" data-slab="${key}">
           <p class="stat-label">${esc(label)}</p>
           <p class="stat-value">${value}</p>
           <p class="stat-note">${esc(note)}</p>
@@ -326,7 +326,7 @@ function targetSlab(t) {
   const done = t.pct != null && t.pct >= 100;
 
   return `
-    <button class="stat stat-click ${done ? "is-target-done" : ""}" data-slab="target" disabled>
+    <button class="stat stat-target ${done ? "is-target-done" : ""}" type="button">
       <p class="stat-label">Target left</p>
       <p class="stat-value">${done ? "Met" : inrShort(t.remaining)}</p>
       <p class="stat-note">${inrShort(t.achieved)} of ${inrShort(t.target)}</p>

@@ -364,6 +364,11 @@ async function drive(window) {
       ? "present"
       : "no newspaper slab");
 
+  // Every slab must be clickable, including empty ones — a zero you cannot
+  // click looks broken, and it is how you confirm a group really is empty.
+  check("No slab is disabled", () =>
+    $$("[data-slab]").every((b) => !b.disabled) ? "all clickable" : "some disabled");
+
   const liveSlab = $$("[data-slab]").find((b) => !b.disabled);
   const liveKey = liveSlab && liveSlab.dataset.slab;
   click(liveSlab);
