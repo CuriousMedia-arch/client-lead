@@ -2015,7 +2015,9 @@ function wsCloseBlock(d) {
       <div class="ws-actions">
         <button class="btn btn-sm btn-primary" id="mark-won">We won this</button>
         <button class="btn btn-sm btn-danger" id="open-lost">We lost this</button>
+        <button class="btn btn-sm btn-ghost" id="release-claim">Hand it back</button>
       </div>
+      <p class="hint">Handing back isn't the same as losing — it goes to the next person without a reason being recorded against the client.</p>
 
       <div id="won-form" hidden>
         <label class="field">
@@ -2599,6 +2601,18 @@ function wireWorkspace() {
 
   on("#mark-won", "click", confirmWon);
   on("#mark-won-confirm", "click", confirmWon);
+
+  on("#release-claim", "click", () =>
+    guard(async () => {
+      if (!confirm("Hand this back? It returns to the pool for someone else.")) return;
+      const note = prompt("Why, so the next person knows? (optional)") || "";
+      await api(`/api/outreach/${id}/release`, { method: "POST", body: { note } });
+      toast("Handed back");
+      closeWorkspace();
+      outreach.today = null;
+      renderOutreach();
+    })
+  );
 
   on("#open-lost", "click", () => {
     const form = $("#lost-form", panel);

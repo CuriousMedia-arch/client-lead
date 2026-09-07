@@ -2255,6 +2255,84 @@ router.post("/:id/stage", async (req, res, next) => {
 });
 
 /**
+ * Hand it back.
+ *
+ * Not the same as losing it: losing means the client said no, and that gets an
+ * interview because the reason is worth keeping. Releasing means "this isn't
+ * mine to work" — wrong fit, no time, someone else is better placed. Forcing
+ * that through the loss form would have poisoned the loss statistics with
+ * reasons that were never about the client.
+ *
+ * The opportunity is deleted rather than kept when nothing has been done on
+ * it: an untouched record is not history, and leaving it would put a stale
+ * card on the next owner's board.
+ */
+router.post("/:id/release", async (req, res, next) => {
+  try {
+    const opp = await loadOpp(req.params.id, req.user);
+    if (!opp) return res.status(404).json({ error: "No such opportunity." });
+    if (!assertOwner(opp, req.user, res)) return;
+
+    const note = String(req.body.note || "").trim() || "Handed back";
+
+    if (opp.contact_id) {
+      await db.run(
+        `UPDATE company_contacts
+            SET owner_id = NULL, claimed_at = NULL, deadline_at = NULL,
+                claim_source = NULL, status = 'new', release_note = $2
+          WHERE id = $1`,
+        [opp.contact_id, note]
+      );
+    } else if (opp.lead_id && opp.source === "all") {
+      await db.run(
+        `UPDATE leads
+            SET owner_id = NULL, claimed_at = NULL, claim_source = NULL,
+                deadline_at = NULL, status = 'new', updated_at = now()
+          WHERE id = $1`,
+        [opp.lead_id]
+      );
+    } else if (opp.lead_id) {
+      // A released Fresh claim goes back to the Newspaper, which is where the
+      // expiry sweep puts them too — the two must not disagree about where a
+      // handed-back lead lands.
+      await db.run(
+        `UPDATE leads
+            SET fresh_owner_id = NULL, fresh_claimed_at = NULL, fresh_deadline_at = NULL,
+                in_newspaper = true, fresh_released_at = now(),
+                fresh_release_note = $2, updated_at = now()
+          WHERE id = $1`,
+        [opp.lead_id, note]
+      );
+    }
+
+    const worked =
+      opp.last_contacted_at ||
+      (await db.one(
+        `SELECT 1 AS n FROM opportunity_messages WHERE opportunity_id = $1 LIMIT 1`,
+        [opp.id]
+      ));
+
+    if (worked) {
+      // Keep the record, lose the owner — it stays readable to whoever picks
+      // the company up next, under "Tried before at this company".
+      await db.run(
+        `UPDATE opportunities
+            SET owner_id = NULL, deadline_at = NULL, deadline_kind = NULL,
+                next_action = NULL, updated_at = now()
+          WHERE id = $1`,
+        [opp.id]
+      );
+    } else {
+      await db.run("DELETE FROM opportunities WHERE id = $1", [opp.id]);
+    }
+
+    res.json({ ok: true, kept: Boolean(worked) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * Items 12 & 14 — the lost-opportunity interview.
  *
  * Marking something lost and filing the interview are the same action, by

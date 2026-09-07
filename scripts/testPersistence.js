@@ -984,6 +984,36 @@ async function autoNotesScenario() {
   check("It doesn't invent notes", !after.notes, after.notes ? "wrote something" : "left empty");
 }
 
+/** Handing a claim back is not the same as losing it. */
+async function releaseScenario() {
+  console.log("\n  --- handing a claim back ---\n");
+
+  mem.public.none(`
+    insert into companies (name) values ('Release Co');
+    insert into company_contacts (company, name, owner_id, claim_source, status)
+      values ('Release Co','Tara B',1,'all','new');
+  `);
+  const cid = mem.public.many("select id from company_contacts where company='Release Co'")[0].id;
+  const oid = (await call("POST", "/api/outreach/open", { contact_id: cid })).json.opportunity.id;
+
+  const res = await call("POST", `/api/outreach/${oid}/release`, { note: "Not my patch" });
+  check("A claim can be handed back", res.status === 200, res.status === 200 ? null : res.raw);
+
+  const contact = mem.public.many(`select owner_id, status, release_note from company_contacts where id = ${cid}`)[0];
+  check("The contact returns to the pool", !contact.owner_id && contact.status === "new",
+    `owner ${contact.owner_id}, note "${contact.release_note}"`);
+
+  // Nothing was ever done on it, so there is no history worth keeping — and a
+  // stub would leave a stale card on the next owner's board.
+  const left = mem.public.many(`select id from opportunities where id = ${oid}`);
+  check("An untouched opportunity is cleared away", left.length === 0,
+    left.length ? "row kept" : "removed");
+
+  // No loss reason should be recorded — handing back is not losing.
+  const loss = mem.public.many(`select * from opportunity_loss where opportunity_id = ${oid}`);
+  check("It doesn't count as a lost deal", loss.length === 0, "no loss reason filed");
+}
+
 function check(label, ok, detail) {
   if (ok) { pass++; console.log(`  ok    ${label}${detail ? ` — ${detail}` : ""}`); }
   else { fail++; console.log(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`); }
@@ -1102,6 +1132,7 @@ async function run() {
   await fathomScenario();
   await targetScenario();
   await autoNotesScenario();
+  await releaseScenario();
   await badgeScenario();
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
