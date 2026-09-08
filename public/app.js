@@ -1188,12 +1188,21 @@ function contactRow(c) {
   const unlocked = Boolean(c.unlocked);
   const cost = Number(c.credit_cost) || 0;
 
+  // Claimed means locked to the owner for EVERYONE else — admin included.
+  // No amount of credits opens it; that's a different lock than the
+  // owner/admin claim lock above, so it's tracked separately here.
+  const claimedByOther = Boolean(c.owner_id) && !isOwner;
+
   const cell = (v) => `<span>${v == null || v === "" ? "—" : v}</span>`;
   const lockedCell = () =>
     `<span class="ct-locked-cell" title="Unlock this contact to see it">${lockMark()}</span>`;
 
   const emailCell = unlocked
     ? cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")
+    : claimedByOther
+    ? `<span class="ct-locked-cell" title="Claimed by ${esc(c.owner_name || "someone else")} — locked until they release it">
+         ${lockMark()} Claimed
+       </span>`
     : `<span>
          <button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${cost} credit${cost === 1 ? "" : "s"} to reveal this contact">
            ${lockMark()} Unlock &middot; ${cost}cr
@@ -3037,15 +3046,19 @@ async function loadContacts(lead) {
 
       <p class="poc-reach">
         ${
-          c.unlocked === false
-            ? `<button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${c.credit_cost} credit${c.credit_cost === 1 ? "" : "s"} to reveal this contact">
-                 ${lockMark()} Unlock &middot; ${c.credit_cost}cr
-               </button>`
-            : `${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
+          c.unlocked !== false
+            ? `${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
                ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
                ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
                ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
                ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}`
+            : c.owner_id && c.owner_id !== state.user.id
+            ? `<span class="ct-locked-cell" title="Claimed by ${esc(c.owner_name || "someone else")} — locked until they release it">
+                 ${lockMark()} Claimed
+               </span>`
+            : `<button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${c.credit_cost} credit${c.credit_cost === 1 ? "" : "s"} to reveal this contact">
+                 ${lockMark()} Unlock &middot; ${c.credit_cost}cr
+               </button>`
         }
       </p>
 

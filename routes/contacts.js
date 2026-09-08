@@ -252,7 +252,7 @@ router.get("/people", async (req, res, next) => {
 router.post("/:id/unlock", async (req, res, next) => {
   try {
     const contact = await db.one(
-      "SELECT id, role FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
+      "SELECT id, role, owner_id FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
       [req.params.id]
     );
     if (!contact) return res.status(404).json({ error: "That contact no longer exists." });
@@ -264,11 +264,35 @@ router.post("/:id/unlock", async (req, res, next) => {
       [contact.id, req.user.id]
     );
 
+    // Claimed means locked to the owner, full stop — nobody else spends
+    // credits to see it, no matter how many they have. A prior unlock is
+    // exempt: someone who paid for this contact before it was claimed keeps
+    // what they paid for.
+    if (!already && contact.owner_id && contact.owner_id !== req.user.id) {
+      return res.status(403).json({
+        error: "Someone else has already claimed this contact — it can't be unlocked until they release it.",
+      });
+    }
+
     let balance;
     if (already) {
       balance = await db.value("SELECT credits FROM users WHERE id = $1", [req.user.id], "credits");
     } else {
       const result = await db.tx(async (q) => {
+        // Re-check the claim inside the transaction, row-locked, so a claim
+        // that lands in the gap between the check above and here can't slip
+        // an unlock through underneath it.
+        const { rows: crows } = await q(
+          "SELECT owner_id FROM company_contacts WHERE id = $1 FOR UPDATE",
+          [contact.id]
+        );
+        if (crows[0] && crows[0].owner_id && crows[0].owner_id !== req.user.id) {
+          throw Object.assign(
+            new Error("Someone else has already claimed this contact — it can't be unlocked until they release it."),
+            { status: 403 }
+          );
+        }
+
         const { rows: urows } = await q(
           "SELECT credits FROM users WHERE id = $1 FOR UPDATE",
           [req.user.id]
