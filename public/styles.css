@@ -1835,6 +1835,58 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
 .people-row.is-locked .col-name > a,
 .people-row.is-locked .col-company > a { color: var(--ink-soft); }
 
+/* Credit balance chip, topbar. */
+.credits-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber-ink);
+  background: var(--amber-tint);
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.credits-chip svg { width: 13px; height: 13px; fill: currentColor; flex: none; }
+
+/* Unlock-a-contact button — the credit gate, priced by seniority. */
+.unlock-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--amber-ink);
+  background: var(--amber-tint);
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.unlock-btn:hover { background: var(--amber); color: #fff; }
+.unlock-btn:disabled { opacity: .5; cursor: default; }
+.unlock-btn .lock-icon { width: 11px; height: 11px; fill: currentColor; flex: none; }
+
+.ct-locked-cell { color: var(--ink-faint); display: inline-flex; }
+.ct-locked-cell .lock-icon { width: 12px; height: 12px; fill: currentColor; }
+
+.ct-row.is-credit-locked { background: var(--surface-sunk); }
+
+.credits-input {
+  width: 72px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
 .lock-note {
   font-family: var(--mono);
   font-size: 10px;

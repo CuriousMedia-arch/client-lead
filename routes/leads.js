@@ -4,6 +4,7 @@ const { requireAuth, requireAdmin } = require("../lib/auth");
 const playbook = require("../lib/triggers");
 const lifecycle = require("../lib/lifecycle");
 const freshClock = require("../lib/freshClock");
+const { creditCost } = require("../lib/credits");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -422,6 +423,32 @@ router.get("/:id/people", async (req, res, next) => {
         ORDER BY cc.owner_id IS NULL, LOWER(cc.name)`,
       [lead.name]
     );
+
+    // Same credit gate as All Leads — this endpoint feeds that same expanded
+    // contact table, plus the outreach drawer's "people at this company"
+    // panel, so a locked contact's email/phone stays hidden everywhere it's
+    // shown, not just in one view.
+    if (contacts.length) {
+      const unlocked = new Set(
+        (
+          await db.all(
+            "SELECT contact_id FROM contact_unlocks WHERE user_id = $1 AND contact_id = ANY($2)",
+            [req.user.id, contacts.map((c) => c.id)]
+          )
+        ).map((r) => r.contact_id)
+      );
+      for (const c of contacts) {
+        c.credit_cost = creditCost(c.role);
+        c.unlocked = unlocked.has(c.id);
+        if (!c.unlocked) {
+          c.email = null;
+          c.email_alt = null;
+          c.phone = null;
+          c.phone2 = null;
+          c.linkedin = null;
+        }
+      }
+    }
 
     if (contacts.length) {
       const logs = await db.all(

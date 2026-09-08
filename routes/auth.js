@@ -37,7 +37,13 @@ router.post("/login", async (req, res, next) => {
     }
 
     res.json({
-      user: { id: user.id, username: user.username, name: user.display_name, role: user.role },
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.display_name,
+        role: user.role,
+        credits: user.credits,
+      },
       scan,
     });
   } catch (err) {

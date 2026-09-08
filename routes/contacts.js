@@ -7,10 +7,45 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
+const { creditCost } = require("../lib/credits");
 
 
 const router = express.Router();
 router.use(requireAuth);
+
+// ── Credit-gated contact details ───────────────────────────────────────────
+//
+// Every contact costs credits to reveal, priced by seniority: 51 for
+// Founder/Co-Founder/Director/Head-of-anything, 12 for Manager, 5 for
+// everyone else. A fresh joinee starts with 50 — one credit short of the
+// cheapest high-level contact, on purpose. Admins pay the same prices; they
+// just start with a bigger budget (180).
+//
+// The mask only hides the reach-out fields (email/phone/linkedin); name,
+// company, title, seniority etc. stay visible so a rep can see who's there
+// and decide whether it's worth spending the credits.
+const REVEALED_FIELDS = ["email", "email_alt", "phone", "phone2", "linkedin"];
+
+async function unlockedContactIds(userId, contactIds) {
+  if (!contactIds.length) return new Set();
+  const rows = await db.all(
+    "SELECT contact_id FROM contact_unlocks WHERE user_id = $1 AND contact_id = ANY($2)",
+    [userId, contactIds]
+  );
+  return new Set(rows.map((r) => r.contact_id));
+}
+
+/** Attach credit_cost/unlocked to each contact and blank the gated fields. */
+function applyCreditGate(contacts, unlockedIds) {
+  for (const c of contacts) {
+    c.credit_cost = creditCost(c.role);
+    c.unlocked = unlockedIds.has(c.id);
+    if (!c.unlocked) {
+      for (const f of REVEALED_FIELDS) c[f] = null;
+    }
+  }
+  return contacts;
+}
 
 // GET /api/contacts?company=Meesho
 router.get("/", async (req, res, next) => {
@@ -26,6 +61,8 @@ router.get("/", async (req, res, next) => {
         ORDER BY is_primary DESC, name ASC`,
       [company]
     );
+
+    applyCreditGate(contacts, await unlockedContactIds(req.user.id, contacts.map((c) => c.id)));
 
     res.json({ configured: true, contacts });
   } catch (err) {
@@ -195,9 +232,86 @@ router.get("/people", async (req, res, next) => {
       args
     );
 
+    applyCreditGate(contacts, await unlockedContactIds(req.user.id, contacts.map((c) => c.id)));
     for (const c of contacts) c.countdown = contactCountdown(c);
     res.json({ contacts, claimDays: CLAIM_DAYS });
   } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Spend credits to reveal one contact's email/phone/linkedin.
+ *
+ * Idempotent per person — re-unlocking someone already unlocked is a no-op,
+ * not a second charge. The balance check re-reads the row inside the same
+ * transaction as the deduction, rather than trusting the cached session
+ * balance, so two quick unlocks from the same low-balance account can't both
+ * pass a check that ran against the same stale number.
+ */
+router.post("/:id/unlock", async (req, res, next) => {
+  try {
+    const contact = await db.one(
+      "SELECT id, role FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!contact) return res.status(404).json({ error: "That contact no longer exists." });
+
+    const cost = creditCost(contact.role);
+
+    const already = await db.one(
+      "SELECT credits_spent FROM contact_unlocks WHERE contact_id = $1 AND user_id = $2",
+      [contact.id, req.user.id]
+    );
+
+    let balance;
+    if (already) {
+      balance = await db.value("SELECT credits FROM users WHERE id = $1", [req.user.id], "credits");
+    } else {
+      const result = await db.tx(async (q) => {
+        const { rows: urows } = await q(
+          "SELECT credits FROM users WHERE id = $1 FOR UPDATE",
+          [req.user.id]
+        );
+        const current = urows[0];
+        if (!current) throw Object.assign(new Error("Account no longer exists."), { status: 404 });
+
+        if (current.credits < cost) {
+          throw Object.assign(
+            new Error(
+              `Not enough credits — this contact needs ${cost}, you have ${current.credits}.`
+            ),
+            { status: 402 }
+          );
+        }
+
+        const { rows: newBalance } = await q(
+          "UPDATE users SET credits = credits - $1 WHERE id = $2 RETURNING credits",
+          [cost, req.user.id]
+        );
+
+        await q(
+          `INSERT INTO contact_unlocks (contact_id, user_id, credits_spent)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (contact_id, user_id) DO NOTHING`,
+          [contact.id, req.user.id, cost]
+        );
+
+        return newBalance[0].credits;
+      });
+      balance = result;
+    }
+
+    const [row] = await db.all(
+      `${PEOPLE_SELECT} WHERE cc.id = $1`,
+      [contact.id]
+    );
+    applyCreditGate([row], new Set([contact.id]));
+    row.countdown = contactCountdown(row);
+
+    res.json({ contact: row, credits: balance, cost, alreadyUnlocked: Boolean(already) });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
 });
@@ -210,10 +324,27 @@ router.post("/:id/claim", async (req, res, next) => {
     // A claim locks the person. Nobody but the owner can touch it — no silent
     // take-overs — except an admin, who can always hand a lead back so it
     // doesn't get stranded when someone leaves or goes on holiday.
-    const current = await db.one("SELECT owner_id FROM company_contacts WHERE id = $1", [
+    const current = await db.one("SELECT owner_id, role FROM company_contacts WHERE id = $1", [
       req.params.id,
     ]);
     if (!current) return res.status(404).json({ error: "That contact no longer exists." });
+
+    // Working a contact means having their details — claiming one you haven't
+    // paid to reveal yet would hand you an opportunity with no way to reach
+    // out. Releasing is exempt: giving one back never needs a fresh spend.
+    if (!releasing) {
+      const unlocked = await db.one(
+        "SELECT 1 FROM contact_unlocks WHERE contact_id = $1 AND user_id = $2",
+        [req.params.id, req.user.id]
+      );
+      if (!unlocked) {
+        const cost = creditCost(current.role);
+        return res.status(402).json({
+          error: `Unlock this contact first — it costs ${cost} credit${cost === 1 ? "" : "s"}.`,
+          creditsRequired: cost,
+        });
+      }
+    }
 
     const isAdmin = req.user.role === "admin";
     const isOwner = current.owner_id === req.user.id;

@@ -303,6 +303,13 @@ function initials(name) {
     .toUpperCase();
 }
 
+/** Keeps the topbar chip and state.user.credits in sync after every spend. */
+function setCreditsDisplay(credits) {
+  if (state.user) state.user.credits = credits;
+  const el = $("#me-credits-value");
+  if (el) el.textContent = `${credits}`;
+}
+
 function scoreClass(n) {
   if (n >= 80) return "hot";
   if (n >= 60) return "warm";
@@ -330,6 +337,7 @@ async function enterApp(user) {
   $("#me-name").textContent = user.name;
   $("#me-role").textContent = user.role === "admin" ? "Admin" : "Team";
   $("#tab-admin").hidden = user.role !== "admin";
+  setCreditsDisplay(user.credits);
 
   // Fire the roster alongside the dashboard rather than before it - on a
   // remote database each sequential request is a fresh round trip of latency.
@@ -1152,6 +1160,12 @@ function circleMark() {
     </svg>`;
 }
 
+function lockMark() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" class="lock-icon">
+      <path d="M12 2a4 4 0 00-4 4v3H7a1 1 0 00-1 1v9a1 1 0 001 1h10a1 1 0 001-1v-9a1 1 0 00-1-1h-1V6a4 4 0 00-4-4zm-2 7V6a2 2 0 114 0v3h-4z"/>
+    </svg>`;
+}
+
 /**
  * One person inside an expanded company — this is what gets claimed.
  *
@@ -1167,10 +1181,27 @@ function contactRow(c) {
   const locked = Boolean(c.owner_id) && !isOwner && !isAdmin;
   const viaFresh = c.claim_source === "fresh";
 
+  // Credit gate: every contact costs credits to reveal, priced by seniority
+  // (51 for Founder/Co-Founder/Director/Head-of-anything, 12 for Manager, 5
+  // otherwise). Until this person spends the credits, the reach-out fields
+  // stay blank on the wire — there's nothing here to fall back to showing.
+  const unlocked = Boolean(c.unlocked);
+  const cost = Number(c.credit_cost) || 0;
+
   const cell = (v) => `<span>${v == null || v === "" ? "—" : v}</span>`;
+  const lockedCell = () =>
+    `<span class="ct-locked-cell" title="Unlock this contact to see it">${lockMark()}</span>`;
+
+  const emailCell = unlocked
+    ? cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")
+    : `<span>
+         <button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${cost} credit${cost === 1 ? "" : "s"} to reveal this contact">
+           ${lockMark()} Unlock &middot; ${cost}cr
+         </button>
+       </span>`;
 
   return `
-    <div class="ct-row ${locked ? "is-locked" : ""} ${c.verified ? "is-verified" : ""}">
+    <div class="ct-row ${locked ? "is-locked" : ""} ${c.verified ? "is-verified" : ""} ${!unlocked ? "is-credit-locked" : ""}">
       <span class="ct-tools">
         <button class="icon-btn" data-edit-contact="${c.id}" title="Edit this contact">${pencil()}</button>
         ${verifyChip(c)}
@@ -1182,9 +1213,9 @@ function contactRow(c) {
           : esc(c.name)}
       </span>
       ${cell(esc(c.role))}
-      ${cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")}
-      ${cell(c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "")}
-      ${cell(c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "")}
+      ${emailCell}
+      ${unlocked ? cell(c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "") : lockedCell()}
+      ${unlocked ? cell(c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : "") : lockedCell()}
       ${cell(esc(c.seniority))}
       ${cell(esc(c.department))}
       ${cell(esc(contactLocation(c)))}
@@ -1215,7 +1246,7 @@ function contactRow(c) {
               ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
               : locked
               ? `<span class="lock-note">Locked</span>`
-              : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">Claim</button>`
+              : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">${unlocked ? "Claim" : "Unlock first"}</button>`
           }
           <!-- The Claim column is pinned and overflows visibly, so anything
                too wide for it paints on top of Owner instead of clipping.
@@ -2424,6 +2455,35 @@ async function onCardClick(e) {
     return;
   }
 
+  // Spending credits to reveal one contact's email/phone/linkedin.
+  const unlockBtn = e.target.closest("[data-unlock-contact]");
+  if (unlockBtn) {
+    e.stopPropagation();
+    const id = unlockBtn.dataset.unlockContact;
+    unlockBtn.disabled = true;
+
+    try {
+      const { contact, credits } = await api(`/api/contacts/${id}/unlock`, { method: "POST" });
+      setCreditsDisplay(credits);
+
+      const row = unlockBtn.closest(".ct-row") || unlockBtn.closest(".poc-card");
+      if (row && row.classList.contains("ct-row")) {
+        row.outerHTML = contactRow(contact);
+      } else if (row && state.drawerLead) {
+        // The drawer's point-of-contact list re-fetches rather than patching
+        // one card in place — it also carries each contact's activity log,
+        // which this response doesn't return.
+        loadContacts(state.drawerLead);
+      }
+
+      toast(`Unlocked — ${credits} credit${credits === 1 ? "" : "s"} left`);
+    } catch (err) {
+      unlockBtn.disabled = false;
+      toast(err.message, true);
+    }
+    return;
+  }
+
   // Fresh Leads sub-tab toggle (Company Leads / New Leads).
   const freshToggle = e.target.closest("[data-freshview]");
   if (freshToggle) {
@@ -2690,6 +2750,7 @@ async function openDrawer(id) {
     return;
   }
 
+  state.drawerLead = lead;
   drawer.innerHTML = drawerHtml(lead);
   wireDrawer(lead);
 }
@@ -2975,11 +3036,17 @@ async function loadContacts(lead) {
       }
 
       <p class="poc-reach">
-        ${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
-        ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
-        ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
-        ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
-        ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}
+        ${
+          c.unlocked === false
+            ? `<button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${c.credit_cost} credit${c.credit_cost === 1 ? "" : "s"} to reveal this contact">
+                 ${lockMark()} Unlock &middot; ${c.credit_cost}cr
+               </button>`
+            : `${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : ""}
+               ${c.email && c.phone ? `<span class="sep">·</span>` : ""}
+               ${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ""}
+               ${c.phone && c.phone2 ? `<span class="sep">·</span>` : ""}
+               ${c.phone2 ? `<a href="tel:${esc(c.phone2)}">${esc(c.phone2)}</a>` : ""}`
+        }
       </p>
 
       ${
@@ -3456,13 +3523,21 @@ async function renderAdmin() {
 
       <section class="admin-block">
         <h3>Team</h3>
-        <p class="hint">Members can work leads. Admins can also change the watchlist.</p>
+        <p class="hint">
+          Members can work leads. Admins can also change the watchlist.
+          Credits pay for revealing a contact's email/phone — 50 for a new
+          joinee, 180 for manager/admin level, editable per person here.
+        </p>
         <div class="row-list">
           ${users
             .map(
               (u) => `<div class="row ${u.active ? "" : "is-off"}">
                 <div class="row-main"><strong>${esc(u.display_name)}</strong><span>@${esc(u.username)} · ${esc(u.role)}</span></div>
                 <div class="row-actions">
+                  <input class="credits-input" type="number" min="0" step="1"
+                         data-user-credits="${u.id}" value="${Number(u.credits) || 0}"
+                         title="Credits available to unlock contacts" />
+                  <button class="btn btn-sm" data-user-credits-save="${u.id}">Save</button>
                   ${
                     u.id === state.user.id
                       ? `<span class="sig-sub">you</span>`
@@ -3477,7 +3552,8 @@ async function renderAdmin() {
           <input id="u-name" placeholder="Display name" />
           <input id="u-user" placeholder="username" />
           <input id="u-pass" type="password" placeholder="password" />
-          <select id="u-role"><option value="member">Member</option><option value="admin">Admin</option></select>
+          <select id="u-role"><option value="member">Member (50 credits)</option><option value="admin">Admin (180 credits)</option></select>
+          <input id="u-credits" type="number" min="0" step="1" placeholder="Credits (optional)" style="width:150px" />
           <button class="btn btn-primary" id="u-add">Add teammate</button>
         </div>
       </section>
@@ -3549,6 +3625,7 @@ function wireAdmin() {
 
   $("#u-add").addEventListener("click", () =>
     guard(async () => {
+      const creditsInput = $("#u-credits").value.trim();
       await api("/api/admin/users", {
         method: "POST",
         body: {
@@ -3556,10 +3633,25 @@ function wireAdmin() {
           username: $("#u-user").value.trim(),
           password: $("#u-pass").value,
           role: $("#u-role").value,
+          credits: creditsInput === "" ? undefined : creditsInput,
         },
       });
       toast("Teammate added");
     })
+  );
+
+  root.querySelectorAll("[data-user-credits-save]").forEach((btn) =>
+    btn.addEventListener("click", () =>
+      guard(async () => {
+        const id = btn.dataset.userCreditsSave;
+        const input = root.querySelector(`[data-user-credits="${id}"]`);
+        await api(`/api/admin/users/${id}`, {
+          method: "PATCH",
+          body: { credits: input.value },
+        });
+        toast("Credits updated");
+      })
+    )
   );
 
   $("#topics-on").addEventListener("click", () =>

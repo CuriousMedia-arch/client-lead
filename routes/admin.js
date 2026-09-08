@@ -5,6 +5,7 @@ const { runPipeline, isRunning, runState, buildQueries, ensureLead } = require("
 const { triggerRemoteRun, remoteRunConfigured } = require("../lib/remoteRun");
 const { parseContactSheet } = require("../lib/csvImport");
 const gemini = require("../lib/gemini");
+const { defaultCreditsForRole } = require("../lib/credits");
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ router.get("/users", requireAuth, async (req, res, next) => {
   try {
     res.json({
       users: await db.all(
-        `SELECT id, username, display_name, role, active, created_at
+        `SELECT id, username, display_name, role, active, credits, created_at
            FROM users ORDER BY display_name`
       ),
     });
@@ -257,6 +258,14 @@ router.post("/users", async (req, res, next) => {
     const password = String((req.body && req.body.password) || "");
     const role = req.body && req.body.role === "admin" ? "admin" : "member";
 
+    // Credits default by role — 50 for a new joinee, 180 for manager/admin —
+    // but an admin setting up the account can override it (e.g. a senior
+    // hire who should start at the manager tier without being made an admin).
+    const credits =
+      req.body && req.body.credits !== undefined && req.body.credits !== ""
+        ? Math.max(0, Math.trunc(Number(req.body.credits)) || 0)
+        : defaultCreditsForRole(role);
+
     if (!username) return res.status(400).json({ error: "Enter a username." });
     if (password.length < 6)
       return res.status(400).json({ error: "Passwords need at least 6 characters." });
@@ -265,8 +274,8 @@ router.post("/users", async (req, res, next) => {
     if (existing) return res.status(409).json({ error: `${username} is already taken.` });
 
     await db.run(
-      "INSERT INTO users (username, display_name, password_hash, role) VALUES ($1, $2, $3, $4)",
-      [username, displayName, hashPassword(password), role]
+      "INSERT INTO users (username, display_name, password_hash, role, credits) VALUES ($1, $2, $3, $4, $5)",
+      [username, displayName, hashPassword(password), role, credits]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -292,6 +301,10 @@ router.patch("/users/:id", async (req, res, next) => {
     if (req.body.role !== undefined)
       sets.push(`role = ${bind(req.body.role === "admin" ? "admin" : "member")}`);
     if (req.body.active !== undefined) sets.push(`active = ${bind(Boolean(req.body.active))}`);
+    if (req.body.credits !== undefined) {
+      const credits = Math.max(0, Math.trunc(Number(req.body.credits)) || 0);
+      sets.push(`credits = ${bind(credits)}`);
+    }
     if (req.body.password) {
       if (String(req.body.password).length < 6)
         return res.status(400).json({ error: "Passwords need at least 6 characters." });
