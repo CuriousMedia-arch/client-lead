@@ -61,11 +61,29 @@ router.get("/me", async (req, res, next) => {
  * arithmetic to know what a conversion is worth.
  */
 function publicRules(r) {
-  const cost = Number(r.fresh_claim_cost) || 0;
-  const pct = (n) => Math.round((cost * n) / 100);
+  const fresh = Number(r.fresh_claim_cost) || 0;
+  const paper = Number(r.newspaper_claim_cost) || 0;
+
+  // One ladder per track, because every figure is a proportion of what that
+  // track's claim costs. Same shape, different stakes: 15 to make 45, or 5 to
+  // make 15. Sent as credits rather than percentages — "50%" is a policy and
+  // "3 credits" is what someone actually gets, and only the second one
+  // settles an argument.
+  const ladder = (cost) => {
+    const pct = (n) => Math.round((cost * (Number(n) || 0)) / 100);
+    return [
+      { key: "won", label: "Client signs", value: Math.round(cost * (Number(r.win_multiplier) || 0)) },
+      { key: "lost3", label: "Lost after 3+ replies", value: pct(r.refund_pct_3plus) },
+      { key: "lost2", label: "Lost after 2 replies", value: pct(r.refund_pct_2) },
+      { key: "lost1", label: "Lost after 1 reply", value: pct(r.refund_pct_1) },
+      { key: "no_reply", label: "Worked it, never heard back", value: 0 },
+      { key: "no_work", label: "Claimed it and did nothing", value: -(Number(r.no_work_penalty) || 0) },
+    ];
+  };
 
   return {
-    fresh_claim_cost: cost,
+    fresh_claim_cost: fresh,
+    newspaper_claim_cost: paper,
     free_contacts_per_claim: Number(r.free_contacts_per_claim) || 0,
     max_active_claims: Number(r.max_active_claims) || 0,
     win_multiplier: Number(r.win_multiplier) || 0,
@@ -73,15 +91,9 @@ function publicRules(r) {
     refund_pct_2: Number(r.refund_pct_2) || 0,
     refund_pct_1: Number(r.refund_pct_1) || 0,
     no_work_penalty: Number(r.no_work_penalty) || 0,
-    // Same ladder, in credits, for the panel that has to explain it.
-    outcomes: [
-      { key: "won", label: "Client signs", value: Math.round(cost * (Number(r.win_multiplier) || 0)) },
-      { key: "lost3", label: "Lost after 3+ replies", value: pct(r.refund_pct_3plus) },
-      { key: "lost2", label: "Lost after 2 replies", value: pct(r.refund_pct_2) },
-      { key: "lost1", label: "Lost after 1 reply", value: pct(r.refund_pct_1) },
-      { key: "no_reply", label: "Worked it, never heard back", value: 0 },
-      { key: "no_work", label: "Claimed it and did nothing", value: -(Number(r.no_work_penalty) || 0) },
-    ],
+    ladders: { fresh: ladder(fresh), newspaper: ladder(paper) },
+    // The Fresh ladder stays under its old name for anything already reading it.
+    outcomes: ladder(fresh),
   };
 }
 
@@ -114,6 +126,7 @@ router.put("/settings", requireAdmin, async (req, res, next) => {
 
     const fields = {
       fresh_claim_cost: int(b.fresh_claim_cost, 0, 10000),
+      newspaper_claim_cost: int(b.newspaper_claim_cost, 0, 10000),
       free_contacts_per_claim: int(b.free_contacts_per_claim, 0, 50),
       win_multiplier: Number.isFinite(Number(b.win_multiplier))
         ? Math.min(20, Math.max(0, Number(b.win_multiplier)))

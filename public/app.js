@@ -356,6 +356,8 @@ function creditsPanelHtml() {
 
   const rules = c.rules || {};
   const sign = (n) => (n > 0 ? `+${n}` : `${n}`);
+  const fresh = (rules.ladders && rules.ladders.fresh) || rules.outcomes || [];
+  const paper = (rules.ladders && rules.ladders.newspaper) || fresh;
 
   const KINDS = {
     claim: "Fresh Leads claim",
@@ -391,22 +393,32 @@ function creditsPanelHtml() {
         <span class="muted"> · ${c.active} of ${c.max_active} claims open</span>
       </div>
       <p class="hint">
-        A Fresh Leads claim costs ${rules.fresh_claim_cost} and opens that company's
-        top ${rules.free_contacts_per_claim} contacts for free. Everyone else is locked
-        out of the company while you hold it.
+        A Fresh Leads claim costs ${rules.fresh_claim_cost}; a Newspaper pick-up costs
+        ${rules.newspaper_claim_cost}. Either one opens that company's top
+        ${rules.free_contacts_per_claim} contacts for free and locks everyone else out of
+        the company while you hold it. What comes back is worked out from what you paid.
       </p>
     </div>
 
     <div class="cr-rules">
-      ${(rules.outcomes || [])
-        .map(
-          (o) => `<div class="cr-rule">
+      <div class="cr-rule cr-rule-head">
+        <span></span>
+        <span title="Claimed from Fresh Leads">Fresh</span>
+        <span title="Picked up from the Newspaper">Paper</span>
+      </div>
+      ${(fresh || [])
+        .map((o, i) => {
+          const p = paper[i] || {};
+          const amt = (v) =>
+            `<span class="cr-amt ${v > 0 ? "up" : v < 0 ? "down" : ""}">${
+              v === 0 ? "0" : sign(v)
+            }</span>`;
+          return `<div class="cr-rule">
             <span>${esc(o.label)}</span>
-            <span class="cr-amt ${o.value > 0 ? "up" : o.value < 0 ? "down" : ""}">${
-              o.value === 0 ? "0" : sign(o.value)
-            }</span>
-          </div>`
-        )
+            ${amt(o.value)}
+            ${amt(p.value === undefined ? o.value : p.value)}
+          </div>`;
+        })
         .join("")}
     </div>
 
@@ -1882,17 +1894,20 @@ function claimButton(lead, source) {
       <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}" data-id="${lead.id}">Claim</button>`;
   }
 
-  if (!c.can_claim) {
-    return `<span class="claim-blocked">${esc(c.reason)}</span>
-      <button class="btn btn-sm" disabled title="${esc(c.reason)}">Claim &middot; ${c.cost}cr</button>`;
+  const s = (c.sources && c.sources[source]) || c;
+  const cost = s.cost;
+
+  if (!s.can_claim) {
+    return `<span class="claim-blocked">${esc(s.reason)}</span>
+      <button class="btn btn-sm" disabled title="${esc(s.reason)}">Claim &middot; ${cost}cr</button>`;
   }
 
   return `<span class="muted">
-      ${c.cost} credits &middot; top ${c.free_contacts} contacts free &middot; locks the company to you
+      ${cost} credits &middot; top ${c.free_contacts} contacts free &middot; locks the company to you
     </span>
     <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}"
-            data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${c.cost}">
-      Claim &middot; ${c.cost}cr
+            data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${cost}">
+      Claim &middot; ${cost}cr
     </button>`;
 }
 
@@ -2203,6 +2218,46 @@ function renderNewspaper() {
   root.innerHTML = newspaperLevel(state.npLeads || []);
 }
 
+/**
+ * The Newspaper's price, and the one thing worth saying about it.
+ *
+ * Everything here has already been failed by somebody, so it costs a third of
+ * a Fresh claim — and pays back a third as much. Same odds, smaller stakes.
+ * Both halves go on the card: the low price is what gets the tab opened, and
+ * the smaller return is what stops it reading as free money.
+ */
+function npPriceNote() {
+  const c = state.credits;
+  if (!c || !c.sources) return "";
+
+  const np = c.sources.newspaper.cost;
+  const fresh = c.sources.fresh.cost;
+  const won = ((c.rules || {}).ladders || {}).newspaper;
+  return ` · ${np} credits to pick up${
+    np < fresh ? ` instead of ${fresh}${won ? `, and ${won[0].value} back if it lands` : ""}` : ""
+  }`;
+}
+
+function npClaimButton(lead) {
+  const c = state.credits;
+  if (!c || !c.sources) {
+    return `<button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper"
+                    data-id="${lead.id}" data-company="${esc(lead.company)}">Pick this up</button>`;
+  }
+
+  const np = c.sources.newspaper;
+  if (!np.can_claim) {
+    return `<button class="btn btn-sm" disabled title="${esc(np.reason)}">
+        Pick this up &middot; ${np.cost}cr
+      </button>`;
+  }
+
+  return `<button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper"
+                  data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${np.cost}">
+      Pick this up &middot; ${np.cost}cr
+    </button>`;
+}
+
 /** The parking lot: Fresh claims whose 10 days ran out. Anyone can take them. */
 function newspaperCard(lead) {
   return `
@@ -2221,9 +2276,7 @@ function newspaperCard(lead) {
 
       <div class="mylead-actions">
         <span class="muted">
-          Went unworked past its deadline · no clock on this one${
-            state.credits ? ` · ${state.credits.cost} credits to pick up` : ""
-          }
+          Went unworked past its deadline · no clock on this one${npPriceNote()}
         </span>
         <div class="np-buttons">
           ${
@@ -2232,17 +2285,7 @@ function newspaperCard(lead) {
                          data-company="${esc(lead.company)}">Remove</button>`
               : ""
           }
-          ${
-            state.credits && !state.credits.can_claim
-              ? `<button class="btn btn-sm" disabled title="${esc(state.credits.reason)}">
-                   Pick this up &middot; ${state.credits.cost}cr
-                 </button>`
-              : `<button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper"
-                         data-id="${lead.id}" data-company="${esc(lead.company)}"
-                         data-cost="${state.credits ? state.credits.cost : ""}">
-                   Pick this up${state.credits ? ` &middot; ${state.credits.cost}cr` : ""}
-                 </button>`
-          }
+          ${npClaimButton(lead)}
         </div>
       </div>
     </div>`;
@@ -2865,16 +2908,32 @@ async function onCardClick(e) {
         if (act === "claim" && source !== "all" && state.credits) {
           const c = state.credits;
           const r = c.rules || {};
+          const track = (c.sources && c.sources[source]) || c;
+          const cost = track.cost;
+          // The ladder for THIS track — every figure on it is a proportion of
+          // what this claim costs, so a Newspaper confirm must not quote the
+          // Fresh numbers.
+          const back = (r.ladders && r.ladders[source]) || r.outcomes || [];
+          const at = (i) => (back[i] ? back[i].value : "?");
+
           const ok = window.confirm(
-            `Claim ${actionBtn.dataset.company || "this company"} for ${c.cost} credits?\n\n` +
+            `${source === "newspaper" ? "Pick up" : "Claim"} ${
+              actionBtn.dataset.company || "this company"
+            } for ${cost} credits?\n\n` +
               `· Its top ${c.free_contacts} contacts open up straight away, free\n` +
               `· Nobody else can claim or unlock anyone there while you hold it\n` +
               `· It moves into My Outreach\n\n` +
               `You get credits back when it ends:\n` +
-              `· Client signs — ${r.outcomes ? r.outcomes[0].value : c.cost * 3} back\n` +
-              `· Lost after 3+ replies — ${r.refund_pct_3plus}% back, 2 replies ${r.refund_pct_2}%, 1 reply ${r.refund_pct_1}%\n` +
-              `· Never worked it — you lose the ${c.cost} and ${r.no_work_penalty} more\n\n` +
-              `Balance after this: ${c.balance - c.cost}. Claims open: ${c.active + 1} of ${c.max_active}.`
+              `· Client signs — ${at(0)} back\n` +
+              `· Lost after 3+ replies — ${at(1)} back, 2 replies ${at(2)}, 1 reply ${at(3)}\n` +
+              `· Worked it, never heard back — nothing back\n` +
+              `· Never worked it — you lose the ${cost} and ${r.no_work_penalty} more\n` +
+              (source === "newspaper" && cost < r.fresh_claim_cost
+                ? `\nThe Newspaper is cheaper to take on because these have been failed once already. Same odds, smaller stakes.\n`
+                : "") +
+              `\nBalance after this: ${c.balance - cost}. Claims open: ${c.active + 1} of ${
+                c.max_active
+              }.`
           );
           if (!ok) return;
         }
@@ -3011,7 +3070,8 @@ async function openDrawer(id) {
  * is saved.
  */
 const CREDIT_FIELDS = [
-  ["fresh_claim_cost", "Claim costs", "Credits to claim one company from Fresh Leads."],
+  ["fresh_claim_cost", "Fresh Leads claim costs", "Credits to claim one company from Fresh Leads. Everything below is worked out from this figure."],
+  ["newspaper_claim_cost", "Newspaper pick-up costs", "Cheaper on purpose — these leads have already been failed once. Pays back the same."],
   ["free_contacts_per_claim", "Contacts free with a claim", "The most senior ones at that company."],
   ["max_active_claims", "Claims held at once", "Per person."],
   ["win_multiplier", "Conversion pays back", "Multiple of the claim cost. 3 means 15 becomes 45."],
@@ -3065,16 +3125,33 @@ async function renderCreditRules(root) {
     const v = read();
     const cost = v.fresh_claim_cost || 0;
     const pct = (n) => Math.round((cost * n) / 100);
+    const paper = v.newspaper_claim_cost || 0;
+    const p2 = (n) => Math.round((paper * (n || 0)) / 100);
+    const row = (label, a, b, cls) =>
+      `<span>${label}</span>
+       <strong class="${cls}">${a === 0 ? "0" : a > 0 ? "+" + a : a}</strong>
+       <strong class="${cls}">${b === 0 ? "0" : b > 0 ? "+" + b : b}</strong>`;
+
     box.querySelector("#credit-preview").innerHTML = `
-      <p class="hint">On a ${cost}-credit claim, someone gets back:</p>
-      <div class="credit-ladder">
-        <span>Client signs</span><strong class="up">+${Math.round(cost * (v.win_multiplier || 0))}</strong>
-        <span>Lost, 3+ replies</span><strong class="up">+${pct(v.refund_pct_3plus)}</strong>
-        <span>Lost, 2 replies</span><strong class="up">+${pct(v.refund_pct_2)}</strong>
-        <span>Lost, 1 reply</span><strong class="up">+${pct(v.refund_pct_1)}</strong>
-        <span>Worked it, no reply</span><strong>0</strong>
-        <span>Claimed, did nothing</span><strong class="down">-${v.no_work_penalty || 0}</strong>
-      </div>`;
+      <p class="hint">
+        What someone gets back. Every figure is a share of what that claim cost,
+        so the two tracks are the same bet at different stakes.
+      </p>
+      <div class="credit-ladder is-two">
+        <span class="cl-head"></span>
+        <span class="cl-head">Fresh · ${cost}cr</span>
+        <span class="cl-head">Paper · ${paper}cr</span>
+        ${row("Client signs", Math.round(cost * (v.win_multiplier || 0)), Math.round(paper * (v.win_multiplier || 0)), "up")}
+        ${row("Lost, 3+ replies", pct(v.refund_pct_3plus), p2(v.refund_pct_3plus), "up")}
+        ${row("Lost, 2 replies", pct(v.refund_pct_2), p2(v.refund_pct_2), "up")}
+        ${row("Lost, 1 reply", pct(v.refund_pct_1), p2(v.refund_pct_1), "up")}
+        ${row("Worked it, no reply", 0, 0, "")}
+        ${row("Claimed, did nothing", -(v.no_work_penalty || 0), -(v.no_work_penalty || 0), "down")}
+      </div>
+      <p class="hint" style="margin-top:8px">
+        The penalty is flat, not a share — "don't claim what you won't work" is the
+        same instruction whatever the lead cost.
+      </p>`;
   };
 
   preview();

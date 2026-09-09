@@ -763,7 +763,7 @@ router.post("/:id/claim", async (req, res, next) => {
     let charge = null;
     if (source !== "all" && !alreadyMine) {
       try {
-        charge = await freshCredits.charge(lead.id, req.user.id);
+        charge = await freshCredits.charge(lead.id, req.user.id, source);
       } catch (err) {
         if (err.code === "23505") {
           return res.status(409).json({ error: "That claim is already yours." });

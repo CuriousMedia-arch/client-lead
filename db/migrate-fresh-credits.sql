@@ -27,16 +27,28 @@ create table if not exists credit_settings (
   -- What one Fresh Leads claim costs.
   fresh_claim_cost        integer not null default 15,
 
+  -- What a Newspaper pick-up costs. Cheaper on purpose: the Newspaper is the
+  -- last option, holding leads somebody has already failed to move, so the
+  -- price comes down to make working the parking lot worth someone's time.
+  -- What it PAYS BACK does not come down — see the settlement note below.
+  newspaper_claim_cost    integer not null default 5,
+
   -- How many of that company's contacts come free with the claim. The most
   -- senior ones, because those are the expensive ones to unlock by hand.
   free_contacts_per_claim integer not null default 3,
 
-  -- Converted: the claim pays back this many times what it cost. 3 means a
-  -- 15-credit claim returns 45.
+  -- Everything below is a proportion of what the claim ACTUALLY cost, so the
+  -- two tracks have identical odds at different stakes: a Fresh claim risks
+  -- 15 to make 45, a Newspaper pick-up risks 5 to make 15. Anchoring these to
+  -- a fixed figure instead would make losing a cheap lead pay better than it
+  -- cost, which is a rule people eventually notice.
+
+  -- Converted: the claim pays back this many times what it cost. 3 turns 15
+  -- into 45, and 5 into 15.
   win_multiplier          numeric(5,2) not null default 3,
 
-  -- Lost, but there was a real conversation. Percentage of the claim cost
-  -- returned, by how many times the contact actually replied.
+  -- Lost, but there was a real conversation. Percentage of what this claim
+  -- cost, by how many times the contact actually replied.
   refund_pct_3plus        integer not null default 50,   -- 3 or more replies
   refund_pct_2            integer not null default 40,   -- exactly 2
   refund_pct_1            integer not null default 25,   -- exactly 1
@@ -46,7 +58,8 @@ create table if not exists credit_settings (
 
   -- Claimed and nothing was ever sent. The cost is gone AND this comes off
   -- on top, because holding a company nobody else could touch and doing
-  -- nothing with it is the expensive failure.
+  -- nothing with it is the expensive failure. Flat, not proportional: "don't
+  -- claim what you won't work" is the same instruction at any price.
   no_work_penalty         integer not null default 10,
 
   -- How many Fresh claims one person may hold at once.
@@ -127,3 +140,9 @@ create index if not exists idx_fcc_open_user
 -- they got these three for free.
 alter table contact_unlocks add column if not exists source text not null default 'paid';
 alter table contact_unlocks add column if not exists lead_id bigint references leads(id) on delete set null;
+
+-- --- added when the Newspaper got its own price -----------------------------
+-- Split out so a database created before this line still picks it up on a
+-- re-run rather than needing the table dropped.
+alter table credit_settings
+  add column if not exists newspaper_claim_cost integer not null default 5;

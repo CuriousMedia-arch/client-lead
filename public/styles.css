@@ -2789,3 +2789,29 @@ button.credits-chip:hover { background: var(--amber); color: #fff; }
 .credit-ladder strong { font-family: var(--mono); text-align: right; }
 .credit-ladder strong.up { color: var(--green); }
 .credit-ladder strong.down { color: var(--coral); }
+
+/* Two tracks, side by side: Fresh Leads and the Newspaper are the same bet at
+   different stakes, and that only reads if the numbers sit next to each other. */
+.credit-ladder.is-two { grid-template-columns: 1fr auto auto; gap: 4px 20px; max-width: 420px; }
+.credit-ladder .cl-head {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-faint);
+  text-align: right;
+  padding-bottom: 2px;
+}
+.credit-ladder .cl-head:first-child { text-align: left; }
+
+.cr-rule { display: grid; grid-template-columns: 1fr 42px 42px; gap: 8px; align-items: baseline; }
+.cr-rule .cr-amt { text-align: right; }
+.cr-rule-head span:not(:first-child) {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--amber-ink);
+  opacity: .7;
+  text-align: right;
+}
