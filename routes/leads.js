@@ -5,6 +5,7 @@ const playbook = require("../lib/triggers");
 const lifecycle = require("../lib/lifecycle");
 const freshClock = require("../lib/freshClock");
 const { creditCost } = require("../lib/credits");
+const freshCredits = require("../lib/freshCredits");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -385,10 +386,32 @@ router.get("/people/batch", async (req, res, next) => {
       logsByContact.get(l.contact_id).push(l);
     }
 
+    // The same credit gate every other contact view applies. Without it this
+    // endpoint was the way round the whole thing: ask for a page of leads and
+    // get back every email and phone number at every one of them, unpaid.
+    const unlocked = new Set(
+      contactIds.length
+        ? (
+            await db.all(
+              "SELECT contact_id FROM contact_unlocks WHERE user_id = $1 AND contact_id = ANY($2)",
+              [req.user.id, contactIds]
+            )
+          ).map((r) => r.contact_id)
+        : []
+    );
+
     const byLead = {};
     for (const r of rows) {
+      const gated = { ...r, activity: logsByContact.get(r.id) || [] };
+      gated.credit_cost = creditCost(r.role);
+      gated.unlocked = unlocked.has(r.id);
+      if (!gated.unlocked) {
+        gated.email = null;
+        gated.phone = null;
+        gated.linkedin = null;
+      }
       if (!byLead[r.lead_id]) byLead[r.lead_id] = [];
-      byLead[r.lead_id].push({ ...r, activity: logsByContact.get(r.id) || [] });
+      byLead[r.lead_id].push(gated);
     }
 
     res.json({ byLead });
@@ -424,6 +447,12 @@ router.get("/:id/people", async (req, res, next) => {
       [lead.name]
     );
 
+    // Who holds this company on the Fresh track, if anyone. While that claim
+    // runs nobody else can unlock or claim a single person here, so the rows
+    // say so rather than offering buttons that will be refused.
+    const lock = await freshCredits.lockFor(lead.name).catch(() => null);
+    const lockedOut = Boolean(lock && lock.owner_id !== req.user.id);
+
     // Same credit gate as All Leads — this endpoint feeds that same expanded
     // contact table, plus the outreach drawer's "people at this company"
     // panel, so a locked contact's email/phone stays hidden everywhere it's
@@ -440,6 +469,8 @@ router.get("/:id/people", async (req, res, next) => {
       for (const c of contacts) {
         c.credit_cost = creditCost(c.role);
         c.unlocked = unlocked.has(c.id);
+        c.company_locked = lockedOut;
+        c.company_locked_by = lockedOut ? lock.owner_name : null;
         if (!c.unlocked) {
           c.email = null;
           c.email_alt = null;
@@ -467,7 +498,11 @@ router.get("/:id/people", async (req, res, next) => {
       for (const c of contacts) c.activity = (byContact.get(c.id) || []).slice(0, 5);
     }
 
-    res.json({ company: lead.name, contacts });
+    res.json({
+      company: lead.name,
+      contacts,
+      lock: lock ? { owner_id: lock.owner_id, owner_name: lock.owner_name, mine: !lockedOut } : null,
+    });
   } catch (err) {
     next(err);
   }
@@ -667,10 +702,19 @@ router.post("/:id/claim", async (req, res, next) => {
           ? await lifecycle.releaseCascade(lead.id, req.user.id, note).catch(() => ({ released: [] }))
           : { released: [] };
 
+      // Settle before the claim row is cleared: settlement reads who held it
+      // and for how long, and releaseFresh wipes exactly that.
+      const settlement =
+        source !== "all"
+          ? await freshCredits.settle(lead.id, { note }).catch(() => null)
+          : null;
+
       const released =
         source !== "all"
           ? await freshClock.releaseFresh(lead.id, { note })
           : await lifecycle.release(lead.id, source);
+
+      if (settlement) released.settlement = settlement;
 
       released.released_contacts = cascade.released ? cascade.released.length : 0;
       await db.run(
@@ -697,7 +741,52 @@ router.post("/:id/claim", async (req, res, next) => {
         .json({ error: `Already claimed by ${ownerName || "someone else"} — it's locked to them.` });
     }
 
-    const claimed = await lifecycle.claim(lead.id, req.user.id, source);
+    // A live Fresh claim locks the whole company, All Leads included. Whoever
+    // paid for it has the account until they finish with it — otherwise a
+    // colleague claims the same company from the database an hour later and
+    // the exclusivity that was charged for is worth nothing.
+    if (source === "all" && lead.fresh_owner_id && lead.fresh_owner_id !== req.user.id) {
+      return res.status(409).json({
+        error: `${lead.fresh_owner_name || "Someone"} is working this company from Fresh Leads — it's locked until they're done.`,
+      });
+    }
+
+    // Fresh and Newspaper claims cost credits and are capped. Charged before
+    // the claim lands, so a refusal leaves nothing half-done: nobody holds a
+    // lead they were not charged for, and nobody is charged for a lead they
+    // do not hold.
+    // Re-claiming something already yours is not a second purchase. Without
+    // this a double-click bills twice — or, once the open-claim index catches
+    // it, fails with a constraint error instead of an answer.
+    const alreadyMine = source !== "all" && lead.fresh_owner_id === req.user.id;
+
+    let charge = null;
+    if (source !== "all" && !alreadyMine) {
+      try {
+        charge = await freshCredits.charge(lead.id, req.user.id);
+      } catch (err) {
+        if (err.code === "23505") {
+          return res.status(409).json({ error: "That claim is already yours." });
+        }
+        return res.status(err.status || 400).json({ error: err.message });
+      }
+    }
+
+    let claimed;
+    try {
+      claimed = await lifecycle.claim(lead.id, req.user.id, source);
+    } catch (err) {
+      // The charge bought nothing. Put it back rather than leaving someone
+      // fifteen credits down on a lead they never got.
+      if (charge && charge.claim) await freshCredits.voidCharge(charge.claim.id).catch(() => {});
+      throw err;
+    }
+
+    if (charge) {
+      claimed.credits = charge.balance;
+      claimed.credits_spent = charge.cost;
+      claimed.free_unlocked = charge.free_unlocked;
+    }
 
     await logActivity(
       lead.id,

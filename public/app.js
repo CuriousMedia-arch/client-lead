@@ -204,6 +204,10 @@ const LI_ICON =
 const state = {
   user: null,
   team: [],
+  // Balance, claim slots and the credit rules, as the server last told us.
+  // Null until the first load — every render guards on it rather than
+  // assuming, so a slow credits call never blanks the board.
+  credits: null,
   tab: "all",
   // Which sub-list "My Outreach" is showing — claims from All Leads or from
   // Fresh Leads. They're separate commitments, so they never mix in one list.
@@ -306,8 +310,107 @@ function initials(name) {
 /** Keeps the topbar chip and state.user.credits in sync after every spend. */
 function setCreditsDisplay(credits) {
   if (state.user) state.user.credits = credits;
+  if (state.credits) state.credits.balance = credits;
   const el = $("#me-credits-value");
   if (el) el.textContent = `${credits}`;
+  paintCreditsChip();
+}
+
+/**
+ * The chip says two things, because two different things stop a claim: the
+ * balance, and how many claims are already open. Being told "8/8" only after
+ * pressing Claim is the version of this that generates support messages.
+ */
+function paintCreditsChip() {
+  const chip = $("#me-credits");
+  const slots = $("#me-slots");
+  if (!chip || !state.credits) return;
+
+  const c = state.credits;
+  if (slots) {
+    slots.textContent = `${c.active}/${c.max_active}`;
+    slots.classList.toggle("is-full", c.active >= c.max_active);
+  }
+  chip.classList.toggle("is-low", c.balance < c.cost);
+  chip.title =
+    `${c.balance} credits · ${c.active} of ${c.max_active} Fresh claims open. ` +
+    `A claim costs ${c.cost} and opens the top ${c.free_contacts} contacts for free.`;
+}
+
+/** Re-read the balance, slots and rules. Called after anything that spends. */
+async function loadCredits() {
+  try {
+    state.credits = await api("/api/credits/me");
+    setCreditsDisplay(state.credits.balance);
+  } catch {
+    // Credits not migrated yet, or a blip. The board still works; it just
+    // shows no prices until the next successful load.
+  }
+  return state.credits;
+}
+
+/** The chip opens this: where the credits went, and what the rules are. */
+function creditsPanelHtml() {
+  const c = state.credits;
+  if (!c) return `<p class="hint">Credits aren't set up yet.</p>`;
+
+  const rules = c.rules || {};
+  const sign = (n) => (n > 0 ? `+${n}` : `${n}`);
+
+  const KINDS = {
+    claim: "Fresh Leads claim",
+    unlock: "Unlocked a contact",
+    free_unlock: "Free with a claim",
+    win_bonus: "Converted",
+    partial_refund: "Returned",
+    penalty: "Penalty",
+    admin_adjust: "Adjusted",
+    grant: "Granted",
+  };
+
+  const rows = (c.ledger || []).length
+    ? c.ledger
+        .map(
+          (l) => `<div class="cr-row">
+            <span class="cr-amt ${l.amount >= 0 ? "up" : "down"}">${sign(l.amount)}</span>
+            <span class="cr-what">
+              <strong>${esc(KINDS[l.kind] || l.kind)}</strong>
+              ${l.company ? `<span class="muted"> · ${esc(l.company)}</span>` : ""}
+              ${l.note ? `<span class="cr-note">${esc(l.note)}</span>` : ""}
+            </span>
+            <span class="cr-bal">${l.balance_after}</span>
+          </div>`
+        )
+        .join("")
+    : `<p class="hint">Nothing spent yet.</p>`;
+
+  return `
+    <div class="cr-head">
+      <div>
+        <strong>${c.balance}</strong> credits
+        <span class="muted"> · ${c.active} of ${c.max_active} claims open</span>
+      </div>
+      <p class="hint">
+        A Fresh Leads claim costs ${rules.fresh_claim_cost} and opens that company's
+        top ${rules.free_contacts_per_claim} contacts for free. Everyone else is locked
+        out of the company while you hold it.
+      </p>
+    </div>
+
+    <div class="cr-rules">
+      ${(rules.outcomes || [])
+        .map(
+          (o) => `<div class="cr-rule">
+            <span>${esc(o.label)}</span>
+            <span class="cr-amt ${o.value > 0 ? "up" : o.value < 0 ? "down" : ""}">${
+              o.value === 0 ? "0" : sign(o.value)
+            }</span>
+          </div>`
+        )
+        .join("")}
+    </div>
+
+    <div class="cr-ledger">${rows}</div>`;
 }
 
 function scoreClass(n) {
@@ -338,6 +441,7 @@ async function enterApp(user) {
   $("#me-role").textContent = user.role === "admin" ? "Admin" : "Team";
   $("#tab-admin").hidden = user.role !== "admin";
   setCreditsDisplay(user.credits);
+  loadCredits();
 
   // Fire the roster alongside the dashboard rather than before it - on a
   // remote database each sequential request is a fresh round trip of latency.
@@ -373,6 +477,25 @@ function wireEvents() {
       errBox.textContent = err.message;
       errBox.hidden = false;
     }
+  });
+
+  // The credits chip opens the ledger. Refreshed on open rather than kept
+  // live: the number in the chip is already current, and nobody needs the
+  // history behind it until they ask for it.
+  $("#me-credits").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const panel = $("#credits-panel");
+    if (!panel.hidden) return (panel.hidden = true);
+
+    panel.innerHTML = `<p class="hint">Loading…</p>`;
+    panel.hidden = false;
+    await loadCredits();
+    panel.innerHTML = creditsPanelHtml();
+  });
+
+  document.addEventListener("click", (e) => {
+    const panel = $("#credits-panel");
+    if (panel && !panel.hidden && !e.target.closest(".credits-wrap")) panel.hidden = true;
   });
 
   $("#signout").addEventListener("click", async () => {
@@ -1047,6 +1170,27 @@ async function renderPeople(opts = {}) {
   wireListActions();
 }
 
+/**
+ * Whoever holds a company on Fresh Leads holds it here too.
+ *
+ * They paid for that, so All Leads has to say so rather than showing a row
+ * whose Claim and Unlock buttons all refuse. Their own claim reads as a
+ * reminder, not a lock — it is their company either way.
+ */
+function companyLockBadge(lead) {
+  if (!lead.fresh_owner_id) return "";
+
+  const mine = lead.fresh_owner_id === state.user.id;
+  return `<div class="company-lock ${mine ? "is-mine" : ""}">
+      ${lockMark()}
+      ${
+        mine
+          ? `Yours from Fresh Leads — work it in My Outreach`
+          : `${esc(lead.fresh_owner_name || "Someone")} is working this from Fresh Leads`
+      }
+    </div>`;
+}
+
 function companyRow(lead) {
   const site = lead.website || (lead.domain ? `https://${lead.domain}` : null);
 
@@ -1061,6 +1205,7 @@ function companyRow(lead) {
             : `<span class="company-name">${esc(lead.company)}</span>`
         }
         ${lead.founded ? `<span class="company-meta">Founded ${esc(lead.founded)}</span>` : ""}
+        ${companyLockBadge(lead)}
         ${
           !lead.owner_id && lead.release_note
             ? `<div class="release-note">Handed back: ${esc(lead.release_note)}</div>`
@@ -1193,12 +1338,22 @@ function contactRow(c) {
   // owner/admin claim lock above, so it's tracked separately here.
   const claimedByOther = Boolean(c.owner_id) && !isOwner;
 
+  // A live Fresh Leads claim locks every person at the company, whether this
+  // one was individually claimed or not. It outranks the per-contact lock
+  // because it cannot be got round by picking a different person here.
+  const companyLocked = Boolean(c.company_locked);
+  const lockedByName = c.company_locked_by || "someone";
+
   const cell = (v) => `<span>${v == null || v === "" ? "—" : v}</span>`;
   const lockedCell = () =>
     `<span class="ct-locked-cell" title="Unlock this contact to see it">${lockMark()}</span>`;
 
   const emailCell = unlocked
     ? cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")
+    : companyLocked
+    ? `<span class="ct-locked-cell" title="${esc(lockedByName)} is working this company from Fresh Leads — everyone here is locked until that claim ends">
+         ${lockMark()} Company held
+       </span>`
     : claimedByOther
     ? `<span class="ct-locked-cell" title="Claimed by ${esc(c.owner_name || "someone else")} — locked until they release it">
          ${lockMark()} Claimed
@@ -1253,6 +1408,8 @@ function contactRow(c) {
           ${
             isOwner
               ? `<button class="btn btn-sm" data-release-contact="${c.id}">Release</button>`
+              : companyLocked
+              ? `<span class="lock-note" title="${esc(lockedByName)} holds this company from Fresh Leads">Company held</span>`
               : locked
               ? `<span class="lock-note">Locked</span>`
               : `<button class="btn btn-sm btn-primary" data-contact-act="claim" data-id="${c.id}">${unlocked ? "Claim" : "Unlock first"}</button>`
@@ -1705,6 +1862,40 @@ function myPersonCard(c) {
     </div>`;
 }
 
+/**
+ * The Claim button, with its price on it.
+ *
+ * Priced on the button rather than in a dialog after the fact: what it costs
+ * and whether you can afford it are the two things you want to know BEFORE
+ * pressing, and a button that looks free and then refuses is worse than one
+ * that never offered. When it can't be pressed it says which of the two
+ * reasons applies — an empty balance and a full claim list need different
+ * things done about them.
+ */
+function claimButton(lead, source) {
+  const c = state.credits;
+
+  // Credits not loaded (or not migrated): fall back to the plain button
+  // rather than blocking work on a number we could not fetch.
+  if (!c) {
+    return `<span class="muted">24h to show progress, then 15 days to close</span>
+      <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}" data-id="${lead.id}">Claim</button>`;
+  }
+
+  if (!c.can_claim) {
+    return `<span class="claim-blocked">${esc(c.reason)}</span>
+      <button class="btn btn-sm" disabled title="${esc(c.reason)}">Claim &middot; ${c.cost}cr</button>`;
+  }
+
+  return `<span class="muted">
+      ${c.cost} credits &middot; top ${c.free_contacts} contacts free &middot; locks the company to you
+    </span>
+    <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}"
+            data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${c.cost}">
+      Claim &middot; ${c.cost}cr
+    </button>`;
+}
+
 /* ── Fresh Leads ─────────────────────────────────────────────────────────── */
 
 /** News on a company you already have. Claimable, no Inspect. */
@@ -1738,10 +1929,7 @@ function freshCard(lead) {
           lead.fresh_owner_id === state.user.id
             ? `<span class="muted">Yours — work it in My Outreach</span>
                <button class="btn btn-sm" data-act="release" data-source="fresh" data-id="${lead.id}">Release</button>`
-            : `<span class="muted">24h to show progress, then 15 days to close</span>
-               <button class="btn btn-sm btn-primary" data-act="claim" data-source="fresh" data-id="${lead.id}">
-                 Claim
-               </button>`
+            : claimButton(lead, "fresh")
         }
       </div>
     </div>`;
@@ -2032,7 +2220,11 @@ function newspaperCard(lead) {
       ${signalsByType(lead.signals, 3)}
 
       <div class="mylead-actions">
-        <span class="muted">Went unworked past its deadline · no clock on this one</span>
+        <span class="muted">
+          Went unworked past its deadline · no clock on this one${
+            state.credits ? ` · ${state.credits.cost} credits to pick up` : ""
+          }
+        </span>
         <div class="np-buttons">
           ${
             state.user.role === "admin"
@@ -2040,9 +2232,17 @@ function newspaperCard(lead) {
                          data-company="${esc(lead.company)}">Remove</button>`
               : ""
           }
-          <button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper" data-id="${lead.id}">
-            Pick this up
-          </button>
+          ${
+            state.credits && !state.credits.can_claim
+              ? `<button class="btn btn-sm" disabled title="${esc(state.credits.reason)}">
+                   Pick this up &middot; ${state.credits.cost}cr
+                 </button>`
+              : `<button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper"
+                         data-id="${lead.id}" data-company="${esc(lead.company)}"
+                         data-cost="${state.credits ? state.credits.cost : ""}">
+                   Pick this up${state.credits ? ` &middot; ${state.credits.cost}cr` : ""}
+                 </button>`
+          }
         </div>
       </div>
     </div>`;
@@ -2486,6 +2686,7 @@ async function onCardClick(e) {
       }
 
       toast(`Unlocked — ${credits} credit${credits === 1 ? "" : "s"} left`);
+      loadCredits();
     } catch (err) {
       unlockBtn.disabled = false;
       toast(err.message, true);
@@ -2657,15 +2858,41 @@ async function onCardClick(e) {
           if (note.trim().length < 3) return toast("Give a reason before releasing.", true);
         }
 
+        // Spending credits gets one confirmation, with the whole bargain on
+        // it: what it costs, what it opens, what it locks, and what comes
+        // back. Nobody should learn any of that from their balance afterwards.
+        const source = actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all");
+        if (act === "claim" && source !== "all" && state.credits) {
+          const c = state.credits;
+          const r = c.rules || {};
+          const ok = window.confirm(
+            `Claim ${actionBtn.dataset.company || "this company"} for ${c.cost} credits?\n\n` +
+              `· Its top ${c.free_contacts} contacts open up straight away, free\n` +
+              `· Nobody else can claim or unlock anyone there while you hold it\n` +
+              `· It moves into My Outreach\n\n` +
+              `You get credits back when it ends:\n` +
+              `· Client signs — ${r.outcomes ? r.outcomes[0].value : c.cost * 3} back\n` +
+              `· Lost after 3+ replies — ${r.refund_pct_3plus}% back, 2 replies ${r.refund_pct_2}%, 1 reply ${r.refund_pct_1}%\n` +
+              `· Never worked it — you lose the ${c.cost} and ${r.no_work_penalty} more\n\n` +
+              `Balance after this: ${c.balance - c.cost}. Claims open: ${c.active + 1} of ${c.max_active}.`
+          );
+          if (!ok) return;
+        }
+
         // Where it was claimed from decides the deadline: 10 days or 30.
         const { lead } = await api(`/api/leads/${id}/claim`, {
           method: "POST",
           body: {
             release: act === "release",
             note: note ? note.trim() : undefined,
-            source: actionBtn.dataset.source || (state.tab === "fresh" ? "fresh" : "all"),
+            source,
           },
         });
+
+        // The balance and the claim count both just moved. Re-read them
+        // before the re-render, so the next card's button is priced against
+        // what is actually left rather than what was there a moment ago.
+        if (source !== "all") await loadCredits();
 
         // A fresh claim takes the company's people with it. Say how many, and
         // say plainly if any were reassigned — someone else just lost a row
@@ -2679,12 +2906,23 @@ async function onCardClick(e) {
                 : "")
             : "";
 
+        // What the credits did is the part people actually want confirmed.
+        const settlement = lead && lead.settlement;
+        const creditNote =
+          act === "release" && settlement
+            ? ` — ${settlement.label}`
+            : act !== "release" && lead && lead.credits_spent
+            ? ` · ${lead.credits_spent} credits spent, ${lead.free_unlocked} contact${
+                lead.free_unlocked === 1 ? "" : "s"
+              } unlocked free`
+            : "";
+
         toast(
           act === "release"
-            ? "Released"
-            : actionBtn.dataset.source === "newspaper"
-            ? `Picked up — no deadline on this one${sweptNote}`
-            : `Claimed — ${actionBtn.dataset.source === "fresh" ? 10 : 30} days to close${sweptNote}`
+            ? `Released${creditNote}`
+            : source === "newspaper"
+            ? `Picked up — no deadline on this one${sweptNote}${creditNote}`
+            : `Claimed — ${source === "fresh" ? 10 : 30} days to close${sweptNote}${creditNote}`
         );
       }
       refresh();
@@ -2762,6 +3000,96 @@ async function openDrawer(id) {
   state.drawerLead = lead;
   drawer.innerHTML = drawerHtml(lead);
   wireDrawer(lead);
+}
+
+/**
+ * The credit rules, as eight numbers and a worked example.
+ *
+ * The example is the point: "50%" is a policy and "8 credits" is what someone
+ * actually gets, and the second one is what stops the argument. It recomputes
+ * as the fields are typed in, so the effect of a change is visible before it
+ * is saved.
+ */
+const CREDIT_FIELDS = [
+  ["fresh_claim_cost", "Claim costs", "Credits to claim one company from Fresh Leads."],
+  ["free_contacts_per_claim", "Contacts free with a claim", "The most senior ones at that company."],
+  ["max_active_claims", "Claims held at once", "Per person."],
+  ["win_multiplier", "Conversion pays back", "Multiple of the claim cost. 3 means 15 becomes 45."],
+  ["refund_pct_3plus", "Lost, 3+ replies", "% of the cost returned."],
+  ["refund_pct_2", "Lost, 2 replies", "% of the cost returned."],
+  ["refund_pct_1", "Lost, 1 reply", "% of the cost returned."],
+  ["no_work_penalty", "Never worked it", "Taken on top of the lost claim cost."],
+];
+
+async function renderCreditRules(root) {
+  const box = root.querySelector("#credit-rules");
+  if (!box) return;
+
+  let settings;
+  try {
+    ({ settings } = await api("/api/credits/settings"));
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Credits aren't set up yet — run <code>db/migrate-fresh-credits.sql</code>. (${esc(
+      err.message
+    )})</p>`;
+    return;
+  }
+
+  box.innerHTML = `
+    <div class="credit-grid">
+      ${CREDIT_FIELDS.map(
+        ([key, label, help]) => `
+        <label class="credit-field">
+          <span class="credit-label">${esc(label)}</span>
+          <input type="number" min="0" step="${key === "win_multiplier" ? "0.5" : "1"}"
+                 data-credit-field="${key}" value="${settings[key]}" />
+          <span class="credit-help">${esc(help)}</span>
+        </label>`
+      ).join("")}
+    </div>
+    <div class="credit-preview" id="credit-preview"></div>
+    <div class="inline-form" style="margin-top:12px">
+      <button class="btn btn-primary" id="credit-save">Save credit rules</button>
+      <span id="credit-result" class="hint"></span>
+    </div>`;
+
+  const read = () => {
+    const out = {};
+    for (const [key] of CREDIT_FIELDS) {
+      out[key] = Number(box.querySelector(`[data-credit-field="${key}"]`).value);
+    }
+    return out;
+  };
+
+  const preview = () => {
+    const v = read();
+    const cost = v.fresh_claim_cost || 0;
+    const pct = (n) => Math.round((cost * n) / 100);
+    box.querySelector("#credit-preview").innerHTML = `
+      <p class="hint">On a ${cost}-credit claim, someone gets back:</p>
+      <div class="credit-ladder">
+        <span>Client signs</span><strong class="up">+${Math.round(cost * (v.win_multiplier || 0))}</strong>
+        <span>Lost, 3+ replies</span><strong class="up">+${pct(v.refund_pct_3plus)}</strong>
+        <span>Lost, 2 replies</span><strong class="up">+${pct(v.refund_pct_2)}</strong>
+        <span>Lost, 1 reply</span><strong class="up">+${pct(v.refund_pct_1)}</strong>
+        <span>Worked it, no reply</span><strong>0</strong>
+        <span>Claimed, did nothing</span><strong class="down">-${v.no_work_penalty || 0}</strong>
+      </div>`;
+  };
+
+  preview();
+  box.querySelectorAll("[data-credit-field]").forEach((i) => i.addEventListener("input", preview));
+
+  box.querySelector("#credit-save").addEventListener("click", async () => {
+    const out = box.querySelector("#credit-result");
+    try {
+      await api("/api/credits/settings", { method: "PUT", body: read() });
+      out.textContent = "Saved.";
+      await loadCredits();
+    } catch (err) {
+      out.textContent = err.message;
+    }
+  });
 }
 
 /* ── Unclaimed Fresh Leads (admin only) ──────────────────────────────────── */
@@ -3359,6 +3687,16 @@ async function renderAdmin() {
         : ""
     }
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>Credit rules</h3>
+      <p class="hint">
+        What a Fresh Leads claim costs, what comes with it, and what comes back
+        depending on how it ends. Changing a number here changes it everywhere
+        straight away — it does not re-settle claims that have already finished.
+      </p>
+      <div id="credit-rules"><p class="hint">Loading…</p></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <h3>Deleted contacts</h3>
       <p class="hint">
         Deleting hides a contact rather than destroying it — its import snapshot,
@@ -3652,6 +3990,8 @@ function wireAdmin() {
       toast("Teammate added");
     })
   );
+
+  renderCreditRules(root);
 
   root.querySelectorAll("[data-user-credits-save]").forEach((btn) =>
     btn.addEventListener("click", () =>

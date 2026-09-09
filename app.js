@@ -100,6 +100,7 @@ app.use("/api/signals", require("./routes/signals"));
 app.use("/api/contacts", require("./routes/contacts"));
 app.use("/api/admin", require("./routes/admin"));
 app.use("/api/outreach", require("./routes/outreach"));
+app.use("/api/credits", require("./routes/credits"));
 
 // Machine-authenticated, not session-authenticated — mounted before nothing in
 // particular, but kept separate from /api/* so it is obvious in the route list

@@ -2660,3 +2660,132 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
    confirmation dialog. */
 .sync-box { max-width: 780px; width: 92vw; }
 .sync-box .wl-list { max-height: 46vh; }
+
+/* ══ Credits: the chip, the ledger panel, the locks, the admin rules ══════ */
+
+/* The chip is a button now — it opens the ledger — so it has to lose the
+   inherited button chrome without losing the pill it already was. */
+.credits-wrap { position: relative; }
+
+button.credits-chip { cursor: pointer; font-family: var(--mono); }
+button.credits-chip:hover { background: var(--amber); color: #fff; }
+
+/* Out of credits is the one state worth shouting about: every Claim button on
+   the board is dead until it changes. */
+.credits-chip.is-low {
+  color: var(--coral);
+  background: var(--coral-tint);
+  border-color: rgba(201, 99, 63, .45);
+}
+
+/* Claims held, next to the balance. Two numbers, because either one can stop
+   a claim and they fail for different reasons. */
+.credits-chip .slots {
+  font-size: 10.5px;
+  opacity: .75;
+  padding-left: 5px;
+  margin-left: 1px;
+  border-left: 1px solid currentColor;
+}
+.credits-chip .slots.is-full { opacity: 1; font-weight: 700; }
+
+.credits-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 60;
+  width: 360px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(20, 24, 28, .14);
+  padding: 14px;
+}
+
+.cr-head { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+.cr-head strong { font-family: var(--mono); font-size: 20px; }
+.cr-head .hint { margin: 6px 0 0; }
+
+.cr-rules {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  margin-bottom: 12px;
+  background: var(--amber-tint);
+  border-radius: 8px;
+}
+.cr-rule { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+
+.cr-ledger { display: grid; gap: 2px; }
+.cr-row {
+  display: grid;
+  grid-template-columns: 46px 1fr 42px;
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.cr-row:last-child { border-bottom: 0; }
+.cr-amt { font-family: var(--mono); font-weight: 700; }
+.cr-amt.up { color: var(--green); }
+.cr-amt.down { color: var(--coral); }
+.cr-bal { font-family: var(--mono); color: var(--ink-faint); text-align: right; }
+.cr-note { display: block; color: var(--ink-soft); font-size: 11px; margin-top: 1px; }
+
+/* A Fresh claim holds the whole company, so All Leads has to say so rather
+   than showing rows whose every button refuses. */
+.company-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--coral);
+  background: var(--coral-tint);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.company-lock.is-mine { color: var(--green); background: var(--green-tint); }
+.company-lock svg { width: 11px; height: 11px; fill: currentColor; }
+
+/* Why the Claim button is dead, on the card, before it is pressed. */
+.claim-blocked {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--coral);
+}
+
+/* ── Admin > Credit rules ─────────────────────────────────────────────── */
+.credit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.credit-field { display: grid; gap: 3px; }
+.credit-label { font-size: 12px; font-weight: 600; }
+.credit-field input {
+  font-family: var(--mono);
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+}
+.credit-help { font-size: 11px; color: var(--ink-soft); }
+
+/* The worked example. Percentages are policy; credits are what people get,
+   and only the second one settles an argument. */
+.credit-preview { margin-top: 14px; }
+.credit-ladder {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 16px;
+  max-width: 340px;
+  font-size: 12px;
+}
+.credit-ladder strong { font-family: var(--mono); text-align: right; }
+.credit-ladder strong.up { color: var(--green); }
+.credit-ladder strong.down { color: var(--coral); }

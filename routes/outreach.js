@@ -17,6 +17,7 @@ const express = require("express");
 
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
+const freshCredits = require("../lib/freshCredits");
 const pricing = require("../lib/pricing");
 const sweeps = require("../lib/sweeps");
 // Whichever provider the person has connected — Teams or Meet.
@@ -2213,6 +2214,8 @@ router.post("/:id/stage", async (req, res, next) => {
     const to = String(req.body.stage || "");
     if (!STAGES.includes(to)) return res.status(400).json({ error: "Unknown stage." });
 
+    let settled = null;
+
     // Item 12 — there is no route to 'lost' that skips the interview.
     if (to === "lost") {
       return res.status(400).json({ error: "Losing an opportunity goes through the loss interview." });
@@ -2246,9 +2249,20 @@ router.post("/:id/stage", async (req, res, next) => {
       );
       await closeUnderlyingClaim(opp, "won");
       await clearDeadline(opp.id);
+
+      // A converted Fresh claim pays back several times what it cost. Settled
+      // here rather than inside closeUnderlyingClaim so the credits only move
+      // once the win itself is written — a rolled-back win must not leave a
+      // bonus behind.
+      if (opp.lead_id && opp.source !== "all") {
+        const settlement = await freshCredits
+          .settle(opp.lead_id, { outcome: "won", note: "Converted" })
+          .catch(() => null);
+        if (settlement) settled = settlement;
+      }
     }
 
-    res.json({ opportunity: await loadOpp(opp.id, req.user) });
+    res.json({ opportunity: await loadOpp(opp.id, req.user), settlement: settled });
   } catch (err) {
     next(err);
   }
@@ -2292,6 +2306,11 @@ router.post("/:id/release", async (req, res, next) => {
         [opp.lead_id]
       );
     } else if (opp.lead_id) {
+      // Settle before the owner is cleared, exactly as the Fresh Leads tab
+      // does — handing a lead back from the workspace and handing it back
+      // from the card are the same act and must cost the same.
+      await freshCredits.settle(opp.lead_id, { note }).catch(() => {});
+
       // A released Fresh claim goes back to the Newspaper, which is where the
       // expiry sweep puts them too — the two must not disagree about where a
       // handed-back lead lands.
@@ -2421,7 +2440,15 @@ router.post("/:id/lost", async (req, res, next) => {
       await clearDeadline(opp.id, q);
     });
 
-    res.json({ opportunity: await loadOpp(opp.id, req.user) });
+    // After the transaction, not inside it: settlement reads how many times
+    // the client replied and moves credits, and neither should happen for a
+    // loss interview that failed to save.
+    const settlement =
+      opp.lead_id && opp.source !== "all"
+        ? await freshCredits.settle(opp.lead_id, { outcome: "lost" }).catch(() => null)
+        : null;
+
+    res.json({ opportunity: await loadOpp(opp.id, req.user), settlement });
   } catch (err) {
     next(err);
   }

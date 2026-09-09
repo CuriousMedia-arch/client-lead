@@ -8,6 +8,7 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 const { creditCost } = require("../lib/credits");
+const freshCredits = require("../lib/freshCredits");
 
 
 const router = express.Router();
@@ -252,12 +253,18 @@ router.get("/people", async (req, res, next) => {
 router.post("/:id/unlock", async (req, res, next) => {
   try {
     const contact = await db.one(
-      "SELECT id, role, owner_id FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
+      "SELECT id, role, owner_id, company FROM company_contacts WHERE id = $1 AND deleted_at IS NULL",
       [req.params.id]
     );
     if (!contact) return res.status(404).json({ error: "That contact no longer exists." });
 
     const cost = creditCost(contact.role);
+
+    // A paid Fresh Leads claim locks every person at that company, whether
+    // this contact was individually claimed or not. That exclusivity is what
+    // the claim was charged for, so it has to hold here — the All Leads table
+    // is the obvious way round a lock that only covered Fresh Leads.
+    const lock = await freshCredits.lockFor(contact.company).catch(() => null);
 
     const already = await db.one(
       "SELECT credits_spent FROM contact_unlocks WHERE contact_id = $1 AND user_id = $2",
@@ -271,6 +278,12 @@ router.post("/:id/unlock", async (req, res, next) => {
     if (!already && contact.owner_id && contact.owner_id !== req.user.id) {
       return res.status(403).json({
         error: "Someone else has already claimed this contact — it can't be unlocked until they release it.",
+      });
+    }
+
+    if (!already && lock && lock.owner_id !== req.user.id) {
+      return res.status(403).json({
+        error: `${lock.owner_name || "Someone"} is working ${contact.company} from Fresh Leads — everyone there is locked until that claim ends.`,
       });
     }
 
@@ -348,10 +361,22 @@ router.post("/:id/claim", async (req, res, next) => {
     // A claim locks the person. Nobody but the owner can touch it — no silent
     // take-overs — except an admin, who can always hand a lead back so it
     // doesn't get stranded when someone leaves or goes on holiday.
-    const current = await db.one("SELECT owner_id, role FROM company_contacts WHERE id = $1", [
-      req.params.id,
-    ]);
+    const current = await db.one(
+      "SELECT owner_id, role, company FROM company_contacts WHERE id = $1",
+      [req.params.id]
+    );
     if (!current) return res.status(404).json({ error: "That contact no longer exists." });
+
+    // Same company-wide lock as unlocking. Releasing is exempt — handing a
+    // contact back is never something a lock should stand in the way of.
+    if (!releasing) {
+      const lock = await freshCredits.lockFor(current.company).catch(() => null);
+      if (lock && lock.owner_id !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          error: `${lock.owner_name || "Someone"} is working ${current.company} from Fresh Leads — everyone there is locked until that claim ends.`,
+        });
+      }
+    }
 
     // Working a contact means having their details — claiming one you haven't
     // paid to reveal yet would hand you an opportunity with no way to reach

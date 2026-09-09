@@ -51,6 +51,7 @@ press Run, wait for "Success", then move to the next. **In this order:**
 - [ ] `db/migrate-outreach-3.sql`
 - [ ] `db/migrate-outreach-4.sql`
 - [ ] `db/migrate-outreach-5.sql`
+- [ ] `db/migrate-fresh-credits.sql`  ← credits for Fresh Leads claims (run this one last)
 
 All five are safe to run twice. If you're unsure whether one was already
 applied, run it again — that's cheaper than guessing.
