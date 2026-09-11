@@ -8,6 +8,7 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth, requireAdmin } = require("../lib/auth");
 const { creditCost } = require("../lib/credits");
+const credits = require("../lib/credits");
 const freshCredits = require("../lib/freshCredits");
 
 
@@ -242,13 +243,19 @@ router.get("/people", async (req, res, next) => {
 });
 
 /**
- * Spend credits to reveal one contact's email/phone/linkedin.
+ * Reveal one contact's email/phone/linkedin — paid, or with a free pick.
+ *
+ * Someone holding a Fresh Leads claim on this company has an allowance of
+ * free unlocks banked against it. They choose who to spend those on rather
+ * than being handed whoever ranked highest, and the choice is deliberate:
+ * `use_free` has to be asked for, so nobody spends an irreversible pick by
+ * clicking the same button they use to pay.
  *
  * Idempotent per person — re-unlocking someone already unlocked is a no-op,
- * not a second charge. The balance check re-reads the row inside the same
- * transaction as the deduction, rather than trusting the cached session
- * balance, so two quick unlocks from the same low-balance account can't both
- * pass a check that ran against the same stale number.
+ * not a second charge and not a spent pick. The balance check re-reads the
+ * row inside the same transaction as the deduction, rather than trusting the
+ * cached session balance, so two quick unlocks from the same low-balance
+ * account can't both pass a check that ran against the same stale number.
  */
 router.post("/:id/unlock", async (req, res, next) => {
   try {
@@ -287,9 +294,71 @@ router.post("/:id/unlock", async (req, res, next) => {
       });
     }
 
+    // What they're holding on this company, if anything. Drives both the
+    // free-pick path and the number sent back for the button to display.
+    const picks = await freshCredits
+      .allowanceForCompany(contact.company, req.user.id)
+      .catch(() => ({ granted: 0, used: 0, remaining: 0, holds: false, lead_id: null }));
+
+    const wantsFree = Boolean(req.body && req.body.use_free);
+
+    if (wantsFree && !already) {
+      if (!picks.holds) {
+        return res.status(403).json({
+          error: "Free unlocks come with a Fresh Leads claim — claim this company first.",
+        });
+      }
+      if (picks.remaining < 1) {
+        return res.status(409).json({
+          error: `You've used all ${picks.granted} free unlocks on ${contact.company}. This one costs ${cost}.`,
+          picks,
+        });
+      }
+    }
+
     let balance;
+    let spentPick = null;
+
     if (already) {
       balance = await db.value("SELECT credits FROM users WHERE id = $1", [req.user.id], "credits");
+    } else if (wantsFree) {
+      // A free pick costs nothing but is still recorded as a credit movement,
+      // so the ledger reads as a complete history rather than one with
+      // unexplained gaps where the free ones were.
+      const result = await db.tx(async (q) => {
+        const spent = await freshCredits.spendFreePick(q, {
+          leadId: picks.lead_id,
+          userId: req.user.id,
+          contactId: contact.id,
+        });
+        if (!spent) {
+          throw Object.assign(
+            new Error("That free unlock was already spent. Refresh and try again."),
+            { status: 409 }
+          );
+        }
+
+        await q(
+          `INSERT INTO contact_unlocks (contact_id, user_id, credits_spent, source, lead_id)
+           VALUES ($1, $2, 0, 'fresh_claim', $3)
+           ON CONFLICT (contact_id, user_id) DO NOTHING`,
+          [contact.id, req.user.id, picks.lead_id]
+        );
+
+        const bal = await credits.move(q, {
+          userId: req.user.id,
+          amount: 0,
+          kind: "free_unlock",
+          leadId: picks.lead_id,
+          contactId: contact.id,
+          note: `Free unlock ${spent.used} of ${spent.granted} at ${contact.company}`,
+        });
+
+        return { bal, spent };
+      });
+
+      balance = result.bal;
+      spentPick = result.spent;
     } else {
       const result = await db.tx(async (q) => {
         // Re-check the claim inside the transaction, row-locked, so a claim
@@ -322,10 +391,16 @@ router.post("/:id/unlock", async (req, res, next) => {
           );
         }
 
-        const { rows: newBalance } = await q(
-          "UPDATE users SET credits = credits - $1 WHERE id = $2 RETURNING credits",
-          [cost, req.user.id]
-        );
+        // Through the ledger helper rather than a bare UPDATE, so a paid
+        // unlock shows up in the credit history alongside everything else.
+        // It was the one spend in the app that moved a balance silently.
+        const newBalance = await credits.move(q, {
+          userId: req.user.id,
+          amount: -cost,
+          kind: "unlock",
+          contactId: contact.id,
+          note: `Unlocked a contact at ${contact.company}`,
+        });
 
         await q(
           `INSERT INTO contact_unlocks (contact_id, user_id, credits_spent)
@@ -334,7 +409,7 @@ router.post("/:id/unlock", async (req, res, next) => {
           [contact.id, req.user.id, cost]
         );
 
-        return newBalance[0].credits;
+        return newBalance;
       });
       balance = result;
     }
@@ -346,7 +421,41 @@ router.post("/:id/unlock", async (req, res, next) => {
     applyCreditGate([row], new Set([contact.id]));
     row.countdown = contactCountdown(row);
 
-    res.json({ contact: row, credits: balance, cost, alreadyUnlocked: Boolean(already) });
+    // A spent pick is written where it will be found: on the contact, and on
+    // the company. Whoever picks this account up next should be able to see
+    // who chose to open this person and when, without asking anybody.
+    if (spentPick) {
+      const who = req.user.display_name || req.user.username || "Someone";
+      const line =
+        `${who} used free unlock ${spentPick.used} of ${spentPick.granted} on ` +
+        `${row.name}${row.role ? ` (${row.role})` : ""}`;
+
+      await db
+        .run(
+          `INSERT INTO contact_activity (contact_id, user_id, kind, body)
+           VALUES ($1, $2, 'note', $3)`,
+          [contact.id, req.user.id, line]
+        )
+        .catch(() => {});
+
+      await db
+        .run(
+          `INSERT INTO activity (lead_id, user_id, kind, body) VALUES ($1, $2, 'claim', $3)`,
+          [picks.lead_id, req.user.id, line]
+        )
+        .catch(() => {});
+    }
+
+    res.json({
+      contact: row,
+      credits: balance,
+      cost: spentPick ? 0 : cost,
+      paid_with: spentPick ? "free_pick" : "credits",
+      picks: spentPick
+        ? { ...picks, used: spentPick.used, remaining: spentPick.remaining }
+        : picks,
+      alreadyUnlocked: Boolean(already),
+    });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);

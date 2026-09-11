@@ -189,4 +189,52 @@ router.get("/team", requireAdmin, async (req, res, next) => {
   }
 });
 
+/**
+ * Every free unlock anyone has spent, newest first.
+ *
+ * The point of letting people choose their three is that the choice is
+ * theirs; the point of this screen is that it is also on the record. Shows
+ * who spent it, on whom, at which company, and what that contact would have
+ * cost if they had paid for it — which is the number that makes a pattern of
+ * spending picks on junior contacts visible.
+ */
+router.get("/free-picks", requireAdmin, async (req, res, next) => {
+  try {
+    const rows = await db.all(
+      `SELECT cu.unlocked_at, cu.contact_id,
+              u.display_name AS user_name,
+              cc.name AS contact_name, cc.role AS contact_role, cc.company,
+              cu.lead_id
+         FROM contact_unlocks cu
+         JOIN users u             ON u.id  = cu.user_id
+         JOIN company_contacts cc ON cc.id = cu.contact_id
+        WHERE cu.source = 'fresh_claim'
+        ORDER BY cu.unlocked_at DESC
+        LIMIT 300`
+    );
+
+    for (const r of rows) r.would_have_cost = credits.creditCost(r.contact_role);
+
+    // What each live claim has left, so a claim sitting on unspent picks is
+    // visible too — an allowance nobody spends is a sign the company was
+    // claimed and abandoned.
+    const open = await db.all(
+      `SELECT c.name AS company, u.display_name AS user_name,
+              f.free_allowance,
+              COALESCE(array_length(f.free_contact_ids, 1), 0) AS used,
+              f.claimed_at
+         FROM fresh_claim_credits f
+         JOIN leads l     ON l.id = f.lead_id
+         JOIN companies c ON c.id = l.company_id
+         JOIN users u     ON u.id = f.user_id
+        WHERE f.settled_at IS NULL
+        ORDER BY f.claimed_at DESC`
+    );
+
+    res.json({ picks: rows, open });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

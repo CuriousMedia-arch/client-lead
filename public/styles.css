@@ -2815,3 +2815,68 @@ button.credits-chip:hover { background: var(--amber); color: #fff; }
   opacity: .7;
   text-align: right;
 }
+
+/* ══ Free unlocks: the pick, and the record of it ════════════════════════ */
+
+/* Two buttons side by side — use a pick, or pay and keep it. The paid option
+   is deliberately quieter: the pick is the one they're being offered. */
+.unlock-pair { display: inline-flex; align-items: center; gap: 6px; }
+
+.unlock-btn.is-free {
+  color: #2C6E45;
+  background: var(--green-tint);
+  border-color: rgba(62, 156, 92, .45);
+}
+.unlock-btn.is-free:hover { background: var(--green); color: #fff; }
+
+.unlock-alt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+.unlock-alt:hover { color: var(--ink); }
+
+/* Above the contact table, when the viewer is holding picks here. */
+.picks-banner {
+  margin: 10px 16px 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #2C6E45;
+  background: var(--green-tint);
+  border: 1px solid rgba(62, 156, 92, .3);
+}
+.picks-banner strong { font-weight: 700; }
+.picks-banner.is-spent {
+  color: var(--ink-soft);
+  background: var(--paper, #F7F8F5);
+  border-color: var(--line);
+}
+
+/* Admin: what each spent pick was worth, and claims sitting on unspent ones. */
+.pick-worth {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--amber-ink);
+  background: var(--amber-tint);
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-right: 8px;
+}
+.pick-unspent { font-size: 12px; font-weight: 600; color: var(--coral); }
+
+.sub-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--ink-faint);
+  margin: 12px 0 6px;
+}

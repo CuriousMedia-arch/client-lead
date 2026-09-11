@@ -394,9 +394,9 @@ function creditsPanelHtml() {
       </div>
       <p class="hint">
         A Fresh Leads claim costs ${rules.fresh_claim_cost}; a Newspaper pick-up costs
-        ${rules.newspaper_claim_cost}. Either one opens that company's top
-        ${rules.free_contacts_per_claim} contacts for free and locks everyone else out of
-        the company while you hold it. What comes back is worked out from what you paid.
+        ${rules.newspaper_claim_cost}. Either one gives you ${rules.free_contacts_per_claim}
+        free contact unlocks to spend at that company on whoever you choose, and locks
+        everyone else out while you hold it. What comes back is worked out from what you paid.
       </p>
     </div>
 
@@ -1247,7 +1247,7 @@ function companyRow(lead) {
         }
       </div>
     </div>
-    <div class="db-contacts" id="contacts-${lead.id}" hidden></div>`;
+    <div class="db-contacts" id="contacts-${lead.id}" data-contacts-for="${lead.id}" hidden></div>`;
 }
 
 /**
@@ -1360,6 +1360,13 @@ function contactRow(c) {
   const lockedCell = () =>
     `<span class="ct-locked-cell" title="Unlock this contact to see it">${lockMark()}</span>`;
 
+  // Holding the company earns free unlocks, but which people they go on is
+  // the holder's call — so the choice is offered per row, next to the price
+  // of not using one. A spent pick can't be taken back, which is the whole
+  // reason it's a button they press rather than something done for them.
+  const freePick = Boolean(c.free_pick_available) && !unlocked && !companyLocked && !claimedByOther;
+  const picksLeft = Number(c.picks_remaining) || 0;
+
   const emailCell = unlocked
     ? cell(c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "")
     : companyLocked
@@ -1369,6 +1376,16 @@ function contactRow(c) {
     : claimedByOther
     ? `<span class="ct-locked-cell" title="Claimed by ${esc(c.owner_name || "someone else")} — locked until they release it">
          ${lockMark()} Claimed
+       </span>`
+    : freePick
+    ? `<span class="unlock-pair">
+         <button class="unlock-btn is-free" data-unlock-contact="${c.id}" data-free="1"
+                 data-name="${esc(c.name)}" data-role="${esc(c.role || "")}" data-cost="${cost}"
+                 title="Use one of your free unlocks on this person. You can't undo it.">
+           ${lockMark()} Free pick${picksLeft ? ` &middot; ${picksLeft} left` : ""}
+         </button>
+         <button class="unlock-alt" data-unlock-contact="${c.id}"
+                 title="Pay ${cost} credits instead and keep your free unlocks">pay ${cost}</button>
        </span>`
     : `<span>
          <button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${cost} credit${cost === 1 ? "" : "s"} to reveal this contact">
@@ -1903,7 +1920,7 @@ function claimButton(lead, source) {
   }
 
   return `<span class="muted">
-      ${cost} credits &middot; top ${c.free_contacts} contacts free &middot; locks the company to you
+      ${cost} credits &middot; ${c.free_contacts} free contact unlocks &middot; locks the company to you
     </span>
     <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}"
             data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${cost}">
@@ -2707,20 +2724,52 @@ async function onCardClick(e) {
     return;
   }
 
-  // Spending credits to reveal one contact's email/phone/linkedin.
+  // Revealing a contact — paid, or with one of the free unlocks that came
+  // with the company claim.
   const unlockBtn = e.target.closest("[data-unlock-contact]");
   if (unlockBtn) {
     e.stopPropagation();
     const id = unlockBtn.dataset.unlockContact;
+    const useFree = unlockBtn.dataset.free === "1";
+
+    // A pick is final, so it gets a confirmation naming the person. Paying
+    // doesn't — credits come back, a spent pick doesn't.
+    if (useFree) {
+      const who = unlockBtn.dataset.name || "this contact";
+      const role = unlockBtn.dataset.role ? ` (${unlockBtn.dataset.role})` : "";
+      const ok = window.confirm(
+        `Use a free unlock on ${who}${role}?\n\n` +
+          `This can't be undone or moved to someone else, and it goes on this ` +
+          `company's activity log with your name.\n\n` +
+          `Paying for this contact instead would cost ${unlockBtn.dataset.cost} credits.`
+      );
+      if (!ok) return;
+    }
+
     unlockBtn.disabled = true;
 
     try {
-      const { contact, credits } = await api(`/api/contacts/${id}/unlock`, { method: "POST" });
+      const { contact, credits, paid_with } = await api(`/api/contacts/${id}/unlock`, {
+        method: "POST",
+        body: { use_free: useFree },
+      });
       setCreditsDisplay(credits);
 
       const row = unlockBtn.closest(".ct-row") || unlockBtn.closest(".poc-card");
       if (row && row.classList.contains("ct-row")) {
-        row.outerHTML = contactRow(contact);
+        // Spending a pick changes what every OTHER row at this company should
+        // offer, so the whole expanded company is redrawn rather than the one
+        // row — otherwise the last free pick stays advertised on ten rows.
+        if (paid_with === "free_pick") {
+          const host = row.closest("[data-contacts-for]");
+          if (host && host.dataset.contactsFor) {
+            loadCompanyContacts(host.dataset.contactsFor, host);
+          } else {
+            row.outerHTML = contactRow(contact);
+          }
+        } else {
+          row.outerHTML = contactRow(contact);
+        }
       } else if (row && state.drawerLead) {
         // The drawer's point-of-contact list re-fetches rather than patching
         // one card in place — it also carries each contact's activity log,
@@ -2728,7 +2777,11 @@ async function onCardClick(e) {
         loadContacts(state.drawerLead);
       }
 
-      toast(`Unlocked — ${credits} credit${credits === 1 ? "" : "s"} left`);
+      toast(
+        paid_with === "free_pick"
+          ? "Free unlock used — it's on the company's log"
+          : `Unlocked — ${credits} credit${credits === 1 ? "" : "s"} left`
+      );
       loadCredits();
     } catch (err) {
       unlockBtn.disabled = false;
@@ -2863,16 +2916,7 @@ async function onCardClick(e) {
     if (arrow) arrow.textContent = "\u25BE";
     if (chip) chip.classList.add("is-open");
     box.hidden = false;
-    box.innerHTML = `<p class="muted" style="padding:10px 16px">Loading contacts…</p>`;
-
-    try {
-      const { contacts } = await api(`/api/leads/${id}/people`);
-      box.innerHTML = contacts.length
-        ? `<div class="ct-table">${contactHead()}${contacts.map(contactRow).join("")}</div>`
-        : `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
-    } catch (err) {
-      box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
-    }
+    await loadCompanyContacts(id, box);
     return;
   }
 
@@ -2920,7 +2964,7 @@ async function onCardClick(e) {
             `${source === "newspaper" ? "Pick up" : "Claim"} ${
               actionBtn.dataset.company || "this company"
             } for ${cost} credits?\n\n` +
-              `· Its top ${c.free_contacts} contacts open up straight away, free\n` +
+              `· ${c.free_contacts} free contact unlocks, to spend on whoever you choose\n` +
               `· Nobody else can claim or unlock anyone there while you hold it\n` +
               `· It moves into My Outreach\n\n` +
               `You get credits back when it ends:\n` +
@@ -2971,9 +3015,9 @@ async function onCardClick(e) {
           act === "release" && settlement
             ? ` — ${settlement.label}`
             : act !== "release" && lead && lead.credits_spent
-            ? ` · ${lead.credits_spent} credits spent, ${lead.free_unlocked} contact${
-                lead.free_unlocked === 1 ? "" : "s"
-              } unlocked free`
+            ? ` · ${lead.credits_spent} credits spent, ${lead.free_allowance} free unlock${
+                lead.free_allowance === 1 ? "" : "s"
+              } to spend`
             : "";
 
         toast(
@@ -3004,6 +3048,55 @@ async function onCardClick(e) {
   if (state.tab !== "mine") return;
   const row = e.target.closest("[data-lead]");
   if (row) openDrawer(row.dataset.lead);
+}
+
+/**
+ * The people under one company in All Leads.
+ *
+ * Shared by the expander and by anything that changes what the rows should
+ * offer. Spending a free unlock is the case that matters: it changes every
+ * other row at that company, because there is now one fewer pick to go
+ * round, so the whole table is redrawn rather than the row that was clicked.
+ */
+async function loadCompanyContacts(leadId, box) {
+  box.innerHTML = `<p class="muted" style="padding:10px 16px">Loading contacts…</p>`;
+
+  try {
+    const { contacts, picks } = await api(`/api/leads/${leadId}/people`);
+    if (!contacts.length) {
+      box.innerHTML = `<p class="muted" style="padding:10px 16px">No contacts on file for this company yet.</p>`;
+      return;
+    }
+
+    // Every row needs to know how many picks are left, not just whether one
+    // is available — the button says "2 left", and that has to be the same
+    // number on every row.
+    const remaining = picks && picks.holds ? picks.remaining : 0;
+    for (const c of contacts) c.picks_remaining = remaining;
+
+    box.innerHTML =
+      freePicksBanner(picks) +
+      `<div class="ct-table">${contactHead()}${contacts.map(contactRow).join("")}</div>`;
+  } catch (err) {
+    box.innerHTML = `<p class="muted" style="padding:10px 16px">${esc(err.message)}</p>`;
+  }
+}
+
+/** A line above the table when the viewer is holding free unlocks here. */
+function freePicksBanner(picks) {
+  if (!picks || !picks.holds || !picks.granted) return "";
+
+  if (picks.remaining > 0) {
+    return `<div class="picks-banner">
+        <strong>${picks.remaining} of ${picks.granted} free unlocks left here.</strong>
+        Choose who's worth opening — a pick can't be moved once it's spent, and it's
+        logged against your name.
+      </div>`;
+  }
+
+  return `<div class="picks-banner is-spent">
+      All ${picks.granted} free unlocks spent at this company. Anyone else here is at the usual price.
+    </div>`;
 }
 
 // ── Drawer ─────────────────────────────────────────────────────────────────
@@ -3062,6 +3155,77 @@ async function openDrawer(id) {
 }
 
 /**
+ * Who spent which free unlock, and which claims still have some left.
+ *
+ * Two lists rather than one, because they answer opposite questions: the
+ * first is "was that a sensible person to open", the second is "is anyone
+ * holding a company they haven't started on".
+ */
+async function renderFreePicks(root) {
+  const box = root.querySelector("#free-picks");
+  if (!box) return;
+
+  let data;
+  try {
+    data = await api("/api/credits/free-picks");
+  } catch (err) {
+    box.innerHTML = `<p class="hint">Not available yet — run <code>db/migrate-fresh-picks.sql</code>. (${esc(
+      err.message
+    )})</p>`;
+    return;
+  }
+
+  const when = (d) => new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+
+  const spent = data.picks.length
+    ? `<div class="rows">
+         ${data.picks
+           .slice(0, 40)
+           .map(
+             (p) => `<div class="row">
+               <div class="row-main">
+                 <strong>${esc(p.contact_name)}</strong>
+                 <span>${esc(p.contact_role || "—")} · ${esc(p.company)} · ${esc(p.user_name)}</span>
+               </div>
+               <div class="row-actions">
+                 <span class="pick-worth" title="What this contact would have cost if they'd paid">
+                   worth ${p.would_have_cost}cr
+                 </span>
+                 <span class="muted">${when(p.unlocked_at)}</span>
+               </div>
+             </div>`
+           )
+           .join("")}
+       </div>`
+    : `<p class="hint">Nobody has spent a free unlock yet.</p>`;
+
+  const open = data.open.length
+    ? `<div class="rows">
+         ${data.open
+           .map((o) => {
+             const left = Math.max(0, o.free_allowance - o.used);
+             return `<div class="row">
+               <div class="row-main">
+                 <strong>${esc(o.company)}</strong>
+                 <span>${esc(o.user_name)} · claimed ${when(o.claimed_at)}</span>
+               </div>
+               <div class="row-actions">
+                 <span class="${left === o.free_allowance ? "pick-unspent" : "muted"}">
+                   ${left} of ${o.free_allowance} left
+                 </span>
+               </div>
+             </div>`;
+           })
+           .join("")}
+       </div>`
+    : `<p class="hint">No claims running.</p>`;
+
+  box.innerHTML = `
+    <h4 class="sub-head">Spent</h4>${spent}
+    <h4 class="sub-head" style="margin-top:16px">Claims running now</h4>${open}`;
+}
+
+/**
  * The credit rules, as eight numbers and a worked example.
  *
  * The example is the point: "50%" is a policy and "8 credits" is what someone
@@ -3072,7 +3236,7 @@ async function openDrawer(id) {
 const CREDIT_FIELDS = [
   ["fresh_claim_cost", "Fresh Leads claim costs", "Credits to claim one company from Fresh Leads. Everything below is worked out from this figure."],
   ["newspaper_claim_cost", "Newspaper pick-up costs", "Cheaper on purpose — these leads have already been failed once. Pays back the same."],
-  ["free_contacts_per_claim", "Contacts free with a claim", "The most senior ones at that company."],
+  ["free_contacts_per_claim", "Free unlocks per claim", "Banked against the claim. The holder chooses who to spend them on."],
   ["max_active_claims", "Claims held at once", "Per person."],
   ["win_multiplier", "Conversion pays back", "Multiple of the claim cost. 3 means 15 becomes 45."],
   ["refund_pct_3plus", "Lost, 3+ replies", "% of the cost returned."],
@@ -3774,6 +3938,16 @@ async function renderAdmin() {
     </div>
 
     <div class="admin-block" style="margin-bottom:16px">
+      <h3>Free unlocks</h3>
+      <p class="hint">
+        Every free unlock the team has spent, and what each contact would have cost
+        if they'd paid. A run of picks spent on junior contacts, or a claim sitting on
+        unspent ones, is the thing to look for here.
+      </p>
+      <div id="free-picks"><p class="hint">Loading…</p></div>
+    </div>
+
+    <div class="admin-block" style="margin-bottom:16px">
       <h3>Deleted contacts</h3>
       <p class="hint">
         Deleting hides a contact rather than destroying it — its import snapshot,
@@ -4069,6 +4243,7 @@ function wireAdmin() {
   );
 
   renderCreditRules(root);
+  renderFreePicks(root);
 
   root.querySelectorAll("[data-user-credits-save]").forEach((btn) =>
     btn.addEventListener("click", () =>

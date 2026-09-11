@@ -453,6 +453,13 @@ router.get("/:id/people", async (req, res, next) => {
     const lock = await freshCredits.lockFor(lead.name).catch(() => null);
     const lockedOut = Boolean(lock && lock.owner_id !== req.user.id);
 
+    // And, if the viewer is the one holding it, how many free unlocks they
+    // have left to spend here. The rows need it to decide whether to offer
+    // "use a free pick" or the paid price.
+    const picks = await freshCredits
+      .allowanceForCompany(lead.name, req.user.id)
+      .catch(() => ({ granted: 0, used: 0, remaining: 0, holds: false }));
+
     // Same credit gate as All Leads — this endpoint feeds that same expanded
     // contact table, plus the outreach drawer's "people at this company"
     // panel, so a locked contact's email/phone stays hidden everywhere it's
@@ -471,6 +478,7 @@ router.get("/:id/people", async (req, res, next) => {
         c.unlocked = unlocked.has(c.id);
         c.company_locked = lockedOut;
         c.company_locked_by = lockedOut ? lock.owner_name : null;
+        c.free_pick_available = !c.unlocked && picks.remaining > 0;
         if (!c.unlocked) {
           c.email = null;
           c.email_alt = null;
@@ -502,6 +510,7 @@ router.get("/:id/people", async (req, res, next) => {
       company: lead.name,
       contacts,
       lock: lock ? { owner_id: lock.owner_id, owner_name: lock.owner_name, mine: !lockedOut } : null,
+      picks,
     });
   } catch (err) {
     next(err);
@@ -785,7 +794,7 @@ router.post("/:id/claim", async (req, res, next) => {
     if (charge) {
       claimed.credits = charge.balance;
       claimed.credits_spent = charge.cost;
-      claimed.free_unlocked = charge.free_unlocked;
+      claimed.free_allowance = charge.free_allowance;
     }
 
     await logActivity(

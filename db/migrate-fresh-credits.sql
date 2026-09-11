@@ -16,7 +16,7 @@
 --
 -- Safe to re-run.
 -- ---------------------------------------------------------------------------
-
+g
 -- --- the rules -------------------------------------------------------------
 -- One row, forever. The check constraint is what enforces that: a second
 -- insert collides on the primary key instead of silently creating a rival
