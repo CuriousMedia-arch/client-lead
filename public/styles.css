@@ -1850,7 +1850,6 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
   padding: 4px 10px;
   white-space: nowrap;
 }
-.credits-chip svg { width: 13px; height: 13px; fill: currentColor; flex: none; }
 
 /* Unlock-a-contact button — the credit gate, priced by seniority. */
 .unlock-btn {
@@ -2667,7 +2666,9 @@ button.tier:hover .tier-why { border-color: var(--teal); color: var(--teal); }
    inherited button chrome without losing the pill it already was. */
 .credits-wrap { position: relative; }
 
-button.credits-chip { cursor: pointer; font-family: var(--mono); }
+/* No icon in here any more — the dollar glyph read as currency, and these are
+   credits, not money. The pill shape and the tooltip carry the meaning. */
+button.credits-chip { cursor: pointer; font-family: var(--mono); padding: 4px 12px; }
 button.credits-chip:hover { background: var(--amber); color: #fff; }
 
 /* Out of credits is the one state worth shouting about: every Claim button on
