@@ -1385,11 +1385,13 @@ function contactRow(c) {
            ${lockMark()} Free pick${picksLeft ? ` &middot; ${picksLeft} left` : ""}
          </button>
          <button class="unlock-alt" data-unlock-contact="${c.id}"
-                 title="Pay ${cost} credits instead and keep your free unlocks">pay ${cost}</button>
+                 title="Pay ${cost} credits instead and keep your free unlocks">pay${coin(cost)}</button>
        </span>`
     : `<span>
-         <button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${cost} credit${cost === 1 ? "" : "s"} to reveal this contact">
-           ${lockMark()} Unlock &middot; ${cost}cr
+         <button class="unlock-btn is-icon" data-unlock-contact="${c.id}"
+                 title="Spend ${cost} credit${cost === 1 ? "" : "s"} to reveal this contact"
+                 aria-label="Unlock this contact for ${cost} credits">
+           ${lockMark()}${coin(cost)}
          </button>
        </span>`;
 
@@ -1455,6 +1457,20 @@ function contactRow(c) {
         </span>
       </span>
     </div>`;
+}
+
+/**
+ * A credit price, as a coin.
+ *
+ * The number sits inside a filled circle rather than trailing a "cr" suffix:
+ * on a row of buttons the abbreviation gets read as part of the number
+ * ("12cr" scans as one word), while a coin reads as a currency and is skipped
+ * over once you know what it means. The circle takes its colours from
+ * whichever button it sits in, so it inverts with the button on hover rather
+ * than staying a pale disc on a dark ground.
+ */
+function coin(n) {
+  return `<span class="coin" aria-label="${n} credits">${n}</span>`;
 }
 
 function linkedinMark() {
@@ -1916,7 +1932,7 @@ function claimButton(lead, source) {
 
   if (!s.can_claim) {
     return `<span class="claim-blocked">${esc(s.reason)}</span>
-      <button class="btn btn-sm" disabled title="${esc(s.reason)}">Claim &middot; ${cost}cr</button>`;
+      <button class="btn btn-sm" disabled title="${esc(s.reason)}">Claim ${coin(cost)}</button>`;
   }
 
   return `<span class="muted">
@@ -1924,7 +1940,7 @@ function claimButton(lead, source) {
     </span>
     <button class="btn btn-sm btn-primary" data-act="claim" data-source="${source}"
             data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${cost}">
-      Claim &middot; ${cost}cr
+      Claim ${coin(cost)}
     </button>`;
 }
 
@@ -2265,13 +2281,13 @@ function npClaimButton(lead) {
   const np = c.sources.newspaper;
   if (!np.can_claim) {
     return `<button class="btn btn-sm" disabled title="${esc(np.reason)}">
-        Pick this up &middot; ${np.cost}cr
+        Pick this up ${coin(np.cost)}
       </button>`;
   }
 
   return `<button class="btn btn-sm btn-primary" data-act="claim" data-source="newspaper"
                   data-id="${lead.id}" data-company="${esc(lead.company)}" data-cost="${np.cost}">
-      Pick this up &middot; ${np.cost}cr
+      Pick this up ${coin(np.cost)}
     </button>`;
 }
 
@@ -3189,7 +3205,7 @@ async function renderFreePicks(root) {
                </div>
                <div class="row-actions">
                  <span class="pick-worth" title="What this contact would have cost if they'd paid">
-                   worth ${p.would_have_cost}cr
+                   worth ${coin(p.would_have_cost)}
                  </span>
                  <span class="muted">${when(p.unlocked_at)}</span>
                </div>
@@ -3303,8 +3319,8 @@ async function renderCreditRules(root) {
       </p>
       <div class="credit-ladder is-two">
         <span class="cl-head"></span>
-        <span class="cl-head">Fresh · ${cost}cr</span>
-        <span class="cl-head">Paper · ${paper}cr</span>
+        <span class="cl-head">Fresh ${coin(cost)}</span>
+        <span class="cl-head">Paper ${coin(paper)}</span>
         ${row("Client signs", Math.round(cost * (v.win_multiplier || 0)), Math.round(paper * (v.win_multiplier || 0)), "up")}
         ${row("Lost, 3+ replies", pct(v.refund_pct_3plus), p2(v.refund_pct_3plus), "up")}
         ${row("Lost, 2 replies", pct(v.refund_pct_2), p2(v.refund_pct_2), "up")}
@@ -3625,8 +3641,10 @@ async function loadContacts(lead) {
             ? `<span class="ct-locked-cell" title="Claimed by ${esc(c.owner_name || "someone else")} — locked until they release it">
                  ${lockMark()} Claimed
                </span>`
-            : `<button class="unlock-btn" data-unlock-contact="${c.id}" title="Spend ${c.credit_cost} credit${c.credit_cost === 1 ? "" : "s"} to reveal this contact">
-                 ${lockMark()} Unlock &middot; ${c.credit_cost}cr
+            : `<button class="unlock-btn is-icon" data-unlock-contact="${c.id}"
+                       title="Spend ${c.credit_cost} credit${c.credit_cost === 1 ? "" : "s"} to reveal this contact"
+                       aria-label="Unlock this contact for ${c.credit_cost} credits">
+                 ${lockMark()}${coin(c.credit_cost)}
                </button>`
         }
       </p>

@@ -2880,3 +2880,80 @@ button.credits-chip:hover { background: var(--amber); color: #fff; }
   color: var(--ink-faint);
   margin: 12px 0 6px;
 }
+
+/* ══ The credit coin ═════════════════════════════════════════════════════
+   A price, as a filled disc with the number knocked out of it. Replaces the
+   old "12cr" suffix, which scanned as one word rather than as a number and a
+   unit.
+
+   Sized in px, not em. The hosts differ in font-size (an 11px pill button, a
+   13px row, a 20px table cell) and an em-sized disc shrank below the width of
+   two monospace digits on the smallest of them, clipping the number it
+   exists to show.
+
+   Colours are set per host rather than inherited, because the disc has to
+   invert with its button — a pale coin left on a dark hover state is the
+   failure this is avoiding. */
+.coin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 5px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.02em;
+  vertical-align: middle;
+  /* Fallback, for a coin that lands somewhere without its own rule. */
+  background: var(--ink);
+  color: #fff;
+}
+
+/* Icon-only unlock: a padlock and a price, nothing else.
+   The word "Unlock" was doing no work a padlock beside a number wasn't
+   already doing, and dropping it takes the control down to roughly a third
+   of its width in a table where the contact columns are what matter. The
+   button keeps a title and an aria-label, because for anyone reading by
+   screen reader — or hovering because two glyphs aren't self-evident on
+   first encounter — the word is the only thing that says what happens. */
+.unlock-btn.is-icon {
+  gap: 2px;
+  padding: 3px 5px 3px 8px;
+}
+.unlock-btn.is-icon .coin { margin-left: 3px; }
+
+/* Amber unlock button */
+.unlock-btn .coin { background: var(--amber-ink); color: var(--amber-tint); }
+.unlock-btn:hover .coin { background: #fff; color: var(--amber-ink); }
+
+/* Green free-pick button */
+.unlock-btn.is-free .coin { background: #2C6E45; color: var(--green-tint); }
+.unlock-btn.is-free:hover .coin { background: #fff; color: #2C6E45; }
+
+/* The quiet "pay 51" link beside a free pick: outlined, not filled, so it
+   stays the secondary option at a glance. */
+.unlock-alt .coin {
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+/* Dark primary buttons — Claim, Pick this up */
+.btn-primary .coin { background: #fff; color: var(--ink); }
+
+/* Disabled: still legible, muted with the rest of the button */
+.btn:disabled .coin { background: var(--ink-faint); color: #fff; }
+
+/* Admin rows and the rules ladder, both on light ground */
+.pick-worth .coin { background: var(--amber-ink); color: var(--amber-tint); }
+.cl-head .coin { background: var(--ink-faint); color: #fff; }
